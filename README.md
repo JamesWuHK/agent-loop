@@ -2,6 +2,8 @@
 
 **Distributed automation daemon** — GitHub Issues as a task queue, Claude Code as the executor.
 
+Agent Loop 是一个用自身驱动自身开发的框架：把它的 Issues 作为任务源，用它自己跑出来的代码来处理这些 Issues。
+
 ## How It Works
 
 ```
@@ -24,22 +26,71 @@ worktree: auto-cleaned
 ## Quick Start
 
 ```bash
+# Clone this repo
+git clone https://github.com/JamesWuHK/agent-loop.git
+cd agent-loop
+
 # Install dependencies
 bun install
 
-# Configure (creates ~/.agent-loop/config.json)
-agent-loop --repo owner/repo --pat ghp_xxx
+# Configure — daemon 将消费本仓库的 Issues
+agent-loop --repo JamesWuHK/agent-loop --pat ghp_xxx --machine-id my-dev-machine
 
-# Run
+# Run (持续轮询)
 agent-loop
 
-# Or one-shot mode (for CI/testing)
+# 或一次性验证模式
 agent-loop --once
+```
+
+## Self-Hosting（用 Agent Loop 开发 Agent Loop）
+
+Agent Loop 用自己的 Issues 管理自己的开发任务：
+
+1. 在本仓库创建 Issue，打上 `agent:ready` 标签
+2. 启动 daemon，指向本仓库：`--repo JamesWuHK/agent-loop`
+3. Daemon 自动认领、规划、执行、提交 PR
+4. Review PR → Merge → Issue 自动标记 `agent:done`
+
+```
+JamesWuHK/agent-loop
+  Issues (agent:ready) ← daemon polling
+         ↓
+  Planning Agent → Subtasks
+         ↓
+  Claude Code → Changes
+         ↓
+  PR → Review → Merge
+         ↓
+  Issue (agent:done)
+```
+
+## Architecture
+
+```
+agent-loop/
+├── apps/agent-daemon/     # Daemon process (bin: agent-loop)
+│   └── src/
+│       ├── daemon.ts          # Main loop (poll → claim → process)
+│       ├── subtask-executor.ts # Planning agent + subtask loop + HEAD verify
+│       ├── claimer.ts         # Atomic claim via GitHub assignee lock
+│       ├── worktree-manager.ts # git worktree lifecycle + orphan cleanup
+│       ├── agent-executor.ts  # Claude Code CLI runner
+│       ├── pr-reporter.ts    # Idempotent PR creation
+│       ├── config.ts          # Config loading
+│       └── metrics.ts        # Prometheus metrics
+│
+└── packages/agent-shared/  # Shared types + GitHub API
+    └── src/
+        ├── types.ts           # Core types (AgentConfig, Subtask, etc.)
+        ├── github-api.ts     # gh CLI wrapper (GraphQL + REST)
+        ├── state-machine.ts   # Label-based state inference
+        └── subtask-parser.ts  # Planning prompt + output parser
 ```
 
 ## Configuration
 
-Config file: `~/.agent-loop/config.json`
+`~/.agent-loop/config.json`（自动生成，可手动编辑）：
 
 ```json
 {
@@ -47,7 +98,7 @@ Config file: `~/.agent-loop/config.json`
   "repo": "owner/repo",
   "pat": "ghp_xxx",
   "pollIntervalMs": 60000,
-  "concurrency": 2,
+  "concurrency": 1,
   "worktreesDir": "~/.agent-worktrees",
   "agent": {
     "primary": "claude",
@@ -59,25 +110,29 @@ Config file: `~/.agent-loop/config.json`
 }
 ```
 
-## Architecture
+## CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `--repo` | GitHub repo (owner/repo) |
+| `--pat` | GitHub PAT (or set `GITHUB_TOKEN`) |
+| `--concurrency N` | Max concurrent agent tasks |
+| `--poll-interval MS` | Poll interval (default: 60000ms) |
+| `--machine-id` | Override machine ID |
+| `--dry-run` | Simulate without making changes |
+| `--once` | Run one cycle then exit |
+| `--health-port PORT` | Health check port (default: 9310) |
+| `--metrics-port PORT` | Prometheus metrics port (default: 9090) |
+
+## State Machine
 
 ```
-apps/agent-daemon/     # Daemon process
-  src/
-    daemon.ts          # Main loop (poll → claim → process)
-    claimer.ts         # Atomic claim via GitHub assignee lock
-    worktree-manager.ts # git worktree lifecycle + orphan cleanup
-    subtask-executor.ts # Planning agent + sequential subtask loop
-    agent-executor.ts  # Claude Code CLI runner
-    pr-reporter.ts     # Idempotent PR creation
-    config.ts          # Config loading
-
-packages/agent-shared/ # Shared types + GitHub API
-  src/
-    types.ts           # Core types (AgentConfig, Subtask, etc.)
-    github-api.ts      # gh CLI wrapper (GraphQL + REST)
-    state-machine.ts   # Label-based state inference
-    subtask-parser.ts  # Planning prompt + output parser
+agent:ready    → claimed (assignee + label)
+agent:claimed  → working (daemon starts)
+agent:working  → done (PR created)
+                → failed (agent error)
+                → stale (daemon shutdown / 30min timeout)
+agent:stale    → ready (re-enqueue)
 ```
 
 ## Health & Metrics
