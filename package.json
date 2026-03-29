@@ -1,0 +1,19 @@
+{
+  "name": "agent-loop",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "bun@1.3.6",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "bun run apps/agent-daemon/src/index.ts",
+    "dev": "bun --watch run apps/agent-daemon/src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "prom-client": "^15.1.3"
+  }
+}
