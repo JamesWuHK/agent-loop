@@ -45,6 +45,8 @@ agent-loop --once
 
 ## Self-Hosting（用 Agent Loop 开发 Agent Loop）
 
+Issue body format is defined in [docs/issue-writing.md](docs/issue-writing.md).
+
 Agent Loop 用自己的 Issues 管理自己的开发任务：
 
 1. 在本仓库创建 Issue，打上 `agent:ready` 标签
