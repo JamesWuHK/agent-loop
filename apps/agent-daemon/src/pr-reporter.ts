@@ -31,6 +31,7 @@ export async function createOrFindPr(
   branch: string,
   issueNumber: number,
   issueTitle: string,
+  worktreePath: string,
   config: AgentConfig,
   logger = console,
 ): Promise<{ prNumber: number; prUrl: string }> {
@@ -56,7 +57,7 @@ export async function createOrFindPr(
   }
 
   // Push branch first if not pushed yet
-  await $`git push -u origin ${branch}`.cwd(config.worktreesBase).quiet()
+  await $`git push -u origin ${branch}`.cwd(worktreePath).quiet()
 
   const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
   const pr = await createPr(branch, issueNumber, issueTitle, body, config)

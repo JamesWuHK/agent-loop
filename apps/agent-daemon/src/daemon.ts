@@ -1,7 +1,7 @@
 import type { AgentConfig, AgentIssue, DaemonStatus, WorktreeInfo } from '@agent/shared'
-import { ISSUE_LABELS, transitionIssueState } from '@agent/shared'
+import { ISSUE_LABELS, listOpenAgentIssues, transitionIssueState, getPrState } from '@agent/shared'
 import { pollAndClaim } from './claimer'
-import { createWorktree, removeWorktree, cleanupOrphanedWorktrees } from './worktree-manager'
+import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, getWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor } from './subtask-executor'
 import { createOrFindPr } from './pr-reporter'
 import {
@@ -14,7 +14,6 @@ import {
   setConcurrencyLimit,
   setDaemonUptime,
   startMetricsServer,
-  METRICS_PORT_DEFAULT,
   type MetricsServer,
 } from './metrics'
 
@@ -71,12 +70,74 @@ export class AgentDaemon {
 
     // Clean up orphaned worktrees from previous runs
     await cleanupOrphanedWorktrees(this.config)
+    await this.reconcileIssueStates()
 
     // Start HTTP health check server
     this.startHealthServer()
 
     this.running = true
     this.scheduleNextPoll()
+  }
+
+  private async reconcileIssueStates(): Promise<void> {
+    const issues = await listOpenAgentIssues(this.config)
+
+    for (const issue of issues) {
+      if (issue.state === 'done') continue
+
+      const worktree = await getWorktreeForIssue(issue.number, this.config)
+      const branch = `agent/${issue.number}/${this.config.machineId}`
+      const prState = await getPrState(branch, this.config)
+
+      if (prState === 'open' || prState === 'merged') {
+        await transitionIssueState(
+          issue.number,
+          ISSUE_LABELS.DONE,
+          null,
+          {
+            event: 'done',
+            machine: this.config.machineId,
+            ts: new Date().toISOString(),
+            reason: 'startup-reconcile-pr-exists',
+          },
+          this.config,
+        )
+        continue
+      }
+
+      if (issue.state === 'working' || issue.state === 'claimed') {
+        if (worktree === null) {
+          await transitionIssueState(
+            issue.number,
+            ISSUE_LABELS.STALE,
+            null,
+            {
+              event: 'stale',
+              machine: this.config.machineId,
+              ts: new Date().toISOString(),
+              reason: 'startup-reconcile-missing-worktree',
+            },
+            this.config,
+          )
+        }
+        continue
+      }
+
+      if (issue.state === 'failed' || issue.state === 'stale') {
+        await transitionIssueState(
+          issue.number,
+          ISSUE_LABELS.READY,
+          null,
+          {
+            event: 'stale-requeue',
+            machine: this.config.machineId,
+            ts: new Date().toISOString(),
+            reason: 'startup-reconcile-requeue',
+          },
+          this.config,
+        )
+      }
+    }
   }
 
   private startHealthServer(): void {
@@ -172,6 +233,12 @@ export class AgentDaemon {
     }
   }
 
+  async runOneCycle(): Promise<void> {
+    if (!this.running || this.shutdownRequested) return
+    await this.pollCycle()
+    await this.waitForInFlightProcess()
+  }
+
   private scheduleNextPoll(): void {
     if (this.shutdownRequested) return
 
@@ -244,7 +311,6 @@ export class AgentDaemon {
       )
 
       // Create worktree
-      const worktreeStartTime = Date.now()
       const worktreePath = await createWorktree(issueNumber, this.config)
 
       const wt: WorktreeInfo = {
@@ -270,7 +336,7 @@ export class AgentDaemon {
 
       if (result.success) {
         // Create PR
-        const pr = await createOrFindPr(branch, issueNumber, issue.title, this.config, this.logger)
+        const pr = await createOrFindPr(branch, issueNumber, issue.title, worktreePath, this.config, this.logger)
 
         await transitionIssueState(
           issueNumber,

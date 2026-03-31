@@ -1,5 +1,5 @@
 import { $ } from 'bun'
-import type { AgentConfig, AgentResult, Subtask } from '@agent/shared'
+import type { AgentConfig, Subtask } from '@agent/shared'
 import {
   buildPlanningPrompt,
   parsePlanningOutput,
@@ -8,7 +8,8 @@ import {
 } from '@agent/shared'
 
 const PLANNING_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes for planning
-const SUBTASK_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes per subtask
+const SUBTASK_TIMEOUT_MS = 20 * 60 * 1000 // 20 minutes per subtask
+const MAX_SUBTASK_ATTEMPTS = 2
 
 export interface SubtaskExecutorResult {
   success: boolean
@@ -76,7 +77,10 @@ export async function runSubtaskExecutor(
     if (!subtask) break // all done or all failed
 
     lastFailedId = null // reset on each new subtask attempt
-    logger.log(`[subtask] executing #${subtask.order}: "${subtask.title}"`)
+    subtask.attempts = (subtask.attempts ?? 0) + 1
+    logger.log(
+      `[subtask] executing #${subtask.order} (attempt ${subtask.attempts}/${MAX_SUBTASK_ATTEMPTS}): "${subtask.title}"`,
+    )
 
     // Capture HEAD before agent runs
     const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
@@ -94,6 +98,12 @@ export async function runSubtaskExecutor(
     if (result.exitCode !== 0) {
       logger.warn(`[subtask] #${subtask.id} agent failed (exit ${result.exitCode})`)
       subtask.status = 'failed'
+      if ((subtask.attempts ?? 0) >= MAX_SUBTASK_ATTEMPTS) {
+        logger.error(
+          `[subtask] #${subtask.id} exceeded max attempts (${MAX_SUBTASK_ATTEMPTS}): ${result.stderr || 'unknown error'}`,
+        )
+        break
+      }
       lastFailedId = subtask.id
       continue
     }
@@ -103,8 +113,20 @@ export async function runSubtaskExecutor(
     const realCommit = afterHead !== beforeHead
 
     if (!realCommit) {
+      const workingTreeClean = (await $`git -C ${worktreePath} status --short`.quiet().text()).trim() === ''
+      if (workingTreeClean) {
+        logger.log(`[subtask] #${subtask.id} exited 0 with no new commit, but worktree is clean — treating as already satisfied`)
+        subtask.status = 'done'
+        lastFailedId = null
+        continue
+      }
+
       logger.warn(`[subtask] #${subtask.id} agent exited 0 but no commit was made — treating as failed`)
       subtask.status = 'failed'
+      if ((subtask.attempts ?? 0) >= MAX_SUBTASK_ATTEMPTS) {
+        logger.error(`[subtask] #${subtask.id} exceeded max attempts without producing a commit`)
+        break
+      }
       lastFailedId = subtask.id
       continue
     }
@@ -147,8 +169,8 @@ async function runAgentWithTimeout(
   prompt: string,
   worktreePath: string,
   timeoutMs: number,
-  logger: typeof console,
-  config: AgentConfig,
+  _logger: typeof console,
+  _config: AgentConfig,
 ): Promise<AgentRunResult> {
   // Build clean env: remove VSCode plugin mode vars
   const cleanEnv: Record<string, string> = {}

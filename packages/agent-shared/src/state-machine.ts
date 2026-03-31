@@ -1,5 +1,5 @@
 import { ISSUE_LABELS } from './types'
-import type { IssueLabel, IssueState, ClaimEvent } from './types'
+import type { IssueLabel, IssueState, ClaimEvent, IssueDependencyMetadata } from './types'
 
 // Valid state transitions
 const VALID_TRANSITIONS: Record<IssueState, IssueState[]> = {
@@ -55,5 +55,64 @@ export function parseEventComment(body: string): ClaimEvent | null {
     return JSON.parse(match[1]!.trim()) as ClaimEvent
   } catch {
     return null
+  }
+}
+
+export function parseIssueDependencyMetadata(
+  body: string,
+  issueNumber?: number,
+): IssueDependencyMetadata {
+  const contextMatch = body.match(/^##\s+Context\b([\s\S]*?)(?=^##\s+|\Z)/m)
+  if (!contextMatch) {
+    return {
+      dependsOn: [],
+      hasDependencyMetadata: false,
+      dependencyParseError: false,
+    }
+  }
+
+  const dependenciesMatch = contextMatch[1]?.match(
+    /^###\s+Dependencies\b([\s\S]*?)(?=^###\s+|^##\s+|\Z)/m,
+  )
+  if (!dependenciesMatch) {
+    return {
+      dependsOn: [],
+      hasDependencyMetadata: false,
+      dependencyParseError: false,
+    }
+  }
+
+  const jsonBlockMatch = dependenciesMatch[1]?.match(/```json\s*([\s\S]*?)```/)
+  if (!jsonBlockMatch) {
+    return {
+      dependsOn: [],
+      hasDependencyMetadata: true,
+      dependencyParseError: true,
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(jsonBlockMatch[1]!.trim()) as { dependsOn?: unknown }
+    const unique = new Set<number>()
+
+    if (Array.isArray(parsed.dependsOn)) {
+      for (const value of parsed.dependsOn) {
+        if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+          if (value !== issueNumber) unique.add(value)
+        }
+      }
+    }
+
+    return {
+      dependsOn: [...unique].sort((a, b) => a - b),
+      hasDependencyMetadata: true,
+      dependencyParseError: false,
+    }
+  } catch {
+    return {
+      dependsOn: [],
+      hasDependencyMetadata: true,
+      dependencyParseError: true,
+    }
   }
 }

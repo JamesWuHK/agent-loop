@@ -9,6 +9,8 @@ export const ISSUE_LABELS = {
   STALE: 'agent:stale',
 } as const
 
+export const AGENT_STATE_LABELS = Object.values(ISSUE_LABELS)
+
 export type IssueLabel = (typeof ISSUE_LABELS)[keyof typeof ISSUE_LABELS]
 
 export type IssueState =
@@ -56,6 +58,16 @@ export interface AgentIssue {
   assignee: string | null
   isClaimable: boolean
   updatedAt: string
+  dependencyIssueNumbers: number[]
+  hasDependencyMetadata: boolean
+  dependencyParseError: boolean
+  claimBlockedBy: number[]
+}
+
+export interface IssueDependencyMetadata {
+  dependsOn: number[]
+  hasDependencyMetadata: boolean
+  dependencyParseError: boolean
 }
 
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
@@ -75,6 +87,7 @@ export interface ClaimEvent {
 export interface AgentConfig {
   machineId: string
   repo: string
+  repoPath: string
   pat: string
   pollIntervalMs: number
   concurrency: number
@@ -126,6 +139,7 @@ export interface Subtask {
   title: string
   status: 'pending' | 'done' | 'failed'
   order: number
+  attempts?: number
 }
 
 // ─── Daemon Status ──────────────────────────────────────────────────────────

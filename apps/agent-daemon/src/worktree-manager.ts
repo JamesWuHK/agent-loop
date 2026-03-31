@@ -8,8 +8,9 @@ import { getPrState } from '@agent/shared'
  * Run a git subcommand synchronously, returning stdout or throwing on error.
  * Only use this for expected-to-succeed operations (create, remove).
  */
-function gitSync(...args: string[]): string {
+function gitSync(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, {
+    cwd,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -19,9 +20,10 @@ function gitSync(...args: string[]): string {
  * Run a git subcommand that may fail (e.g. list worktrees outside a repo).
  * Returns { exitCode, stdout, stderr } without throwing.
  */
-function gitCheck(...args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function gitCheck(cwd: string, ...args: string[]): { exitCode: number; stdout: string; stderr: string } {
   try {
     const stdout = execFileSync('git', args, {
+      cwd,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -63,17 +65,17 @@ function validateBranchName(branch: string): void {
 /**
  * Check if a branch exists locally or on the remote.
  */
-function branchExists(branch: string): boolean {
+function branchExists(branch: string, repoPath: string): boolean {
   // Check local branches
-  const localResult = gitCheck('branch', '--list', branch)
+  const localResult = gitCheck(repoPath, 'branch', '--list', branch)
   if (localResult.exitCode === 0 && localResult.stdout.trim() !== '') {
     return true
   }
 
   // Check remote branches (allow failure - just means it doesn't exist on remote)
-  gitCheck('fetch', '--quiet', 'origin', branch)
+  gitCheck(repoPath, 'fetch', '--quiet', 'origin', branch)
 
-  const remoteResult = gitCheck('rev-parse', '--verify', `origin/${branch}`)
+  const remoteResult = gitCheck(repoPath, 'rev-parse', '--verify', `origin/${branch}`)
   return remoteResult.exitCode === 0
 }
 
@@ -104,23 +106,23 @@ export async function createWorktree(
   }
 
   // Check if branch already exists (from a previous failed run)
-  if (branchExists(branch)) {
+  if (branchExists(branch, config.repoPath)) {
     console.log(`[worktree] branch '${branch}' already exists, removing stale branch`)
     // Delete the stale branch to allow recreation
-    gitCheck('branch', '-D', branch)
+    gitCheck(config.repoPath, 'branch', '-D', branch)
   }
 
   // Create worktree with unique branch based on origin/{defaultBranch}
   try {
-    gitSync('worktree', 'add', worktreePath, '-b', branch, `origin/${config.git.defaultBranch}`)
+    gitSync(config.repoPath, 'worktree', 'add', worktreePath, '-b', branch, `origin/${config.git.defaultBranch}`)
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stderr?: string }
     throw new WorktreeError(`git worktree add failed: ${e.stderr ?? String(err)}`)
   }
 
   // Configure git author for this worktree
-  gitSync('-C', worktreePath, 'config', 'user.name', config.git.authorName)
-  gitSync('-C', worktreePath, 'config', 'user.email', config.git.authorEmail)
+  gitSync(worktreePath, 'config', 'user.name', config.git.authorName)
+  gitSync(worktreePath, 'config', 'user.email', config.git.authorEmail)
 
   console.log(`[worktree] created ${worktreePath} (branch: ${branch})`)
   return worktreePath
@@ -133,11 +135,12 @@ export async function removeWorktree(
   worktreePath: string,
   branch: string,
   force = false,
+  repoPath = worktreePath,
 ): Promise<void> {
   const args = ['worktree', 'remove', worktreePath]
   if (force) args.push('--force')
 
-  const result = gitCheck(...args)
+  const result = gitCheck(repoPath, ...args)
 
   if (result.exitCode !== 0) {
     console.warn(`[worktree] remove failed (may already be removed): ${result.stderr.trim()}`)
@@ -145,7 +148,7 @@ export async function removeWorktree(
   }
 
   // Also delete the branch
-  gitCheck('branch', '-D', branch)
+  gitCheck(repoPath, 'branch', '-D', branch)
   console.log(`[worktree] removed ${worktreePath}`)
 }
 
@@ -153,7 +156,7 @@ export async function removeWorktree(
  * List all worktrees for this machine.
  */
 export async function listWorktrees(config: AgentConfig): Promise<WorktreeInfo[]> {
-  const result = gitCheck('worktree', 'list', '--json')
+  const result = gitCheck(config.repoPath, 'worktree', 'list', '--json')
 
   if (result.exitCode !== 0) {
     // Not in a git repository — return empty list
@@ -183,6 +186,14 @@ export async function listWorktrees(config: AgentConfig): Promise<WorktreeInfo[]
     .filter((wt) => wt.machineId === config.machineId)
 }
 
+export async function getWorktreeForIssue(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<WorktreeInfo | null> {
+  const worktrees = await listWorktrees(config)
+  return worktrees.find((wt) => wt.issueNumber === issueNumber) ?? null
+}
+
 /**
  * Clean up orphaned worktrees on startup.
  * A worktree is orphaned if its PR is merged or closed.
@@ -195,7 +206,7 @@ export async function cleanupOrphanedWorktrees(config: AgentConfig): Promise<voi
 
     if (prState === 'merged' || prState === 'closed') {
       console.log(`[worktree] cleaning up orphaned worktree ${wt.path} (PR is ${prState})`)
-      await removeWorktree(wt.path, wt.branch, true)
+      await removeWorktree(wt.path, wt.branch, true, config.repoPath)
     }
   }
 }

@@ -66,6 +66,7 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
   const config: AgentConfig = {
     machineId,
     repo,
+    repoPath: (fileConfig as Partial<AgentConfig>).repoPath ?? '/Users/wujames/devresp',
     pat,
     pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
     concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,

@@ -61,6 +61,7 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
       title: stripped,
       status: 'pending',
       order: order++,
+      attempts: 0,
     })
 
     if (order > startOrder + 9) break // safety: max 10 subtasks
@@ -73,6 +74,7 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
       title: `Investigate and fix: ${output.slice(0, 100).trim() || 'unknown task'}`,
       status: 'pending',
       order: startOrder,
+      attempts: 0,
     }]
   }
 
@@ -114,9 +116,10 @@ Your specific task is: **${subtask.title}**
 ## Instructions
 1. Read the codebase to understand the current state.
 2. Make the necessary code changes to complete this subtask.
-3. Run: \`git status --short\` — if empty, the file is already correct. In that case, run: \`echo "NO_CHANGES" && exit 1\`
-4. Commit with message: \`fix #${subtask.id}: ${subtask.title}\`
-5. Push to origin
-6. Run: \`git log main..HEAD --oneline\` — verify at least one commit appears. If empty, the commit failed. Run: \`echo "COMMIT_FAILED" && exit 1\`
+3. If this subtask involves React/UI tests in apps/desktop, use the Vitest runner configured by the app (for example: \`bun run --cwd apps/desktop test -- src/pages/LoginPage.test.tsx\`). Do NOT use plain \`bun test\` for jsdom/Vitest tests.
+4. Run: \`git status --short\` — if empty, first verify whether the requested behavior is already implemented and covered by the current HEAD. If it is already satisfied, exit 0 without making changes.
+5. If code changes were required, commit with message: \`fix #${subtask.id}: ${subtask.title}\`
+6. Push to origin only if a new commit was created.
+7. If a new commit was created, run: \`git log main..HEAD --oneline\` — verify at least one commit appears. If empty, run: \`echo "COMMIT_FAILED" && exit 1\`
 `
 }
