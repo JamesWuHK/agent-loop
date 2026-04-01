@@ -1,7 +1,7 @@
 import type { AgentConfig, AgentIssue, DaemonStatus, WorktreeInfo } from '@agent/shared'
-import { ISSUE_LABELS, transitionIssueState, commentOnPr, setManagedPrReviewLabels } from '@agent/shared'
+import { ISSUE_LABELS, listOpenAgentIssues, transitionIssueState, commentOnPr, setManagedPrReviewLabels } from '@agent/shared'
 import { pollAndClaim } from './claimer'
-import { createWorktree, removeWorktree, cleanupOrphanedWorktrees } from './worktree-manager'
+import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
 import { reviewPr, buildPrReviewComment, type PrReviewResult } from './pr-reviewer'
@@ -74,12 +74,46 @@ export class AgentDaemon {
     // Clean up orphaned worktrees from previous runs
     await cleanupOrphanedWorktrees(this.config)
 
+    // Recover zombie issues: working/claimed issues that lost their local worktree
+    await this.reconcileIssueStates()
+
     // Start HTTP health check server
     this.startHealthServer()
 
     this.running = true
     // Run first poll immediately; subsequent polls scheduled by pollCycle
     await this.pollCycle()
+  }
+
+  /**
+   * Recover zombie issues: if an issue is working/claimed but the local worktree
+   * is gone (crash, manual cleanup, etc.), mark it stale so it can be retried.
+   * Only reconciles issues owned by this machineId.
+   */
+  private async reconcileIssueStates(): Promise<void> {
+    const issues = await listOpenAgentIssues(this.config)
+
+    for (const issue of issues) {
+      // Only act on working/claimed issues from this machine
+      if (issue.state !== 'working' && issue.state !== 'claimed') continue
+      if (issue.assignee !== this.config.machineId && issue.assignee !== null) continue
+
+      if (!hasWorktreeForIssue(issue.number, this.config)) {
+        this.logger.log(`[daemon] zombie issue #${issue.number} (${issue.state}) has no local worktree, marking stale`)
+        await transitionIssueState(
+          issue.number,
+          ISSUE_LABELS.STALE,
+          issue.state === 'working' ? ISSUE_LABELS.WORKING : ISSUE_LABELS.CLAIMED,
+          {
+            event: 'stale',
+            machine: this.config.machineId,
+            ts: new Date().toISOString(),
+            reason: 'startup-reconcile-missing-worktree',
+          },
+          this.config,
+        )
+      }
+    }
   }
 
   private startHealthServer(): void {

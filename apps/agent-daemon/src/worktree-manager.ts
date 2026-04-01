@@ -203,3 +203,12 @@ export async function cleanupOrphanedWorktrees(config: AgentConfig): Promise<voi
 export class WorktreeError extends Error {
   name = 'WorktreeError'
 }
+
+/**
+ * Check whether a worktree exists locally for the given issue + machineId.
+ * Only matches worktrees owned by this machine.
+ */
+export function hasWorktreeForIssue(issueNumber: number, config: AgentConfig): boolean {
+  const worktreePath = resolve(config.worktreesBase, `issue-${issueNumber}-${config.machineId}`)
+  return existsSync(worktreePath)
+}
