@@ -77,8 +77,8 @@ async function main() {
     await daemon.start()
 
     if (cliArgs.once) {
-      console.log('[agent-loop] --once mode: running one poll cycle...')
-      await daemon.runOneCycle()
+      console.log('[agent-loop] --once mode: waiting for in-flight process...')
+      await daemon.waitForInFlightProcess()
       await daemon.stop()
       process.exit(0)
     }

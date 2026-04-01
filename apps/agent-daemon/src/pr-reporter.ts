@@ -2,6 +2,15 @@ import { $ } from 'bun'
 import type { AgentConfig } from '@agent/shared'
 import { checkPrExists, createPr } from '@agent/shared'
 
+export async function pushBranch(
+  worktreePath: string,
+  branch: string,
+  logger = console,
+): Promise<void> {
+  await $`git -C ${worktreePath} push -u origin ${branch}`.quiet()
+  logger.log(`[pr] pushed branch ${branch}`)
+}
+
 const PR_BODY_TEMPLATE = (issueNumber: number, machineId: string) => `
 ## Summary
 
@@ -28,10 +37,10 @@ Fixes #${issueNumber}
  * Checks if PR already exists before creating.
  */
 export async function createOrFindPr(
+  worktreePath: string,
   branch: string,
   issueNumber: number,
   issueTitle: string,
-  worktreePath: string,
   config: AgentConfig,
   logger = console,
 ): Promise<{ prNumber: number; prUrl: string }> {
@@ -57,7 +66,7 @@ export async function createOrFindPr(
   }
 
   // Push branch first if not pushed yet
-  await $`git push -u origin ${branch}`.cwd(worktreePath).quiet()
+  await pushBranch(worktreePath, branch, logger)
 
   const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
   const pr = await createPr(branch, issueNumber, issueTitle, body, config)

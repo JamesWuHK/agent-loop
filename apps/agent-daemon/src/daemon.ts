@@ -1,9 +1,10 @@
 import type { AgentConfig, AgentIssue, DaemonStatus, WorktreeInfo } from '@agent/shared'
-import { ISSUE_LABELS, listOpenAgentIssues, transitionIssueState, getPrState } from '@agent/shared'
+import { ISSUE_LABELS, transitionIssueState, commentOnPr, setManagedPrReviewLabels } from '@agent/shared'
 import { pollAndClaim } from './claimer'
-import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, getWorktreeForIssue } from './worktree-manager'
-import { runSubtaskExecutor } from './subtask-executor'
-import { createOrFindPr } from './pr-reporter'
+import { createWorktree, removeWorktree, cleanupOrphanedWorktrees } from './worktree-manager'
+import { runSubtaskExecutor, runReviewAutoFix } from './subtask-executor'
+import { createOrFindPr, pushBranch } from './pr-reporter'
+import { reviewPr, buildPrReviewComment, type PrReviewResult } from './pr-reviewer'
 import {
   recordPoll,
   recordPollDuration,
@@ -14,6 +15,7 @@ import {
   setConcurrencyLimit,
   setDaemonUptime,
   startMetricsServer,
+  METRICS_PORT_DEFAULT,
   type MetricsServer,
 } from './metrics'
 
@@ -41,6 +43,7 @@ export class AgentDaemon {
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
   private _inFlightProcess: Promise<void> | null = null
+  private static readonly MAX_REVIEW_FIX_RETRIES = 1
 
   constructor(
     private config: AgentConfig,
@@ -70,74 +73,13 @@ export class AgentDaemon {
 
     // Clean up orphaned worktrees from previous runs
     await cleanupOrphanedWorktrees(this.config)
-    await this.reconcileIssueStates()
 
     // Start HTTP health check server
     this.startHealthServer()
 
     this.running = true
-    this.scheduleNextPoll()
-  }
-
-  private async reconcileIssueStates(): Promise<void> {
-    const issues = await listOpenAgentIssues(this.config)
-
-    for (const issue of issues) {
-      if (issue.state === 'done') continue
-
-      const worktree = await getWorktreeForIssue(issue.number, this.config)
-      const branch = `agent/${issue.number}/${this.config.machineId}`
-      const prState = await getPrState(branch, this.config)
-
-      if (prState === 'open' || prState === 'merged') {
-        await transitionIssueState(
-          issue.number,
-          ISSUE_LABELS.DONE,
-          null,
-          {
-            event: 'done',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: 'startup-reconcile-pr-exists',
-          },
-          this.config,
-        )
-        continue
-      }
-
-      if (issue.state === 'working' || issue.state === 'claimed') {
-        if (worktree === null) {
-          await transitionIssueState(
-            issue.number,
-            ISSUE_LABELS.STALE,
-            null,
-            {
-              event: 'stale',
-              machine: this.config.machineId,
-              ts: new Date().toISOString(),
-              reason: 'startup-reconcile-missing-worktree',
-            },
-            this.config,
-          )
-        }
-        continue
-      }
-
-      if (issue.state === 'failed' || issue.state === 'stale') {
-        await transitionIssueState(
-          issue.number,
-          ISSUE_LABELS.READY,
-          null,
-          {
-            event: 'stale-requeue',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: 'startup-reconcile-requeue',
-          },
-          this.config,
-        )
-      }
-    }
+    // Run first poll immediately; subsequent polls scheduled by pollCycle
+    await this.pollCycle()
   }
 
   private startHealthServer(): void {
@@ -233,12 +175,6 @@ export class AgentDaemon {
     }
   }
 
-  async runOneCycle(): Promise<void> {
-    if (!this.running || this.shutdownRequested) return
-    await this.pollCycle()
-    await this.waitForInFlightProcess()
-  }
-
   private scheduleNextPoll(): void {
     if (this.shutdownRequested) return
 
@@ -289,6 +225,59 @@ export class AgentDaemon {
     this.scheduleNextPoll()
   }
 
+  private async reviewAndPossiblyAutoFix(
+    issue: AgentIssue,
+    worktreePath: string,
+    branch: string,
+    prNumber: number,
+    prUrl: string,
+  ): Promise<{ approved: boolean; review: PrReviewResult }> {
+    const firstReview = await reviewPr(prNumber, prUrl, this.config, this.logger)
+    await commentOnPr(prNumber, buildPrReviewComment(prNumber, firstReview, 1, firstReview.approved && firstReview.canMerge ? 'approved' : 'retrying'), this.config)
+
+    if (firstReview.approved && firstReview.canMerge) {
+      await setManagedPrReviewLabels(prNumber, 'approved', this.config)
+      return { approved: true, review: firstReview }
+    }
+
+    await setManagedPrReviewLabels(prNumber, 'retry', this.config)
+
+    const fixResult = await runReviewAutoFix(
+      worktreePath,
+      issue.number,
+      prNumber,
+      prUrl,
+      firstReview.reason,
+      this.config,
+      this.logger,
+    )
+
+    if (!fixResult.success) {
+      const failedReview: PrReviewResult = {
+        approved: false,
+        canMerge: false,
+        reason: `Auto-fix failed: ${fixResult.error ?? 'unknown error'}`,
+        reviewFailed: true,
+      }
+      await commentOnPr(prNumber, buildPrReviewComment(prNumber, failedReview, 2, 'human-needed'), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+      return { approved: false, review: failedReview }
+    }
+
+    await pushBranch(worktreePath, branch, this.logger)
+    const secondReview = await reviewPr(prNumber, prUrl, this.config, this.logger)
+
+    if (secondReview.approved && secondReview.canMerge) {
+      await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'approved'), this.config)
+      await setManagedPrReviewLabels(prNumber, 'approved', this.config)
+      return { approved: true, review: secondReview }
+    }
+
+    await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'human-needed'), this.config)
+    await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+    return { approved: false, review: secondReview }
+  }
+
   private async processIssue(issue: AgentIssue): Promise<void> {
     const issueNumber = issue.number
     const processingStartTime = Date.now()
@@ -311,6 +300,7 @@ export class AgentDaemon {
       )
 
       // Create worktree
+      const worktreeStartTime = Date.now()
       const worktreePath = await createWorktree(issueNumber, this.config)
 
       const wt: WorktreeInfo = {
@@ -335,31 +325,59 @@ export class AgentDaemon {
       )
 
       if (result.success) {
-        // Create PR
-        const pr = await createOrFindPr(branch, issueNumber, issue.title, worktreePath, this.config, this.logger)
-
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.DONE,
-          ISSUE_LABELS.WORKING,
-          {
-            event: 'done',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            prNumber: pr.prNumber,
-          },
-          this.config,
+        const pr = await createOrFindPr(worktreePath, branch, issueNumber, issue.title, this.config, this.logger)
+        const reviewOutcome = await this.reviewAndPossiblyAutoFix(
+          issue,
+          worktreePath,
+          branch,
+          pr.prNumber,
+          pr.prUrl,
         )
 
-        const doneCount = result.subtasks.filter(s => s.status === 'done').length
-        this.logger.log(`[daemon] issue #${issueNumber} done! ${doneCount}/${result.subtasks.length} subtasks, PR: #${pr.prNumber}`)
-        recordIssueProcessed('done')
-        recordPrCreated()
+        if (reviewOutcome.approved) {
+          await transitionIssueState(
+            issueNumber,
+            ISSUE_LABELS.DONE,
+            ISSUE_LABELS.WORKING,
+            {
+              event: 'done',
+              machine: this.config.machineId,
+              ts: new Date().toISOString(),
+              prNumber: pr.prNumber,
+              prReview: reviewOutcome.review,
+            },
+            this.config,
+          )
 
-        // Cleanup worktree
-        await removeWorktree(worktreePath, branch)
-        this.activeWorktrees.delete(issueNumber)
-        setActiveWorktrees(this.activeWorktrees.size)
+          const doneCount = result.subtasks.filter(s => s.status === 'done').length
+          this.logger.log(`[daemon] issue #${issueNumber} done! ${doneCount}/${result.subtasks.length} subtasks, PR: #${pr.prNumber}`)
+          recordIssueProcessed('done')
+          recordPrCreated()
+
+          await removeWorktree(worktreePath, branch)
+          this.activeWorktrees.delete(issueNumber)
+          setActiveWorktrees(this.activeWorktrees.size)
+        } else {
+          await transitionIssueState(
+            issueNumber,
+            ISSUE_LABELS.FAILED,
+            ISSUE_LABELS.WORKING,
+            {
+              event: 'failed',
+              machine: this.config.machineId,
+              ts: new Date().toISOString(),
+              prNumber: pr.prNumber,
+              reason: reviewOutcome.review.reason,
+              prReview: reviewOutcome.review,
+            },
+            this.config,
+          )
+
+          this.logger.error(`[daemon] issue #${issueNumber} failed review and needs human intervention: PR #${pr.prNumber}`)
+          recordIssueProcessed('failed')
+          this.activeWorktrees.delete(issueNumber)
+          setActiveWorktrees(this.activeWorktrees.size)
+        }
       } else {
         await transitionIssueState(
           issueNumber,

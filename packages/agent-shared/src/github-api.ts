@@ -1,8 +1,8 @@
 /// <reference types="bun-types" />
 import { $ } from 'bun'
 import { writeFileSync } from 'node:fs'
-import type { AgentConfig, AgentIssue, ClaimEvent } from './types'
-import { AGENT_STATE_LABELS, ISSUE_LABELS } from './types'
+import type { AgentConfig, AgentIssue, ClaimEvent, GitHubIssue } from './types'
+import { ISSUE_LABELS, PR_REVIEW_LABELS } from './types'
 import { inferState, buildEventComment, parseIssueDependencyMetadata } from './state-machine'
 
 const TMP_COMMENT_FILE = '/tmp/agent-loop-comment.txt'
@@ -14,17 +14,20 @@ async function ghRaw(
   cmd: string,
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const fullCommand = `gh ${cmd} --repo ${config.repo}`
-  const result = await $`bash -lc ${fullCommand}`.env({
-    ...process.env,
-    GH_TOKEN: config.pat,
-  }).quiet()
+  const fullCmd = `gh ${cmd} --repo ${config.repo}`
+  const proc = Bun.spawn(['sh', '-c', fullCmd], {
+    env: { ...process.env, GH_TOKEN: config.pat },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
 
-  return {
-    stdout: await new Response(result.stdout).text(),
-    stderr: await new Response(result.stderr).text(),
-    exitCode: result.exitCode,
-  }
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+
+  return { stdout, stderr, exitCode }
 }
 
 export class GhError extends Error {
@@ -166,8 +169,6 @@ async function enrichClaimability(
   return applyDependencyClaimability(issues, fetchedDeps)
 }
 
-// ─── GraphQL: fetch claimable issues ─────────────────────────────────────────
-
 export async function listOpenAgentIssues(
   config: AgentConfig,
 ): Promise<AgentIssue[]> {
@@ -207,10 +208,12 @@ export async function listOpenAgentIssues(
 
   const mapped = issues
     .map(mapRawIssueNode)
-    .filter((issue: AgentIssue) => issue.labels.some(label => AGENT_STATE_LABELS.includes(label as typeof AGENT_STATE_LABELS[number])))
+    .filter((issue: AgentIssue) => issue.labels.some(label => label.startsWith('agent:')))
 
   return enrichClaimability(mapped, config)
 }
+
+// ─── GraphQL: fetch claimable issues ─────────────────────────────────────────
 
 /**
  * Fetch all open issues with 'agent:ready' label that are not yet claimed.
@@ -220,24 +223,22 @@ export async function fetchClaimableIssues(
   config: AgentConfig,
 ): Promise<import('./types').AgentIssue[]> {
   const issues = await listOpenAgentIssues(config)
-  return issues.filter((issue) => issue.isClaimable)
-}
+  const claimable = issues.filter((issue) => issue.isClaimable)
 
-async function setIssueStateLabel(
-  issueNumber: number,
-  targetLabel: string,
-  config: AgentConfig,
-): Promise<void> {
-  const issue = (await listOpenAgentIssues(config)).find(i => i.number === issueNumber)
-  const currentLabels = issue?.labels ?? []
-  const labelsToRemove = currentLabels.filter(label => AGENT_STATE_LABELS.includes(label as typeof AGENT_STATE_LABELS[number]) && label !== targetLabel)
-
-  const editParts: string[] = [`issue edit ${issueNumber}`, `--add-label "${targetLabel}"`]
-  for (const label of labelsToRemove) {
-    editParts.push(`--remove-label "${label}"`)
+  console.log('[claimability] candidates:')
+  for (const issue of issues) {
+    console.log(
+      `[claimability] #${issue.number} state=${issue.state} assignee=${issue.assignee ?? '-'} `
+      + `deps=${issue.dependencyIssueNumbers.length ? issue.dependencyIssueNumbers.join(',') : '-'} `
+      + `blockedBy=${issue.claimBlockedBy.length ? issue.claimBlockedBy.join(',') : '-'} `
+      + `parseError=${issue.dependencyParseError} claimable=${issue.isClaimable}`,
+    )
   }
-  await ghRaw(editParts.join(' '), config)
+
+  return claimable
 }
+
+// ─── Claim: atomic assign + label ─────────────────────────────────────────────
 
 export interface ClaimResult {
   success: boolean
@@ -254,13 +255,12 @@ export async function claimIssue(
   config: AgentConfig,
   machineId: string,
 ): Promise<ClaimResult> {
-  const { stderr, exitCode } = await ghRaw(
-    `issue edit ${issueNumber} --add-assignee "@me"`,
+  const { stdout, stderr, exitCode } = await ghRaw(
+    `issue edit ${issueNumber} --add-label "${ISSUE_LABELS.CLAIMED}" --add-assignee "@me"`,
     config,
   )
 
   if (exitCode === 0) {
-    await setIssueStateLabel(issueNumber, ISSUE_LABELS.CLAIMED, config)
     // Append claim event comment via temp file to avoid shell escaping issues
     const event: ClaimEvent = {
       event: 'claimed',
@@ -292,11 +292,13 @@ export async function claimIssue(
 export async function transitionIssueState(
   issueNumber: number,
   addLabel: string,
-  _removeLabel: string | null,
+  removeLabel: string | null,
   event: ClaimEvent,
   config: AgentConfig,
 ): Promise<void> {
-  await setIssueStateLabel(issueNumber, addLabel, config)
+  const editParts: string[] = [`issue edit ${issueNumber}`, `--add-label "${addLabel}"`]
+  if (removeLabel) editParts.push(`--remove-label "${removeLabel}"`)
+  await ghRaw(editParts.join(' '), config)
 
   // Add event comment via temp file (gh issue edit has no --comment-file)
   writeFileSync(TMP_COMMENT_FILE, buildEventComment(event), 'utf-8')
@@ -380,4 +382,69 @@ export async function getPrState(
 ): Promise<'open' | 'merged' | 'closed' | null> {
   const result = await checkPrExists(branch, config)
   return result.prState
+}
+
+export async function commentOnPr(
+  prNumber: number,
+  body: string,
+  config: AgentConfig,
+): Promise<void> {
+  const { exitCode, stderr } = await ghRaw(
+    `pr comment ${prNumber} --body ${shellQuote(body)}`,
+    config,
+  )
+
+  if (exitCode !== 0) {
+    throw new GhError(`pr comment ${prNumber}`, exitCode, stderr)
+  }
+}
+
+export async function addPrLabels(
+  prNumber: number,
+  labels: string[],
+  config: AgentConfig,
+): Promise<void> {
+  if (labels.length === 0) return
+  const args = labels.map(label => `--add-label ${shellQuote(label)}`).join(' ')
+  const { exitCode, stderr } = await ghRaw(`pr edit ${prNumber} ${args}`, config)
+  if (exitCode !== 0) {
+    throw new GhError(`pr edit ${prNumber} add labels`, exitCode, stderr)
+  }
+}
+
+export async function removePrLabels(
+  prNumber: number,
+  labels: string[],
+  config: AgentConfig,
+): Promise<void> {
+  if (labels.length === 0) return
+  const args = labels.map(label => `--remove-label ${shellQuote(label)}`).join(' ')
+  const { exitCode, stderr } = await ghRaw(`pr edit ${prNumber} ${args}`, config)
+  if (exitCode !== 0) {
+    throw new GhError(`pr edit ${prNumber} remove labels`, exitCode, stderr)
+  }
+}
+
+export async function setManagedPrReviewLabels(
+  prNumber: number,
+  state: 'approved' | 'failed' | 'retry' | 'human-needed',
+  config: AgentConfig,
+): Promise<void> {
+  const managed = Object.values(PR_REVIEW_LABELS) as string[]
+  const desired = state === 'approved'
+    ? [PR_REVIEW_LABELS.APPROVED]
+    : state === 'retry'
+      ? [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY]
+      : state === 'human-needed'
+        ? [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED]
+        : [PR_REVIEW_LABELS.FAILED]
+
+  const desiredSet = new Set<string>(desired)
+  const toRemove = managed.filter(label => !desiredSet.has(label))
+  await removePrLabels(prNumber, toRemove, config)
+  await addPrLabels(prNumber, desired, config)
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
 }

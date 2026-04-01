@@ -47,23 +47,12 @@ export function buildEventComment(event: ClaimEvent): string {
 /**
  * Parse a structured event comment from the issue.
  */
-export function parseEventComment(body: string): ClaimEvent | null {
-  if (!body.includes('<!--')) return null
-  const match = body.match(/<!--\s*([\s\S]*?)\s*-->/)
-  if (!match) return null
-  try {
-    return JSON.parse(match[1]!.trim()) as ClaimEvent
-  } catch {
-    return null
-  }
-}
-
 export function parseIssueDependencyMetadata(
   body: string,
   issueNumber?: number,
 ): IssueDependencyMetadata {
-  const contextMatch = body.match(/^##\s+Context\b([\s\S]*?)(?=^##\s+|\Z)/m)
-  if (!contextMatch) {
+  const contextStart = body.search(/^##\s+Context\b/m)
+  if (contextStart === -1) {
     return {
       dependsOn: [],
       hasDependencyMetadata: false,
@@ -71,8 +60,14 @@ export function parseIssueDependencyMetadata(
     }
   }
 
-  const dependenciesMatch = contextMatch[1]?.match(
-    /^###\s+Dependencies\b([\s\S]*?)(?=^###\s+|^##\s+|\Z)/m,
+  const afterContext = body.slice(contextStart)
+  const nextSectionOffset = afterContext.slice(1).search(/\n##\s+/)
+  const contextSection = nextSectionOffset === -1
+    ? afterContext
+    : afterContext.slice(0, nextSectionOffset + 1)
+
+  const dependenciesMatch = contextSection.match(
+    /^###\s+Dependencies\b([\s\S]*?)(?=\n###\s+|\n##\s+|(?![\s\S]))/m,
   )
   if (!dependenciesMatch) {
     return {

@@ -61,7 +61,6 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
       title: stripped,
       status: 'pending',
       order: order++,
-      attempts: 0,
     })
 
     if (order > startOrder + 9) break // safety: max 10 subtasks
@@ -74,7 +73,6 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
       title: `Investigate and fix: ${output.slice(0, 100).trim() || 'unknown task'}`,
       status: 'pending',
       order: startOrder,
-      attempts: 0,
     }]
   }
 

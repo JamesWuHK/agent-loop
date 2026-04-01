@@ -9,7 +9,12 @@ export const ISSUE_LABELS = {
   STALE: 'agent:stale',
 } as const
 
-export const AGENT_STATE_LABELS = Object.values(ISSUE_LABELS)
+export const PR_REVIEW_LABELS = {
+  APPROVED: 'agent:review-approved',
+  FAILED: 'agent:review-failed',
+  RETRY: 'agent:review-retry',
+  HUMAN_NEEDED: 'agent:human-needed',
+} as const
 
 export type IssueLabel = (typeof ISSUE_LABELS)[keyof typeof ISSUE_LABELS]
 
@@ -80,6 +85,7 @@ export interface ClaimEvent {
   prNumber?: number
   exitCode?: number
   reason?: string
+  prReview?: unknown
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -87,7 +93,6 @@ export interface ClaimEvent {
 export interface AgentConfig {
   machineId: string
   repo: string
-  repoPath: string
   pat: string
   pollIntervalMs: number
   concurrency: number
@@ -139,7 +144,6 @@ export interface Subtask {
   title: string
   status: 'pending' | 'done' | 'failed'
   order: number
-  attempts?: number
 }
 
 // ─── Daemon Status ──────────────────────────────────────────────────────────
