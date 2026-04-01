@@ -49,10 +49,11 @@ Issue body format is defined in [docs/issue-writing.md](docs/issue-writing.md).
 
 Agent Loop 用自己的 Issues 管理自己的开发任务：
 
-1. 在本仓库创建 Issue，打上 `agent:ready` 标签
-2. 启动 daemon，指向本仓库：`--repo JamesWuHK/agent-loop`
-3. Daemon 自动认领、规划、执行、提交 PR
-4. Review PR → Merge → Issue 自动标记 `agent:done`
+1. 在本仓库创建父 issue（tracking）和带 `dependsOn` 元数据的子 issue
+2. 子 issue 编排完成后默认打上 `agent:ready`；由 daemon 基于依赖自动判断 claimability
+3. 启动 daemon，指向本仓库：`--repo JamesWuHK/agent-loop`
+4. Daemon 自动认领、规划、执行、提交 PR
+5. Review PR → Merge → Issue 自动标记 `agent:done`
 
 ```
 JamesWuHK/agent-loop
