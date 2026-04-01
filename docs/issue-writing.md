@@ -100,12 +100,37 @@ Good issues are:
 - explicit about RED tests
 - explicit about constraints
 - explicit about dependencies when another issue must land first
+- accurate on first publish: parent issue, child issue, and `dependsOn` values must be complete and correct before the daemon starts consuming them
+- scoped so the happy path should normally produce a real code change and a real commit
 
 Avoid:
 
 - mixing multiple unrelated deliverables in one issue
 - relying on hidden context outside the issue body
 - putting dependency information only in comments or labels
+- publishing placeholder, partial, or malformed issue bodies and planning to fix them later
+- splitting work so finely that a "subtask" is likely to produce no code change and therefore no commit
+
+## Happy Path First
+
+When writing parent issues and child issues, optimize first for the normal execution path:
+
+- the issue body should be correct the first time
+- the child issue should describe a code-producing slice, not a reading-only or investigation-only slice
+- the RED test and implementation steps should naturally lead to a commit if the task is valid
+- only after the happy path is solid should you add handling for unusual cases
+
+If a subtask frequently ends with "no commit made", that is usually a task-authoring problem before it is an execution-engine problem.
+
+## Parent / Child Accuracy Rule
+
+For any issue tree intended for daemon execution:
+
+- create the parent issue and child issues as one coherent set
+- make sure every child issue has the final canonical body before labeling it `agent:ready`
+- make sure every `dependsOn` value points to the correct canonical issue number
+- verify fenced JSON blocks are valid markdown and valid JSON
+- do not rely on follow-up manual repair of issue metadata after publication
 
 ## Minimal Example
 
@@ -140,6 +165,27 @@ Avoid:
 - [ ] 实现通过测试
 - [ ] 提交 commit
 ```
+
+## Ready Labeling and Daemon Scheduling
+
+When a parent issue has already been decomposed into execution-sized child issues, and each child issue has correct `dependsOn` metadata:
+
+- child issues should normally be labeled `agent:ready` immediately
+- the daemon should decide claimability from dependency state, not from manual sequential ready toggling
+- parent / epic issues should usually remain tracking-only and do not need `agent:ready`
+
+### Why
+
+Dependency-aware scheduling only works if the daemon can see the full executable pool. Holding dependent child issues in a non-ready state after orchestration is complete weakens the scheduler and reintroduces manual dispatch.
+
+### Default authoring rule
+
+For any future issue-writing skill or prompt in Agent Loop:
+
+- emit the canonical issue body structure
+- include machine-readable `dependsOn` metadata
+- default executable child issues into the `agent:ready` pool once authored
+- rely on the daemon to expand the dependency graph automatically
 
 ## Recommendation for Future Skill Prompts
 
