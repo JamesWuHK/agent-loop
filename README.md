@@ -125,12 +125,42 @@ agent-loop/
 }
 ```
 
+当前 git 仓库也可以提交一份项目级配置：`./.agent-loop/project.json`。它适合存放“这个产品本身应该如何被 agent-loop 理解”的默认值，例如项目 profile、仓库级 prompt guidance、默认分支和推荐 agent。机器相关或带密钥的信息仍然只放在 `~/.agent-loop/config.json`。
+
+```json
+{
+  "project": {
+    "profile": "desktop-vite",
+    "promptGuidance": {
+      "implementation": [
+        "Run desktop frontend tests via `bun --cwd apps/desktop test ...` so Vitest loads jsdom from apps/desktop/vite.config.ts."
+      ]
+    }
+  },
+  "agent": {
+    "primary": "codex",
+    "fallback": "claude"
+  },
+  "git": {
+    "defaultBranch": "main"
+  }
+}
+```
+
+加载优先级：
+
+- `--repo` / `--pat` / CLI 参数 与环境变量优先处理机器运行时配置
+- `~/.agent-loop/config.json` 提供跨项目的默认值与本机 agent 路径
+- `./.agent-loop/project.json` 覆盖项目相关字段（例如 `project.profile`、`project.promptGuidance`、`agent.primary/fallback`、`git.defaultBranch`）
+
 `project.profile` 用来告诉 daemon 当前要开发的产品大致属于哪种工程形态。当前内置：
 
 - `generic`：默认值。适合大多数仓库，prompt 会优先强调“复用仓库已有的测试/构建/校验命令”，不假设前端框架。
 - `desktop-vite`：给类似 `digital-employee` 这种桌面前端仓库用，会额外提示 agent 复用 `apps/desktop` 下的 `Vitest/jsdom` 测试入口。
 
 如果你的项目是 Python、Go、Rust、Java 或其他技术栈，通常先用 `generic`，再通过 issue contract 里的 `Validation` 明确命令即可。后续也可以在 `project.promptGuidance` 里追加你自己的仓库级提示。
+
+要让 repo-local 配置生效，请从目标产品仓库根目录启动 daemon，而不是从别的仓库目录代跑。
 
 ## CLI Options
 

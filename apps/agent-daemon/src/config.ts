@@ -1,11 +1,32 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { execSync } from 'node:child_process'
-import type { AgentConfig } from '@agent/shared'
+import { execFileSync } from 'node:child_process'
+import type {
+  AgentConfig,
+  ProjectProfileName,
+  ProjectPromptContext,
+  ProjectPromptGuidanceOverrides,
+} from '@agent/shared'
 
 const CONFIG_DIR = resolve(homedir(), '.agent-loop')
 const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
+const REPO_CONFIG_DIR = '.agent-loop'
+const REPO_CONFIG_FILE = 'project.json'
+
+interface RepoLocalConfig {
+  project?: {
+    profile?: ProjectProfileName
+    promptGuidance?: ProjectPromptGuidanceOverrides
+  }
+  agent?: {
+    primary?: AgentConfig['agent']['primary']
+    fallback?: AgentConfig['agent']['fallback']
+  }
+  git?: {
+    defaultBranch?: string
+  }
+}
 
 export interface CliArgs {
   repo?: string
@@ -25,14 +46,29 @@ export interface CliArgs {
 export function loadConfig(args: CliArgs = {}): AgentConfig {
   ensureConfigDir()
 
-  let fileConfig: Partial<AgentConfig> = {}
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      fileConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
-    } catch (err) {
-      console.error(`[config] failed to parse ${CONFIG_PATH}:`, err)
-    }
-  }
+  const fileConfig = loadJsonFile<Partial<AgentConfig>>(CONFIG_PATH)
+  const repoConfig = loadRepoLocalConfig()
+
+  return buildConfig(args, {
+    fileConfig,
+    repoConfig,
+  })
+}
+
+export function buildConfig(
+  args: CliArgs = {},
+  options: {
+    fileConfig?: Partial<AgentConfig>
+    repoConfig?: RepoLocalConfig
+    env?: NodeJS.ProcessEnv
+    repoGuess?: string | null
+    homeDir?: string
+  } = {},
+): AgentConfig {
+  const fileConfig = options.fileConfig ?? {}
+  const repoConfig = options.repoConfig ?? {}
+  const env = options.env ?? process.env
+  const homeDir = options.homeDir ?? homedir()
 
   const machineId =
     args.machineId ??
@@ -42,12 +78,13 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
   const repo =
     args.repo ??
     fileConfig.repo ??
+    options.repoGuess ??
     guessRepoFromGit()
 
   const pat =
     args.pat ??
-    process.env.GITHUB_TOKEN ??
-    process.env.GH_TOKEN ??
+    env.GITHUB_TOKEN ??
+    env.GH_TOKEN ??
     fileConfig.pat ??
     ''
 
@@ -69,26 +106,29 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
     pat,
     pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
     concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,
-    worktreesBase: resolve(homedir(), '.agent-worktrees', repo.replace('/', '-')),
+    worktreesBase: resolve(homeDir, '.agent-worktrees', repo.replace('/', '-')),
     project: {
-      profile: fileConfig.project?.profile ?? 'generic',
-      promptGuidance: fileConfig.project?.promptGuidance,
+      profile: repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic',
+      promptGuidance: mergePromptGuidance(
+        fileConfig.project?.promptGuidance,
+        repoConfig.project?.promptGuidance,
+      ),
     },
     agent: {
-      primary: fileConfig.agent?.primary ?? 'codex',
-      fallback: fileConfig.agent?.fallback ?? 'claude',
+      primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
+      fallback: repoConfig.agent?.fallback ?? fileConfig.agent?.fallback ?? 'claude',
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
       codexBaseUrl:
-        process.env.OPENAI_BASE_URL ??
-        process.env.OPENAI_API_BASE ??
-        process.env.OPENAI_API_URL ??
-        process.env.OPENAI_BASE ??
+        env.OPENAI_BASE_URL ??
+        env.OPENAI_API_BASE ??
+        env.OPENAI_API_URL ??
+        env.OPENAI_BASE ??
         fileConfig.agent?.codexBaseUrl,
       timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000, // 30 min default
     },
     git: {
-      defaultBranch: fileConfig.git?.defaultBranch ?? 'main',
+      defaultBranch: repoConfig.git?.defaultBranch ?? fileConfig.git?.defaultBranch ?? 'main',
       authorName: fileConfig.git?.authorName ?? 'agent-loop',
       authorEmail: fileConfig.git?.authorEmail ?? 'agent-loop@local',
     },
@@ -113,7 +153,7 @@ function generateMachineId(): string {
 
 function guessRepoFromGit(): string | null {
   try {
-    const stdout = execSync('git remote get-url origin', { encoding: 'utf-8' }).trim()
+    const stdout = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf-8' }).trim()
     // git@github.com:owner/repo.git or https://github.com/owner/repo.git
     const match =
       stdout.match(/github\.com[/:]([\w-]+\/[\w.-]+?)(\.git)?$/) ??
@@ -130,6 +170,59 @@ function ensureConfigDir(): void {
   }
 }
 
+function findRepoRoot(startDir = process.cwd()): string | null {
+  try {
+    return execFileSync('git', ['-C', startDir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf-8',
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+function loadRepoLocalConfig(startDir = process.cwd()): RepoLocalConfig {
+  const repoRoot = findRepoRoot(startDir)
+  if (!repoRoot) return {}
+
+  return loadJsonFile<RepoLocalConfig>(
+    resolve(repoRoot, REPO_CONFIG_DIR, REPO_CONFIG_FILE),
+  )
+}
+
+function loadJsonFile<T extends object>(path: string): T | {} {
+  if (!existsSync(path)) {
+    return {}
+  }
+
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as T
+  } catch (err) {
+    console.error(`[config] failed to parse ${path}:`, err)
+    return {}
+  }
+}
+
+function mergePromptGuidance(
+  globalGuidance?: ProjectPromptGuidanceOverrides,
+  repoGuidance?: ProjectPromptGuidanceOverrides,
+): ProjectPromptGuidanceOverrides | undefined {
+  const merged: ProjectPromptGuidanceOverrides = {}
+  const contexts: ProjectPromptContext[] = ['planning', 'implementation', 'reviewFix', 'recovery']
+
+  for (const context of contexts) {
+    const lines = [
+      ...(globalGuidance?.[context] ?? []),
+      ...(repoGuidance?.[context] ?? []),
+    ]
+
+    if (lines.length > 0) {
+      merged[context] = lines
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
 function saveConfigPartial(partial: Record<string, unknown>): void {
   const existing: Record<string, unknown> = existsSync(CONFIG_PATH)
     ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
@@ -142,4 +235,4 @@ export class ConfigError extends Error {
   name = 'ConfigError'
 }
 
-export { CONFIG_DIR, CONFIG_PATH }
+export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }

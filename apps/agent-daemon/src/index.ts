@@ -121,7 +121,8 @@ Metrics:
   A /health endpoint is also available for health checks.
 
 Configuration:
-  Config is read from ~/.agent-loop/config.json
+  Machine config is read from ~/.agent-loop/config.json
+  Project config is optionally read from ./.agent-loop/project.json in the current repo
   Environment variables: GITHUB_TOKEN, GH_TOKEN
 
 Examples:
