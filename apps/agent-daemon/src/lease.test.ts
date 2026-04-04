@@ -193,6 +193,36 @@ describe('lease acquisition', () => {
     expect(comments.at(-1)?.body).toContain('lease-conflict-with-comment-10')
   })
 
+  test('allows another daemon to take over once the prior lease has expired', async () => {
+    const expired = buildComment(11, buildLease({
+      leaseId: 'lease-expired',
+      machineId: 'machine-b',
+      daemonInstanceId: 'daemon-b',
+      expiresAt: '2000-04-05T08:01:00.000Z',
+    }))
+    const { api, comments } = createFakeLeaseApi([expired])
+
+    const result = await acquireManagedLease({
+      targetNumber: 77,
+      scope: 'issue-process',
+      daemonInstanceId: 'daemon-a',
+      machineId: 'machine-a',
+      config: TEST_CONFIG,
+      phase: 'issue-recovery',
+      issueNumber: 77,
+      api,
+    })
+
+    expect(result.status).toBe('acquired')
+    if (result.status !== 'acquired') return
+    expect(result.adopted).toBe(true)
+    expect(result.priorLease?.commentId).toBe(11)
+    expect(result.handle.getCommentId()).toBe(12)
+    expect(result.handle.getSnapshot().attempt).toBe(2)
+    expect(comments).toHaveLength(2)
+    await result.handle.complete('released')
+  })
+
   test('updates heartbeat and terminal status through the injected API', async () => {
     const { api, comments } = createFakeLeaseApi([])
 

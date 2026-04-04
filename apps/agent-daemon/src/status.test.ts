@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { DaemonStatus } from '@agent/shared'
+import { buildManagedLeaseComment, type DaemonStatus, type ManagedLease } from '@agent/shared'
 import {
   collectDaemonObservability,
   collectGitHubLeaseAudit,
@@ -177,6 +177,27 @@ agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
 
+function buildRemoteLease(overrides: Partial<ManagedLease> = {}): ManagedLease {
+  return {
+    leaseId: 'lease-remote-1',
+    scope: 'issue-process',
+    issueNumber: 91,
+    machineId: 'machine-b',
+    daemonInstanceId: 'daemon-remote-1',
+    branch: 'agent/91/machine-b',
+    worktreeId: 'issue-91-machine-b',
+    phase: 'implementation',
+    startedAt: '2099-04-05T08:00:00.000Z',
+    lastHeartbeatAt: '2099-04-05T08:00:30.000Z',
+    expiresAt: '2099-04-05T08:01:00.000Z',
+    attempt: 2,
+    lastProgressAt: '2099-04-05T08:00:40.000Z',
+    lastProgressKind: 'stdout',
+    status: 'active',
+    ...overrides,
+  }
+}
+
 describe('status helpers', () => {
   test('parses Prometheus samples with labels', () => {
     expect(parsePrometheusSamples(metricsText)).toContainEqual({
@@ -353,6 +374,7 @@ describe('status helpers', () => {
 
   test('collects GitHub audit warnings for lease-label mismatches', async () => {
     const audit = await collectGitHubLeaseAudit({
+      daemonInstanceId: baseHealth.daemonInstanceId,
       repo: 'JamesWuHK/digital-employee',
       runtime: {
         ...baseHealth.runtime,
@@ -391,6 +413,141 @@ describe('status helpers', () => {
     expect(audit.ok).toBe(true)
     expect(audit.warnings).toContain('issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(audit.warnings).toContain('pr-merge#108 has an active merge lease but the PR is missing agent:review-approved')
+  })
+
+  test('discovers remote active leases even when the local daemon currently holds none', async () => {
+    const audit = await collectGitHubLeaseAudit({
+      daemonInstanceId: baseHealth.daemonInstanceId,
+      repo: 'JamesWuHK/digital-employee',
+      runtime: {
+        ...baseHealth.runtime,
+        activeLeaseCount: 0,
+        oldestLeaseHeartbeatAgeSeconds: 0,
+        activeLeaseDetails: [],
+      },
+    }, async (args) => {
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 91,
+              state: 'OPEN',
+              labels: [{ name: 'agent:working' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 120,
+              state: 'OPEN',
+              headRefName: 'agent/91/codex-dev',
+              labels: [{ name: 'agent:review-approved' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/91/comments') {
+        return {
+          ok: true,
+          data: [
+            {
+              id: 201,
+              body: buildManagedLeaseComment(buildRemoteLease()),
+              created_at: '2099-04-05T08:00:00.000Z',
+              updated_at: '2099-04-05T08:00:30.000Z',
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/120/comments') {
+        return {
+          ok: true,
+          data: [
+            {
+              id: 202,
+              body: buildManagedLeaseComment(buildRemoteLease({
+                leaseId: 'lease-remote-pr',
+                scope: 'pr-merge',
+                issueNumber: 91,
+                prNumber: 120,
+                branch: 'agent/91/codex-dev',
+                worktreeId: 'issue-91-codex-dev',
+                phase: 'merge-refresh',
+              })),
+              created_at: '2099-04-05T08:01:00.000Z',
+              updated_at: '2099-04-05T08:01:15.000Z',
+            },
+          ],
+          error: null,
+        }
+      }
+
+      return {
+        ok: false,
+        data: null,
+        error: `unexpected gh invocation: ${args.join(' ')}`,
+      }
+    })
+
+    expect(audit.ok).toBe(true)
+    expect(audit.checks).toHaveLength(2)
+    expect(audit.checks).toContainEqual(expect.objectContaining({
+      scope: 'issue-process',
+      targetNumber: 91,
+      state: 'open',
+      labels: ['agent:working'],
+      warning: null,
+      source: 'remote',
+      commentId: 201,
+      daemonInstanceId: 'daemon-remote-1',
+      machineId: 'machine-b',
+      phase: 'implementation',
+    }))
+    expect(audit.checks).toContainEqual(expect.objectContaining({
+      scope: 'pr-merge',
+      targetNumber: 120,
+      state: 'open',
+      labels: ['agent:review-approved'],
+      warning: null,
+      source: 'remote',
+      commentId: 202,
+      daemonInstanceId: 'daemon-remote-1',
+      phase: 'merge-refresh',
+    }))
+
+    const report = formatDoctorReport({
+      ok: true,
+      healthUrl: 'http://127.0.0.1:9310/health',
+      metricsUrl: 'http://127.0.0.1:9090/metrics',
+      error: null,
+      health: {
+        ...baseHealth,
+        runtime: {
+          ...baseHealth.runtime,
+          activeLeaseCount: 0,
+          oldestLeaseHeartbeatAgeSeconds: 0,
+          activeLeaseDetails: [],
+        },
+      },
+      metrics: summarizeDaemonMetrics(metricsText),
+      metricsError: null,
+      githubAudit: audit,
+      warnings: [],
+    })
+
+    expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201 | daemon=daemon-remote-1')
+    expect(report).toContain('pr-merge#120 | state=open | labels=agent:review-approved | ok | source=remote | comment=202 | daemon=daemon-remote-1')
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {

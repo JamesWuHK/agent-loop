@@ -1,7 +1,9 @@
 import {
   PR_REVIEW_LABELS,
+  getActiveManagedLease,
   type ConcurrencyPolicy,
   type DaemonStatus,
+  type IssueComment,
   type ManagedLeaseScope,
 } from '@agent/shared'
 import {
@@ -85,6 +87,14 @@ export interface GitHubLeaseAuditCheck {
   state: string
   labels: string[]
   warning: string | null
+  source?: 'local' | 'remote'
+  commentId?: number | null
+  daemonInstanceId?: string | null
+  machineId?: string | null
+  phase?: string | null
+  heartbeatAgeSeconds?: number | null
+  expiresInSeconds?: number | null
+  adoptable?: boolean | null
 }
 
 export interface GitHubLeaseAudit {
@@ -101,6 +111,35 @@ interface GhJsonResult {
 }
 
 type GhJsonRunner = (args: string[]) => Promise<GhJsonResult>
+
+interface LeaseAuditSubject {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  issueNumber: number | null
+  prNumber: number | null
+  source?: 'local' | 'remote'
+  commentId?: number | null
+  daemonInstanceId?: string | null
+  machineId?: string | null
+  phase?: string | null
+  heartbeatAgeSeconds?: number | null
+  expiresInSeconds?: number | null
+  adoptable?: boolean | null
+}
+
+interface GitHubListLabel {
+  name?: unknown
+}
+
+interface GitHubIssueListItem {
+  number?: unknown
+  state?: unknown
+  labels?: GitHubListLabel[]
+}
+
+interface GitHubPrListItem extends GitHubIssueListItem {
+  headRefName?: unknown
+}
 
 export async function collectDaemonObservability(
   options: StatusCommandOptions = {},
@@ -495,20 +534,10 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
 }
 
 export async function collectGitHubLeaseAudit(
-  health: Pick<DaemonHealthPayload, 'repo' | 'runtime'>,
+  health: Pick<DaemonHealthPayload, 'repo' | 'runtime' | 'daemonInstanceId'>,
   runner: GhJsonRunner = runGhJsonCommand,
 ): Promise<GitHubLeaseAudit> {
-  const activeLeases = health.runtime.activeLeaseDetails
-  if (activeLeases.length === 0) {
-    return {
-      ok: true,
-      error: null,
-      checks: [],
-      warnings: [],
-    }
-  }
-
-  const checks = await Promise.all(activeLeases.map(async (lease) => {
+  const localChecks = await Promise.all(health.runtime.activeLeaseDetails.map(async (lease) => {
     const result = lease.scope === 'issue-process'
       ? await runner([
           'issue',
@@ -529,16 +558,40 @@ export async function collectGitHubLeaseAudit(
           'number,state,labels',
         ])
 
-    return buildGitHubLeaseAuditCheck(lease, result)
+    return buildGitHubLeaseAuditCheck({
+      scope: lease.scope,
+      targetNumber: lease.targetNumber,
+      issueNumber: lease.issueNumber,
+      prNumber: lease.prNumber,
+      source: 'local',
+      commentId: lease.commentId,
+      daemonInstanceId: lease.daemonInstanceId,
+      machineId: lease.machineId,
+      phase: lease.phase,
+      heartbeatAgeSeconds: lease.heartbeatAgeSeconds,
+      expiresInSeconds: lease.expiresInSeconds,
+      adoptable: lease.adoptable,
+    }, result)
   }))
 
+  const remote = await collectRemoteGitHubLeaseChecks(
+    health,
+    new Set(localChecks.map((check) => buildLeaseAuditKey(check.scope, check.targetNumber))),
+    runner,
+  )
+  const checks = [...localChecks, ...remote.checks]
   const unavailable = checks.find((check) => check.warning?.startsWith('GitHub audit unavailable:')) ?? null
+  const error = unavailable?.warning?.replace(/^GitHub audit unavailable:\s*/, '')
+    ?? remote.error
 
   return {
-    ok: unavailable === null,
-    error: unavailable?.warning?.replace(/^GitHub audit unavailable:\s*/, '') ?? null,
+    ok: error === null,
+    error,
     checks,
-    warnings: checks.flatMap((check) => check.warning ? [check.warning] : []),
+    warnings: [
+      ...checks.flatMap((check) => check.warning ? [check.warning] : []),
+      ...(remote.error ? [`GitHub audit unavailable: ${remote.error}`] : []),
+    ],
   }
 }
 
@@ -670,7 +723,22 @@ function formatRecoveryActionDoctorLine(action: DaemonHealthPayload['runtime']['
 function formatGitHubAuditLine(check: GitHubLeaseAuditCheck): string {
   const status = check.warning ? `warning=${check.warning}` : 'ok'
   const labels = check.labels.length > 0 ? check.labels.join(',') : 'none'
-  return `${formatLeaseIdentity(check.scope, check.targetNumber)} | state=${check.state} | labels=${labels} | ${status}`
+  const extras = [
+    check.source ? `source=${check.source}` : null,
+    check.commentId !== null && check.commentId !== undefined ? `comment=${check.commentId}` : null,
+    check.daemonInstanceId ? `daemon=${check.daemonInstanceId}` : null,
+    check.machineId ? `machine=${check.machineId}` : null,
+    check.phase ? `phase=${check.phase}` : null,
+    check.heartbeatAgeSeconds !== null && check.heartbeatAgeSeconds !== undefined
+      ? `hb=${formatNullableSeconds(check.heartbeatAgeSeconds)}`
+      : null,
+    check.expiresInSeconds !== null && check.expiresInSeconds !== undefined
+      ? `expires=${formatNullableSeconds(check.expiresInSeconds)}`
+      : null,
+    check.adoptable !== null && check.adoptable !== undefined ? `adoptable=${check.adoptable ? 'yes' : 'no'}` : null,
+  ].filter((value): value is string => value !== null)
+
+  return `${formatLeaseIdentity(check.scope, check.targetNumber)} | state=${check.state} | labels=${labels} | ${status}${extras.length > 0 ? ` | ${extras.join(' | ')}` : ''}`
 }
 
 function summarizeRepeatedRecoveriesByTarget(
@@ -710,7 +778,7 @@ function inferIssueStateFromLabels(labels: string[]): string {
 }
 
 function buildGitHubLeaseAuditCheck(
-  lease: DaemonHealthPayload['runtime']['activeLeaseDetails'][number],
+  lease: LeaseAuditSubject,
   result: GhJsonResult,
 ): GitHubLeaseAuditCheck {
   if (!result.ok) {
@@ -720,19 +788,18 @@ function buildGitHubLeaseAuditCheck(
       state: 'unknown',
       labels: [],
       warning: `GitHub audit unavailable: ${result.error ?? 'unknown gh error'}`,
+      source: lease.source,
+      commentId: lease.commentId,
+      daemonInstanceId: lease.daemonInstanceId,
+      machineId: lease.machineId,
+      phase: lease.phase,
+      heartbeatAgeSeconds: lease.heartbeatAgeSeconds,
+      expiresInSeconds: lease.expiresInSeconds,
+      adoptable: lease.adoptable,
     }
   }
 
-  const data = (result.data ?? {}) as {
-    state?: unknown
-    labels?: Array<{ name?: unknown }>
-  }
-  const state = typeof data.state === 'string' ? data.state.toLowerCase() : 'unknown'
-  const labels = Array.isArray(data.labels)
-    ? data.labels
-      .map((label) => typeof label?.name === 'string' ? label.name : null)
-      .filter((label): label is string => label !== null)
-    : []
+  const { state, labels } = extractGitHubAuditState(result.data)
 
   return {
     scope: lease.scope,
@@ -740,11 +807,19 @@ function buildGitHubLeaseAuditCheck(
     state,
     labels,
     warning: evaluateGitHubLeaseAuditWarning(lease, state, labels),
+    source: lease.source,
+    commentId: lease.commentId,
+    daemonInstanceId: lease.daemonInstanceId,
+    machineId: lease.machineId,
+    phase: lease.phase,
+    heartbeatAgeSeconds: lease.heartbeatAgeSeconds,
+    expiresInSeconds: lease.expiresInSeconds,
+    adoptable: lease.adoptable,
   }
 }
 
 function evaluateGitHubLeaseAuditWarning(
-  lease: DaemonHealthPayload['runtime']['activeLeaseDetails'][number],
+  lease: Pick<LeaseAuditSubject, 'scope' | 'targetNumber'>,
   remoteState: string,
   labels: string[],
 ): string | null {
@@ -774,6 +849,295 @@ function evaluateGitHubLeaseAuditWarning(
   }
 
   return null
+}
+
+async function collectRemoteGitHubLeaseChecks(
+  health: Pick<DaemonHealthPayload, 'repo' | 'runtime' | 'daemonInstanceId'>,
+  knownKeys: Set<string>,
+  runner: GhJsonRunner,
+): Promise<{ checks: GitHubLeaseAuditCheck[]; error: string | null }> {
+  const [issueListResult, prListResult] = await Promise.all([
+    runner([
+      'issue',
+      'list',
+      '--repo',
+      health.repo,
+      '--state',
+      'open',
+      '--limit',
+      '100',
+      '--json',
+      'number,state,labels',
+    ]),
+    runner([
+      'pr',
+      'list',
+      '--repo',
+      health.repo,
+      '--state',
+      'open',
+      '--limit',
+      '100',
+      '--json',
+      'number,state,labels,headRefName',
+    ]),
+  ])
+
+  if (!issueListResult.ok) {
+    return {
+      checks: [],
+      error: issueListResult.error ?? 'failed to list open issues',
+    }
+  }
+  if (!prListResult.ok) {
+    return {
+      checks: [],
+      error: prListResult.error ?? 'failed to list open PRs',
+    }
+  }
+
+  const checks: GitHubLeaseAuditCheck[] = []
+  const openIssues = normalizeGitHubIssueList(issueListResult.data)
+    .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
+  const openPrs = normalizeGitHubPrList(prListResult.data)
+    .filter((pr) => pr.headRefName.startsWith('agent/'))
+
+  for (const issue of openIssues) {
+    const key = buildLeaseAuditKey('issue-process', issue.number)
+    if (knownKeys.has(key)) continue
+
+    const commentResult = await fetchActiveRemoteManagedLease({
+      repo: health.repo,
+      targetNumber: issue.number,
+      scope: 'issue-process',
+      runner,
+    })
+    if (commentResult.error) {
+      return {
+        checks,
+        error: `issue-process#${issue.number}: ${commentResult.error}`,
+      }
+    }
+    if (!commentResult.comment) continue
+
+    checks.push(buildGitHubLeaseAuditCheckFromState(
+      buildLeaseAuditSubjectFromComment(commentResult.comment, issue.number, 'remote', health.daemonInstanceId),
+      issue.state,
+      issue.labels,
+    ))
+  }
+
+  for (const pr of openPrs) {
+    const commentResult = await fetchRemoteManagedLeaseComments(pr.number, runner, health.repo)
+    if (commentResult.error) {
+      return {
+        checks,
+        error: `PR #${pr.number}: ${commentResult.error}`,
+      }
+    }
+    if (!commentResult.comments) continue
+
+    for (const scope of ['pr-review', 'pr-merge'] as const) {
+      const key = buildLeaseAuditKey(scope, pr.number)
+      if (knownKeys.has(key)) continue
+
+      const comment = getActiveManagedLease(commentResult.comments, scope)
+      if (!comment) continue
+
+      checks.push(buildGitHubLeaseAuditCheckFromState(
+        buildLeaseAuditSubjectFromComment(comment, pr.number, 'remote', health.daemonInstanceId),
+        pr.state,
+        pr.labels,
+      ))
+    }
+  }
+
+  return {
+    checks,
+    error: null,
+  }
+}
+
+async function fetchActiveRemoteManagedLease(options: {
+  repo: string
+  targetNumber: number
+  scope: ManagedLeaseScope
+  runner: GhJsonRunner
+}): Promise<{ comment: ReturnType<typeof getActiveManagedLease>; error: string | null }> {
+  const commentResult = await fetchRemoteManagedLeaseComments(options.targetNumber, options.runner, options.repo)
+  if (commentResult.error) {
+    return {
+      comment: null,
+      error: commentResult.error,
+    }
+  }
+
+  return {
+    comment: commentResult.comments ? getActiveManagedLease(commentResult.comments, options.scope) : null,
+    error: null,
+  }
+}
+
+async function fetchRemoteManagedLeaseComments(
+  targetNumber: number,
+  runner: GhJsonRunner,
+  repo: string,
+): Promise<{ comments: IssueComment[] | null; error: string | null }> {
+  const result = await runner([
+    'api',
+    `repos/${repo}/issues/${targetNumber}/comments`,
+    '--paginate',
+  ])
+  if (!result.ok) {
+    return {
+      comments: null,
+      error: result.error ?? 'failed to list issue comments',
+    }
+  }
+
+  return {
+    comments: mapIssueComments(result.data),
+    error: null,
+  }
+}
+
+function buildGitHubLeaseAuditCheckFromState(
+  lease: LeaseAuditSubject,
+  state: string,
+  labels: string[],
+): GitHubLeaseAuditCheck {
+  return {
+    scope: lease.scope,
+    targetNumber: lease.targetNumber,
+    state,
+    labels,
+    warning: evaluateGitHubLeaseAuditWarning(lease, state, labels),
+    source: lease.source,
+    commentId: lease.commentId,
+    daemonInstanceId: lease.daemonInstanceId,
+    machineId: lease.machineId,
+    phase: lease.phase,
+    heartbeatAgeSeconds: lease.heartbeatAgeSeconds,
+    expiresInSeconds: lease.expiresInSeconds,
+    adoptable: lease.adoptable,
+  }
+}
+
+function buildLeaseAuditSubjectFromComment(
+  comment: NonNullable<Awaited<ReturnType<typeof fetchActiveRemoteManagedLease>>['comment']>,
+  targetNumber: number,
+  source: 'remote',
+  daemonInstanceId: string,
+): LeaseAuditSubject {
+  const expiresInSeconds = parseRemainingSeconds(comment.lease.expiresAt)
+  return {
+    scope: comment.lease.scope,
+    targetNumber,
+    issueNumber: comment.lease.issueNumber ?? null,
+    prNumber: comment.lease.prNumber ?? null,
+    source,
+    commentId: comment.commentId,
+    daemonInstanceId: comment.lease.daemonInstanceId,
+    machineId: comment.lease.machineId,
+    phase: comment.lease.phase,
+    heartbeatAgeSeconds: parseAgeSeconds(comment.lease.lastHeartbeatAt),
+    expiresInSeconds,
+    adoptable: comment.lease.daemonInstanceId === daemonInstanceId || expiresInSeconds === 0,
+  }
+}
+
+function buildLeaseAuditKey(scope: ManagedLeaseScope, targetNumber: number): string {
+  return `${scope}:${targetNumber}`
+}
+
+function extractGitHubAuditState(data: unknown): { state: string; labels: string[] } {
+  const payload = (data ?? {}) as {
+    state?: unknown
+    labels?: Array<{ name?: unknown }>
+  }
+
+  return {
+    state: typeof payload.state === 'string' ? payload.state.toLowerCase() : 'unknown',
+    labels: normalizeGitHubLabels(payload.labels),
+  }
+}
+
+function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state: string; labels: string[] }> {
+  if (!Array.isArray(data)) return []
+
+  return data
+    .map((item) => {
+      const issue = item as GitHubIssueListItem
+      if (typeof issue.number !== 'number') return null
+      return {
+        number: issue.number,
+        state: typeof issue.state === 'string' ? issue.state.toLowerCase() : 'unknown',
+        labels: normalizeGitHubLabels(issue.labels),
+      }
+    })
+    .filter((item): item is { number: number; state: string; labels: string[] } => item !== null)
+}
+
+function normalizeGitHubPrList(
+  data: unknown,
+): Array<{ number: number; state: string; labels: string[]; headRefName: string }> {
+  if (!Array.isArray(data)) return []
+
+  return data
+    .map((item) => {
+      const pr = item as GitHubPrListItem
+      if (typeof pr.number !== 'number' || typeof pr.headRefName !== 'string') return null
+      return {
+        number: pr.number,
+        state: typeof pr.state === 'string' ? pr.state.toLowerCase() : 'unknown',
+        labels: normalizeGitHubLabels(pr.labels),
+        headRefName: pr.headRefName,
+      }
+    })
+    .filter((item): item is { number: number; state: string; labels: string[]; headRefName: string } => item !== null)
+}
+
+function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): string[] {
+  return Array.isArray(labels)
+    ? labels
+      .map((label) => typeof label?.name === 'string' ? label.name : null)
+      .filter((label): label is string => label !== null)
+    : []
+}
+
+function mapIssueComments(data: unknown): IssueComment[] {
+  if (!Array.isArray(data)) return []
+
+  return data.map((comment) => {
+    const payload = comment as {
+      id?: unknown
+      body?: unknown
+      created_at?: unknown
+      updated_at?: unknown
+    }
+    return {
+      commentId: typeof payload.id === 'number' ? payload.id : 0,
+      body: typeof payload.body === 'string' ? payload.body : '',
+      createdAt: typeof payload.created_at === 'string' ? payload.created_at : '',
+      updatedAt: typeof payload.updated_at === 'string'
+        ? payload.updated_at
+        : typeof payload.created_at === 'string'
+          ? payload.created_at
+          : '',
+    }
+  })
+}
+
+function parseAgeSeconds(value: string): number {
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.floor((Date.now() - parsed) / 1000))
+}
+
+function parseRemainingSeconds(value: string): number {
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.floor((parsed - Date.now()) / 1000))
 }
 
 async function runGhJsonCommand(args: string[]): Promise<GhJsonResult> {
