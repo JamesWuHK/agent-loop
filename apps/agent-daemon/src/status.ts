@@ -1,4 +1,9 @@
-import type { ConcurrencyPolicy, DaemonStatus } from '@agent/shared'
+import {
+  PR_REVIEW_LABELS,
+  type ConcurrencyPolicy,
+  type DaemonStatus,
+  type ManagedLeaseScope,
+} from '@agent/shared'
 import {
   DEFAULT_HEALTH_SERVER_HOST,
   DEFAULT_HEALTH_SERVER_PORT,
@@ -51,6 +56,7 @@ export interface DaemonObservabilitySnapshot {
   health: DaemonHealthPayload | null
   metrics: DaemonMetricSummary | null
   metricsError: string | null
+  githubAudit: GitHubLeaseAudit | null
   warnings: string[]
 }
 
@@ -58,6 +64,7 @@ export interface StatusCommandOptions {
   healthHost?: string
   healthPort?: number
   metricsPort?: number
+  includeGitHubAudit?: boolean
 }
 
 interface MetricSample {
@@ -71,6 +78,29 @@ interface LocalEndpointResponse {
   statusText: string
   body: string
 }
+
+export interface GitHubLeaseAuditCheck {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  state: string
+  labels: string[]
+  warning: string | null
+}
+
+export interface GitHubLeaseAudit {
+  ok: boolean
+  error: string | null
+  checks: GitHubLeaseAuditCheck[]
+  warnings: string[]
+}
+
+interface GhJsonResult {
+  ok: boolean
+  data: unknown | null
+  error: string | null
+}
+
+type GhJsonRunner = (args: string[]) => Promise<GhJsonResult>
 
 export async function collectDaemonObservability(
   options: StatusCommandOptions = {},
@@ -91,6 +121,7 @@ export async function collectDaemonObservability(
         health: null,
         metrics: null,
         metricsError: null,
+        githubAudit: null,
         warnings: [`daemon health endpoint is not reachable at ${healthUrl}`],
       }
     }
@@ -104,6 +135,7 @@ export async function collectDaemonObservability(
       health: null,
       metrics: null,
       metricsError: null,
+      githubAudit: null,
       warnings: [`daemon health endpoint is not reachable at ${healthUrl}`],
     }
   }
@@ -134,7 +166,11 @@ export async function collectDaemonObservability(
     health,
     metrics,
     metricsError,
+    githubAudit: null,
     warnings: [],
+  }
+  if (options.includeGitHubAudit) {
+    snapshot.githubAudit = await collectGitHubLeaseAudit(health)
   }
   snapshot.warnings = buildDoctorWarnings(snapshot)
   return snapshot
@@ -219,6 +255,13 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
   const recoveryHistoryLines = health.runtime.recentRecoveryActions.length === 0
     ? ['none']
     : health.runtime.recentRecoveryActions.map((action) => formatRecoveryActionDoctorLine(action))
+  const gitHubAuditLines = snapshot.githubAudit === null
+    ? ['not requested']
+    : !snapshot.githubAudit.ok
+      ? [`unavailable: ${snapshot.githubAudit.error ?? 'unknown error'}`]
+      : snapshot.githubAudit.checks.length === 0
+        ? ['none']
+        : snapshot.githubAudit.checks.map((check) => formatGitHubAuditLine(check))
   const outcomeLines = snapshot.metrics
     ? [
         `polls: ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)}`,
@@ -284,6 +327,9 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     '',
     'Recent Recovery Actions',
     ...recoveryHistoryLines,
+    '',
+    'GitHub Audit',
+    ...gitHubAuditLines,
     '',
     'Warnings',
     ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
@@ -441,8 +487,59 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (((snapshot.metrics?.mergeRecovery.refresh_push_failed ?? 0) + (snapshot.metrics?.mergeRecovery.retry_merge_failed ?? 0)) > 0) {
     warnings.push('merge recovery has recent push/merge retry failures; inspect the latest PR recovery comments')
   }
+  if (snapshot.githubAudit?.warnings.length) {
+    warnings.push(...snapshot.githubAudit.warnings)
+  }
 
   return warnings
+}
+
+export async function collectGitHubLeaseAudit(
+  health: Pick<DaemonHealthPayload, 'repo' | 'runtime'>,
+  runner: GhJsonRunner = runGhJsonCommand,
+): Promise<GitHubLeaseAudit> {
+  const activeLeases = health.runtime.activeLeaseDetails
+  if (activeLeases.length === 0) {
+    return {
+      ok: true,
+      error: null,
+      checks: [],
+      warnings: [],
+    }
+  }
+
+  const checks = await Promise.all(activeLeases.map(async (lease) => {
+    const result = lease.scope === 'issue-process'
+      ? await runner([
+          'issue',
+          'view',
+          String(lease.issueNumber ?? lease.targetNumber),
+          '--repo',
+          health.repo,
+          '--json',
+          'number,state,labels',
+        ])
+      : await runner([
+          'pr',
+          'view',
+          String(lease.prNumber ?? lease.targetNumber),
+          '--repo',
+          health.repo,
+          '--json',
+          'number,state,labels',
+        ])
+
+    return buildGitHubLeaseAuditCheck(lease, result)
+  }))
+
+  const unavailable = checks.find((check) => check.warning?.startsWith('GitHub audit unavailable:')) ?? null
+
+  return {
+    ok: unavailable === null,
+    error: unavailable?.warning?.replace(/^GitHub audit unavailable:\s*/, '') ?? null,
+    checks,
+    warnings: checks.flatMap((check) => check.warning ? [check.warning] : []),
+  }
 }
 
 function summarizeReviewOutcomes(
@@ -570,6 +667,12 @@ function formatRecoveryActionDoctorLine(action: DaemonHealthPayload['runtime']['
   return `${action.at} | ${action.kind}/${action.outcome} | target=${target} | reason=${action.reason ?? 'n/a'}`
 }
 
+function formatGitHubAuditLine(check: GitHubLeaseAuditCheck): string {
+  const status = check.warning ? `warning=${check.warning}` : 'ok'
+  const labels = check.labels.length > 0 ? check.labels.join(',') : 'none'
+  return `${formatLeaseIdentity(check.scope, check.targetNumber)} | state=${check.state} | labels=${labels} | ${status}`
+}
+
 function summarizeRepeatedRecoveriesByTarget(
   actions: DaemonHealthPayload['runtime']['recentRecoveryActions'],
 ): string[] {
@@ -592,6 +695,119 @@ function formatLeaseIdentity(scope: string, targetNumber: number): string {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function inferIssueStateFromLabels(labels: string[]): string {
+  const labelSet = new Set(labels)
+
+  if (labelSet.has('agent:done')) return 'done'
+  if (labelSet.has('agent:failed')) return 'failed'
+  if (labelSet.has('agent:working')) return 'working'
+  if (labelSet.has('agent:claimed')) return 'claimed'
+  if (labelSet.has('agent:stale')) return 'stale'
+  if (labelSet.has('agent:ready')) return 'ready'
+  return 'unknown'
+}
+
+function buildGitHubLeaseAuditCheck(
+  lease: DaemonHealthPayload['runtime']['activeLeaseDetails'][number],
+  result: GhJsonResult,
+): GitHubLeaseAuditCheck {
+  if (!result.ok) {
+    return {
+      scope: lease.scope,
+      targetNumber: lease.targetNumber,
+      state: 'unknown',
+      labels: [],
+      warning: `GitHub audit unavailable: ${result.error ?? 'unknown gh error'}`,
+    }
+  }
+
+  const data = (result.data ?? {}) as {
+    state?: unknown
+    labels?: Array<{ name?: unknown }>
+  }
+  const state = typeof data.state === 'string' ? data.state.toLowerCase() : 'unknown'
+  const labels = Array.isArray(data.labels)
+    ? data.labels
+      .map((label) => typeof label?.name === 'string' ? label.name : null)
+      .filter((label): label is string => label !== null)
+    : []
+
+  return {
+    scope: lease.scope,
+    targetNumber: lease.targetNumber,
+    state,
+    labels,
+    warning: evaluateGitHubLeaseAuditWarning(lease, state, labels),
+  }
+}
+
+function evaluateGitHubLeaseAuditWarning(
+  lease: DaemonHealthPayload['runtime']['activeLeaseDetails'][number],
+  remoteState: string,
+  labels: string[],
+): string | null {
+  const labelSet = new Set(labels)
+
+  if (lease.scope === 'issue-process') {
+    const issueState = inferIssueStateFromLabels(labels)
+    if (remoteState === 'closed') {
+      return `${formatLeaseIdentity(lease.scope, lease.targetNumber)} has an active lease but the issue is closed`
+    }
+    if (issueState !== 'working') {
+      return `${formatLeaseIdentity(lease.scope, lease.targetNumber)} has an active lease but issue state is ${issueState} (expected working)`
+    }
+    return null
+  }
+
+  if (remoteState !== 'open') {
+    return `${formatLeaseIdentity(lease.scope, lease.targetNumber)} has an active lease but the PR state is ${remoteState}`
+  }
+
+  if (lease.scope === 'pr-review' && labelSet.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) {
+    return `${formatLeaseIdentity(lease.scope, lease.targetNumber)} has an active review lease but the PR is labeled ${PR_REVIEW_LABELS.HUMAN_NEEDED}`
+  }
+
+  if (lease.scope === 'pr-merge' && !labelSet.has(PR_REVIEW_LABELS.APPROVED)) {
+    return `${formatLeaseIdentity(lease.scope, lease.targetNumber)} has an active merge lease but the PR is missing ${PR_REVIEW_LABELS.APPROVED}`
+  }
+
+  return null
+}
+
+async function runGhJsonCommand(args: string[]): Promise<GhJsonResult> {
+  const proc = Bun.spawn(['gh', ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    return {
+      ok: false,
+      data: null,
+      error: stderr.trim() || stdout.trim() || `gh ${args.join(' ')} exited ${exitCode}`,
+    }
+  }
+
+  try {
+    return {
+      ok: true,
+      data: JSON.parse(stdout),
+      error: null,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      data: null,
+      error: `failed to parse gh json: ${formatError(error)}`,
+    }
+  }
 }
 
 async function requestLocalEndpoint(url: string): Promise<LocalEndpointResponse> {

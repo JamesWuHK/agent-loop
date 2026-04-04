@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { DaemonStatus } from '@agent/shared'
 import {
   collectDaemonObservability,
+  collectGitHubLeaseAudit,
   formatDoctorReport,
   formatStatusReport,
   parsePrometheusSamples,
@@ -240,6 +241,7 @@ describe('status helpers', () => {
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
+      githubAudit: null,
       warnings: [
         'startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile',
       ],
@@ -264,6 +266,22 @@ describe('status helpers', () => {
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
+      githubAudit: {
+        ok: true,
+        error: null,
+        checks: [
+          {
+            scope: 'issue-process',
+            targetNumber: 77,
+            state: 'open',
+            labels: ['agent:stale'],
+            warning: 'issue-process#77 has an active lease but issue state is stale (expected working)',
+          },
+        ],
+        warnings: [
+          'issue-process#77 has an active lease but issue state is stale (expected working)',
+        ],
+      },
       warnings: [
         'startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile',
         'review auto-fix push failures observed: 1',
@@ -282,6 +300,8 @@ describe('status helpers', () => {
     expect(report).toContain('issue-process#77 stuck 75s')
     expect(report).toContain('Recent Recovery Actions')
     expect(report).toContain('issue-process-idle-timeout/recoverable | target=issue-process#77')
+    expect(report).toContain('GitHub Audit')
+    expect(report).toContain('issue-process#77 | state=open | labels=agent:stale | warning=issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(report).toContain('merge-recovery: merged_initial=1')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('- review auto-fix push failures observed: 1')
@@ -329,6 +349,48 @@ describe('status helpers', () => {
       healthServer.stop(true)
       metricsServer.stop(true)
     }
+  })
+
+  test('collects GitHub audit warnings for lease-label mismatches', async () => {
+    const audit = await collectGitHubLeaseAudit({
+      repo: 'JamesWuHK/digital-employee',
+      runtime: {
+        ...baseHealth.runtime,
+        activeLeaseDetails: [
+          baseHealth.runtime.activeLeaseDetails[0]!,
+          {
+            ...baseHealth.runtime.activeLeaseDetails[1]!,
+            scope: 'pr-merge',
+          },
+        ],
+      },
+    }, async (args) => {
+      if (args[0] === 'issue') {
+        return {
+          ok: true,
+          data: {
+            number: 77,
+            state: 'OPEN',
+            labels: [{ name: 'agent:stale' }],
+          },
+          error: null,
+        }
+      }
+
+      return {
+        ok: true,
+        data: {
+          number: 108,
+          state: 'OPEN',
+          labels: [{ name: 'agent:review-retry' }],
+        },
+        error: null,
+      }
+    })
+
+    expect(audit.ok).toBe(true)
+    expect(audit.warnings).toContain('issue-process#77 has an active lease but issue state is stale (expected working)')
+    expect(audit.warnings).toContain('pr-merge#108 has an active merge lease but the PR is missing agent:review-approved')
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {
