@@ -1,5 +1,5 @@
 import { $ } from 'bun'
-import type { AgentConfig, Subtask } from '@agent/shared'
+import { getProjectPromptGuidance, type AgentConfig, type Subtask } from '@agent/shared'
 import {
   buildPlanningPrompt,
   parsePlanningOutput,
@@ -39,7 +39,7 @@ export async function runSubtaskExecutor(
 
   // ── Step 1: Planning ──────────────────────────────────────────────────────
   logger.log('[subtask] running planning agent...')
-  const planningPrompt = buildPlanningPrompt(issueTitle, issueBody)
+  const planningPrompt = buildPlanningPrompt(issueTitle, issueBody, config.project)
   const planningOutput = await runConfiguredAgent({
     prompt: planningPrompt,
     config,
@@ -80,7 +80,13 @@ export async function runSubtaskExecutor(
     // Capture HEAD before agent runs
     const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
 
-    const subtaskPrompt = buildSubtaskPrompt(subtask, issueNumber, issueTitle, issueBody)
+    const subtaskPrompt = buildSubtaskPrompt(
+      subtask,
+      issueNumber,
+      issueTitle,
+      issueBody,
+      config.project,
+    )
     const result = await runConfiguredAgent({
       prompt: subtaskPrompt,
       worktreePath,
@@ -235,6 +241,7 @@ export async function runIssueRecovery(
     config.repo,
     existingPr ?? null,
     recentBlockingReasons,
+    config.project,
   )
   const result = await runConfiguredAgent({
     prompt,
@@ -336,7 +343,13 @@ export async function runReviewAutoFix(
   logger = console,
 ): Promise<ReviewAutoFixResult> {
   const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
-  const prompt = buildReviewAutoFixPrompt(issueNumber, prNumber, prUrl, reviewReason)
+  const prompt = buildReviewAutoFixPrompt(
+    issueNumber,
+    prNumber,
+    prUrl,
+    reviewReason,
+    config.project,
+  )
   const result = await runConfiguredAgent({
     prompt,
     worktreePath,
@@ -406,7 +419,10 @@ export function buildReviewAutoFixPrompt(
   prNumber: number,
   prUrl: string,
   reviewReason: string,
+  project: AgentConfig['project'] = { profile: 'generic' },
 ): string {
+  const projectGuidance = getProjectPromptGuidance(project, 'reviewFix')
+
   return `You are fixing review-blocking issues on an existing branch.
 
 Issue #${issueNumber}
@@ -426,9 +442,10 @@ Requirements:
 - Do not create a new branch.
 - Do not create or modify PR metadata.
 - Make the minimal code changes necessary.
-- When validating desktop frontend tests, run them from \`apps/desktop\` so Vitest loads \`vite.config.ts\` and the \`jsdom\` environment. Prefer Bun-native execution to avoid host Node mismatches (for example \`cd apps/desktop && bun run --bun test src/App.test.tsx\`).
 - Commit your changes if you make any fixes.
 - If no code change is needed, do not fake a commit.
+${projectGuidance.length > 0 ? `${projectGuidance.map((line) => `- ${line}`).join('\n')}
+` : ''}
 `
 }
 
@@ -439,7 +456,9 @@ export function buildIssueRecoveryPrompt(
   repo: string,
   existingPr: { number: number; url: string; branch: string } | null,
   recentBlockingReasons: string[],
+  project: AgentConfig['project'] = { profile: 'generic' },
 ): string {
+  const projectGuidance = getProjectPromptGuidance(project, 'recovery')
   const blockingReasonsSection = recentBlockingReasons.length > 0
     ? `Latest automated blockers to fix first:
 ${recentBlockingReasons.map((reason, index) => `${index + 1}. ${reason}`).join('\n')}
@@ -479,7 +498,7 @@ Helpful checks:
 - Run \`git log origin/main..HEAD --oneline\`
 - If review feedback includes structured JSON, treat \`mustFix\`, \`mustNotDo\`, \`validation\`, and \`scopeRationale\` as the recovery contract.
 - Run \`git diff --stat origin/main...HEAD\` and sanity-check that the changed files still match the issue scope.
-- For desktop frontend tests, prefer running from \`apps/desktop\` so Vitest picks up \`vite.config.ts\` and \`jsdom\`. Prefer Bun-native execution to avoid host Node mismatches (for example \`cd apps/desktop && bun run --bun test src/App.test.tsx\`).
+${projectGuidance.map((line) => `- ${line}`).join('\n')}
 ${existingPr ? `- Run \`git log HEAD..origin/${existingPr.branch} --oneline\` to see whether the remote PR branch is ahead of you` : ''}
 ${existingPr ? `- Run \`gh api repos/${repo}/issues/${existingPr.number}/comments --paginate\` if you need the full review history` : ''}
 `

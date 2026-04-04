@@ -1,11 +1,16 @@
-import type { Subtask } from './types'
+import type { ProjectProfileConfig, Subtask } from './types'
 import { renderIssueContractForPrompt } from './issue-contract'
+import { getProjectPromptGuidance } from './project-profile'
 
 /**
  * Build the planning prompt that asks the agent to break down an issue into
  * a numbered list of concrete subtasks.
  */
-export function buildPlanningPrompt(issueTitle: string, issueBody: string): string {
+export function buildPlanningPrompt(
+  issueTitle: string,
+  issueBody: string,
+  project?: ProjectProfileConfig,
+): string {
   // Strip HTML comments (e.g. stale bot markers) from body before planning
   const stripped = issueBody
     ? issueBody.replace(/<!--[\s\S]*?-->/g, '').trim()
@@ -13,6 +18,8 @@ export function buildPlanningPrompt(issueTitle: string, issueBody: string): stri
   const body = stripped.length > 20
     ? stripped
     : '(no description — use issue title and your judgment)'
+
+  const profileGuidance = getProjectPromptGuidance(project, 'planning')
 
   return `# Task Planning
 
@@ -32,7 +39,10 @@ Do NOT include subtasks that only say to read docs or inspect files.
 If documentation or code reading is necessary, fold it into a code-producing subtask instead.
 Every subtask must be capable of producing a non-empty git commit.
 Respect explicit file scope, out-of-scope clauses, and must-preserve semantics from the parsed contract.
-When the issue is a desktop frontend task, prefer subtasks that use the existing Vitest/jsdom setup instead of introducing new manual DOM bootstrap or test harness rewrites.
+${profileGuidance.length > 0 ? `
+
+## Project Profile Guidance
+${profileGuidance.map((line) => `- ${line}`).join('\n')}` : ''}
 
 ## Output Format (STRICT — no exceptions)
 Return ONLY a plain numbered list. No headers. No explanations. No markdown.
@@ -110,7 +120,10 @@ export function buildSubtaskPrompt(
   issueNumber: number,
   issueTitle: string,
   issueBody: string,
+  project?: ProjectProfileConfig,
 ): string {
+  const profileGuidance = getProjectPromptGuidance(project, 'implementation')
+
   return `# Subtask: ${subtask.title}
 
 ## Context
@@ -126,11 +139,14 @@ ${renderIssueContractForPrompt(issueBody)}
 2. Make the necessary code changes to complete this subtask.
 3. Treat explicit AllowedFiles, ForbiddenFiles, MustPreserve, OutOfScope, and RequiredSemantics as a hard contract.
 4. Do not expand scope to satisfy speculative improvements or unrelated follow-up work.
-5. For desktop frontend tests, use the existing Vitest/jsdom setup from \`apps/desktop/vite.config.ts\` and \`apps/desktop/src/test/setup.ts\`. Do not add manual \`JSDOM\` bootstrap, duplicate DOM globals, or new test harness files unless the issue explicitly requires it.
-6. Before committing, run \`git diff --stat origin/main...HEAD\` and verify the touched files still match the issue scope.
-7. Run: \`git status --short\` — if empty, the file is already correct. In that case, run: \`echo "NO_CHANGES" && exit 1\`
-8. Commit with message: \`fix #${subtask.id}: ${subtask.title}\`
-9. Push to origin
-10. Run: \`git log origin/main..HEAD --oneline\` — verify at least one commit appears. If empty, the commit failed. Run: \`echo "COMMIT_FAILED" && exit 1\`
+5. Before committing, run \`git diff --stat origin/main...HEAD\` and verify the touched files still match the issue scope.
+6. Run: \`git status --short\` — if empty, the file is already correct. In that case, run: \`echo "NO_CHANGES" && exit 1\`
+7. Commit with message: \`fix #${subtask.id}: ${subtask.title}\`
+8. Push to origin
+9. Run: \`git log origin/main..HEAD --oneline\` — verify at least one commit appears. If empty, the commit failed. Run: \`echo "COMMIT_FAILED" && exit 1\`
+${profileGuidance.length > 0 ? `
+
+## Project Profile Guidance
+${profileGuidance.map((line) => `- ${line}`).join('\n')}` : ''}
 `
 }

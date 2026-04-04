@@ -86,6 +86,28 @@ export interface IssueDependencyMetadata {
   dependencyParseError: boolean
 }
 
+export type ProjectProfileName =
+  | 'generic'
+  | 'desktop-vite'
+
+export type ProjectPromptContext =
+  | 'planning'
+  | 'implementation'
+  | 'reviewFix'
+  | 'recovery'
+
+export interface ProjectPromptGuidanceOverrides {
+  planning?: string[]
+  implementation?: string[]
+  reviewFix?: string[]
+  recovery?: string[]
+}
+
+export interface ProjectProfileConfig {
+  profile: ProjectProfileName
+  promptGuidance?: ProjectPromptGuidanceOverrides
+}
+
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
 
 export interface ClaimEvent {
@@ -108,6 +130,7 @@ export interface AgentConfig {
   pollIntervalMs: number
   concurrency: number
   worktreesBase: string
+  project: ProjectProfileConfig
   agent: {
     primary: 'claude' | 'codex'
     fallback: 'claude' | 'codex' | null

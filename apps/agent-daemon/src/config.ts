@@ -70,6 +70,10 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
     pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
     concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,
     worktreesBase: resolve(homedir(), '.agent-worktrees', repo.replace('/', '-')),
+    project: {
+      profile: fileConfig.project?.profile ?? 'generic',
+      promptGuidance: fileConfig.project?.promptGuidance,
+    },
     agent: {
       primary: fileConfig.agent?.primary ?? 'codex',
       fallback: fileConfig.agent?.fallback ?? 'claude',

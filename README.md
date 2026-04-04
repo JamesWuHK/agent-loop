@@ -112,6 +112,9 @@ agent-loop/
   "pollIntervalMs": 60000,
   "concurrency": 1,
   "worktreesDir": "~/.agent-worktrees",
+  "project": {
+    "profile": "generic"
+  },
   "agent": {
     "primary": "claude",
     "fallback": null,
@@ -121,6 +124,13 @@ agent-loop/
   }
 }
 ```
+
+`project.profile` 用来告诉 daemon 当前要开发的产品大致属于哪种工程形态。当前内置：
+
+- `generic`：默认值。适合大多数仓库，prompt 会优先强调“复用仓库已有的测试/构建/校验命令”，不假设前端框架。
+- `desktop-vite`：给类似 `digital-employee` 这种桌面前端仓库用，会额外提示 agent 复用 `apps/desktop` 下的 `Vitest/jsdom` 测试入口。
+
+如果你的项目是 Python、Go、Rust、Java 或其他技术栈，通常先用 `generic`，再通过 issue contract 里的 `Validation` 明确命令即可。后续也可以在 `project.promptGuidance` 里追加你自己的仓库级提示。
 
 ## CLI Options
 
