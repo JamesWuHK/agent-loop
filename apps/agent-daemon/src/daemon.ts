@@ -1379,6 +1379,15 @@ export class AgentDaemon {
       const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle)
 
       const prCheck = await checkPrExists(branch, this.config)
+      const linkedOpenPr = prCheck.prNumber !== null && prCheck.prState === 'open'
+        ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
+        : null
+      if (linkedOpenPr && shouldResetLinkedPrToRetryOnIssueResume(linkedOpenPr.labels)) {
+        await setManagedPrReviewLabels(linkedOpenPr.number, 'retry', this.config)
+        this.logger.log(
+          `[daemon] marked linked PR #${linkedOpenPr.number} as retry because issue #${issueNumber} resumed local recovery`,
+        )
+      }
       const recentBlockingReasons = prCheck.prNumber !== null
         ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
         : []
@@ -2283,6 +2292,11 @@ export function shouldApplyStandaloneIssueTransition(
   }
 
   return true
+}
+
+export function shouldResetLinkedPrToRetryOnIssueResume(prLabels: string[]): boolean {
+  const labels = new Set(prLabels)
+  return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) || labels.has(PR_REVIEW_LABELS.FAILED)
 }
 
 export function getStandaloneIssueTransitionForReviewLabels(

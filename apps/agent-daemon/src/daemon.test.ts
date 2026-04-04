@@ -13,6 +13,7 @@ import {
   isMergeabilityFailure,
   rebaseManagedBranchOntoDefault,
   shouldApplyStandaloneIssueTransition,
+  shouldResetLinkedPrToRetryOnIssueResume,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
 } from './daemon'
@@ -355,6 +356,14 @@ describe('daemon merge recovery helpers', () => {
       now,
       5 * 60_000,
     )).toBe(false)
+  })
+
+  test('resets linked PR labels back to retry when issue recovery resumes', () => {
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.RETRY])).toBe(false)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.APPROVED])).toBe(false)
   })
 
   test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {
