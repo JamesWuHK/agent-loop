@@ -8,6 +8,7 @@ import {
   buildDaemonRuntimeStatus,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  getResumableIssueLinkedPrHandoff,
   getStandaloneIssueTransitionForReviewLabels,
   isRetryableDaemonLoopError,
   isMergeabilityFailure,
@@ -364,6 +365,32 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.RETRY])).toBe(false)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.APPROVED])).toBe(false)
+  })
+
+  test('prefers standalone PR handoff for resumable issues when the branch is already synced', () => {
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+    }, false, true)).toEqual({
+      kind: 'pr-review',
+    })
+
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true, true)).toEqual({
+      kind: 'pr-review',
+    })
+
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.APPROVED],
+    }, false, true)).toEqual({
+      kind: 'pr-merge',
+    })
+  })
+
+  test('keeps resumable issues on issue recovery when the branch is not synced to the PR head', () => {
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.RETRY],
+    }, false, false)).toBeNull()
   })
 
   test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {

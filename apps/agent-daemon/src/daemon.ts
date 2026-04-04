@@ -86,6 +86,10 @@ interface ResumableIssueCandidate {
   requiresRemoteAdoption: boolean
 }
 
+interface ResumableIssuePrHandoff {
+  kind: 'pr-review' | 'pr-merge'
+}
+
 interface ActiveLeaseRuntimeReader {
   scope: ManagedLeaseScope
   targetNumber: number
@@ -767,6 +771,7 @@ export class AgentDaemon {
 
     const resumableIssue = await this.findResumableIssue()
     if (!resumableIssue) return false
+    if (await this.shouldPreferLinkedPrHandoff(resumableIssue)) return false
 
     const processPromise = this.processResumableIssue(resumableIssue)
       .catch((err) => {
@@ -781,6 +786,38 @@ export class AgentDaemon {
 
     this._inFlightProcess = processPromise
     this.syncRuntimeMetrics()
+    return true
+  }
+
+  private async shouldPreferLinkedPrHandoff(
+    candidate: ResumableIssueCandidate,
+  ): Promise<boolean> {
+    const branch = candidate.priorLease?.lease.branch ?? `agent/${candidate.issue.number}/${this.config.machineId}`
+    const linkedPr = await this.findLinkedOpenPrForIssue(candidate.issue.number, branch)
+    if (!linkedPr) return false
+
+    const labels = new Set(linkedPr.labels)
+    const canResumeHumanNeededReview = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? canResumeAutomatedPrReview(
+          await listIssueComments(linkedPr.number, this.config),
+          AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+        )
+      : false
+    const hasSyncedBranchState = candidate.requiresRemoteAdoption
+      || await isWorktreeSyncedWithRemoteBranch(
+        resolve(this.config.worktreesBase, `issue-${candidate.issue.number}-${this.config.machineId}`),
+        branch,
+      )
+    const handoff = getResumableIssueLinkedPrHandoff(
+      linkedPr,
+      canResumeHumanNeededReview,
+      hasSyncedBranchState,
+    )
+    if (!handoff) return false
+
+    this.logger.log(
+      `[daemon] deferring resumable issue #${candidate.issue.number} to standalone ${handoff.kind} on PR #${linkedPr.number} because the branch is already synced with the remote PR head`,
+    )
     return true
   }
 
@@ -930,6 +967,16 @@ export class AgentDaemon {
       return pr
     }
     return null
+  }
+
+  private async findLinkedOpenPrForIssue(
+    issueNumber: number,
+    branch: string,
+  ): Promise<ManagedPullRequest | null> {
+    const prs = await listOpenAgentPullRequests(this.config)
+    return prs.find((pr) => pr.headRefName === branch)
+      ?? prs.find((pr) => extractIssueNumberFromPrTitle(pr.title) === issueNumber)
+      ?? null
   }
 
   private async findPendingStandalonePrReview(): Promise<ManagedPullRequest | null> {
@@ -2200,11 +2247,32 @@ export class AgentDaemon {
   }
 }
 
-function shouldReviewManagedPr(pr: ManagedPullRequest): boolean {
+function shouldReviewManagedPr(pr: Pick<ManagedPullRequest, 'labels'>): boolean {
   const labels = new Set(pr.labels)
   if (labels.has(PR_REVIEW_LABELS.APPROVED)) return false
   if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) return false
   return true
+}
+
+export function getResumableIssueLinkedPrHandoff(
+  pr: Pick<ManagedPullRequest, 'labels'>,
+  canResumeHumanNeededReview: boolean,
+  hasSyncedBranchState: boolean,
+): ResumableIssuePrHandoff | null {
+  if (!hasSyncedBranchState) return null
+  if (shouldMergeManagedPr(pr)) {
+    return { kind: 'pr-merge' }
+  }
+  if (shouldReviewManagedPr(pr)) {
+    return { kind: 'pr-review' }
+  }
+
+  const labels = new Set(pr.labels)
+  if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && canResumeHumanNeededReview) {
+    return { kind: 'pr-review' }
+  }
+
+  return null
 }
 
 export function getEffectiveActiveTaskCount(input: {
@@ -2281,6 +2349,25 @@ async function readGitHeadRefOid(worktreePath: string): Promise<string> {
   }
 
   return stdout.trim()
+}
+
+async function isWorktreeSyncedWithRemoteBranch(
+  worktreePath: string,
+  branch: string,
+): Promise<boolean> {
+  const statusResult = await runGitInWorktree(worktreePath, ['status', '--short'])
+  if (statusResult.exitCode !== 0 || statusResult.stdout.trim()) return false
+
+  const fetchResult = await runGitInWorktree(worktreePath, ['fetch', 'origin', branch])
+  if (fetchResult.exitCode !== 0) return false
+
+  const [headResult, remoteHeadResult] = await Promise.all([
+    runGitInWorktree(worktreePath, ['rev-parse', 'HEAD']),
+    runGitInWorktree(worktreePath, ['rev-parse', `origin/${branch}`]),
+  ])
+  if (headResult.exitCode !== 0 || remoteHeadResult.exitCode !== 0) return false
+
+  return headResult.stdout.trim() === remoteHeadResult.stdout.trim()
 }
 
 
@@ -2389,7 +2476,7 @@ export function getStandaloneIssueTransitionForReviewLabels(
   return desired
 }
 
-function shouldMergeManagedPr(pr: ManagedPullRequest): boolean {
+function shouldMergeManagedPr(pr: Pick<ManagedPullRequest, 'labels'>): boolean {
   return new Set(pr.labels).has(PR_REVIEW_LABELS.APPROVED)
 }
 
