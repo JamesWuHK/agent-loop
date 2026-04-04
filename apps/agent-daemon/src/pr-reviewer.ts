@@ -58,6 +58,7 @@ interface AutomatedPrReviewMetadata {
   attempt: number
   approved: boolean
   canMerge: boolean
+  headRefOid?: string
 }
 
 export interface LatestAutomatedPrReviewState {
@@ -389,6 +390,7 @@ export function buildPrReviewComment(
   review: PrReviewResult,
   attempt: number,
   action: 'approved' | 'retrying' | 'human-needed',
+  headRefOid?: string,
 ): string {
   const title = action === 'approved'
     ? 'Automated review approved'
@@ -409,7 +411,15 @@ export function buildPrReviewComment(
     ? `\n<!-- agent-loop:review-feedback ${JSON.stringify(buildStructuredReviewFeedbackPayload(review))} -->`
     : ''
 
-  return `<!-- agent-loop:pr-review {"pr":${prNumber},"attempt":${attempt},"approved":${review.approved},"canMerge":${review.canMerge}} -->
+  const metadata: AutomatedPrReviewMetadata = {
+    pr: prNumber,
+    attempt,
+    approved: review.approved,
+    canMerge: review.canMerge,
+    ...(headRefOid ? { headRefOid } : {}),
+  }
+
+  return `<!-- agent-loop:pr-review ${JSON.stringify(metadata)} -->
 ${structuredFeedbackBlock}
 ## ${title}
 
@@ -504,6 +514,24 @@ export function canResumeAutomatedPrReview(
     && latest.feedback !== null
     && latest.metadata.attempt < maxAttempt
   )
+}
+
+export function getReusableAutomatedPrReviewFeedback(
+  comments: Array<{ body: string }>,
+  currentHeadRefOid: string,
+  maxAttempt: number,
+): { attempt: number; feedback: StructuredReviewFeedbackPayload } | null {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return null
+  if (latest.feedback === null) return null
+  if (latest.metadata.approved || latest.metadata.canMerge) return null
+  if (latest.metadata.attempt >= maxAttempt) return null
+  if (!latest.metadata.headRefOid || latest.metadata.headRefOid !== currentHeadRefOid) return null
+
+  return {
+    attempt: latest.metadata.attempt,
+    feedback: latest.feedback,
+  }
 }
 
 export function buildReviewRunOptions(
@@ -689,6 +717,9 @@ function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetada
       attempt,
       approved: parsed.approved === true,
       canMerge: parsed.canMerge === true,
+      headRefOid: typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
+        ? parsed.headRefOid.trim()
+        : undefined,
     }
   } catch {
     return null

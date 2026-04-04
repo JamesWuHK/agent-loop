@@ -19,7 +19,7 @@ import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
+import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
 import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
 import type { TaskExecutionMonitor } from './cli-agent'
 import {
@@ -958,6 +958,10 @@ export class AgentDaemon {
     this.logger.log(`[pr-review-subagent] reviewing existing PR #${pr.number}: "${pr.title}"`)
     const priorComments = await listIssueComments(pr.number, this.config)
     const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
+    const reviewLabels = new Set(pr.labels)
+    const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+    const resumableHumanNeededReview = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      && canResumeAutomatedPrReview(priorComments, AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS)
     const lease = await this.acquireLeaseForScope({
       targetNumber: pr.number,
       scope: 'pr-review',
@@ -965,7 +969,7 @@ export class AgentDaemon {
       worktreeId: `pr-review-${pr.number}`,
       phase: 'pr-review',
       prNumber: pr.number,
-      issueNumber: extractIssueNumberFromPrTitle(pr.title) ?? undefined,
+      issueNumber: issueNumber ?? undefined,
     })
     if (!lease) return
 
@@ -975,57 +979,113 @@ export class AgentDaemon {
     let leaseRecoveryKind: string | undefined
     try {
       const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
-      const firstReview = await reviewPr(
-        pr.number,
-        pr.url,
-        detached.worktreePath,
-        this.config,
-        this.logger,
-        monitor,
-      )
-      recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
-      if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
-        recordWorkerIdleTimeout('pr-review')
-        leaseStatus = 'recoverable'
-        leaseReason = firstReview.reason
-        leaseRecoveryKind = 'pr-review-idle-timeout'
-        return
-      }
+      const currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      const reusableFeedback = resumableHumanNeededReview
+        ? getReusableAutomatedPrReviewFeedback(
+            priorComments,
+            currentHeadRefOid,
+            AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          )
+        : null
 
-      if (firstReview.approved && firstReview.canMerge) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved'), this.config)
-        await setManagedPrReviewLabels(pr.number, 'approved', this.config)
-        this.logger.log(`[pr-review-subagent] approved PR #${pr.number}`)
-        return
-      }
+      let reviewForFix: PrReviewResult
+      let attemptAfterFix: number
 
-      const issueNumber = extractIssueNumberFromPrTitle(pr.title)
-
-      if (firstReview.reviewFailed) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed'), this.config)
-        await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+      if (reusableFeedback) {
         if (issueNumber !== null) {
-          await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
+          await this.transitionStandaloneIssue(
+            issueNumber,
+            ISSUE_LABELS.WORKING,
+            `Resuming automated PR review for PR #${pr.number} on unchanged head ${currentHeadRefOid.slice(0, 7)}`,
+            pr.number,
+          )
         }
-        this.logger.warn(`[pr-review-subagent] PR #${pr.number} produced an invalid review payload; stopping before auto-fix`)
-        return
+        await setManagedPrReviewLabels(pr.number, 'retry', this.config)
+        reviewForFix = {
+          approved: reusableFeedback.feedback.approved,
+          canMerge: reusableFeedback.feedback.canMerge,
+          reason: reusableFeedback.feedback.reason,
+          findings: reusableFeedback.feedback.findings,
+        }
+        attemptAfterFix = nextAttempt
+        this.logger.log(
+          `[pr-review-subagent] reusing structured review feedback from attempt ${reusableFeedback.attempt} for PR #${pr.number} on unchanged head ${currentHeadRefOid.slice(0, 7)}`,
+        )
+      } else {
+        const firstReview = await reviewPr(
+          pr.number,
+          pr.url,
+          detached.worktreePath,
+          this.config,
+          this.logger,
+          monitor,
+        )
+        recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
+        if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
+          recordWorkerIdleTimeout('pr-review')
+          leaseStatus = 'recoverable'
+          leaseReason = firstReview.reason
+          leaseRecoveryKind = 'pr-review-idle-timeout'
+          return
+        }
+
+        if (firstReview.approved && firstReview.canMerge) {
+          await commentOnPr(
+            pr.number,
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, 'approved', this.config)
+          this.logger.log(`[pr-review-subagent] approved PR #${pr.number}`)
+          return
+        }
+
+        if (firstReview.reviewFailed) {
+          await commentOnPr(
+            pr.number,
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+          if (issueNumber !== null) {
+            await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
+          }
+          this.logger.warn(`[pr-review-subagent] PR #${pr.number} produced an invalid review payload; stopping before auto-fix`)
+          return
+        }
+
+        if (issueNumber === null) {
+          await commentOnPr(
+            pr.number,
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+          this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
+          return
+        }
+
+        await commentOnPr(
+          pr.number,
+          buildPrReviewComment(pr.number, firstReview, nextAttempt, 'retrying', currentHeadRefOid),
+          this.config,
+        )
+        await setManagedPrReviewLabels(pr.number, 'retry', this.config)
+        reviewForFix = firstReview
+        attemptAfterFix = nextAttempt + 1
       }
 
       if (issueNumber === null) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed'), this.config)
-        await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
         return
       }
 
-      await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'retrying'), this.config)
-      await setManagedPrReviewLabels(pr.number, 'retry', this.config)
       const fixResult = await runReviewAutoFix(
         detached.worktreePath,
         issueNumber,
         pr.number,
         pr.url,
-        buildReviewFeedback(firstReview),
+        buildReviewFeedback(reviewForFix),
         this.config,
         this.logger,
         monitor,
@@ -1047,7 +1107,11 @@ export class AgentDaemon {
           reason: `Auto-fix failed: ${fixResult.error ?? 'unknown error'}`,
           reviewFailed: true,
         }
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, failedReview, nextAttempt + 1, 'human-needed'), this.config)
+        await commentOnPr(
+          pr.number,
+          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed'),
+          this.config,
+        )
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, `Standalone PR auto-fix failed: ${failedReview.reason}`)
         this.logger.warn(`[pr-review-subagent] PR #${pr.number} needs human intervention after failed auto-fix`)
@@ -1059,7 +1123,11 @@ export class AgentDaemon {
       } catch (err) {
         recordReviewAutoFixOutcome('push_failed')
         const failedReview = buildAutoFixPushFailedReview(err)
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, failedReview, nextAttempt + 1, 'human-needed'), this.config)
+        await commentOnPr(
+          pr.number,
+          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed'),
+          this.config,
+        )
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, `Standalone PR auto-fix push failed: ${failedReview.reason}`)
         this.logger.warn(`[pr-review-subagent] PR #${pr.number} needs human intervention after auto-fix push failure`)
@@ -1067,6 +1135,7 @@ export class AgentDaemon {
       }
 
       this.logger.log(`[pr-review-subagent] pushed auto-fix commit to ${pr.headRefName}`)
+      const updatedHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
       const secondReview = await reviewPr(
         pr.number,
         pr.url,
@@ -1085,13 +1154,21 @@ export class AgentDaemon {
       }
 
       if (secondReview.approved && secondReview.canMerge) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'approved'), this.config)
+        await commentOnPr(
+          pr.number,
+          buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid),
+          this.config,
+        )
         await setManagedPrReviewLabels(pr.number, 'approved', this.config)
         this.logger.log(`[pr-review-subagent] approved PR #${pr.number} after auto-fix`)
         return
       }
 
-      await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'human-needed'), this.config)
+      await commentOnPr(
+        pr.number,
+        buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid),
+        this.config,
+      )
       await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
       await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, secondReview.reason)
       this.logger.warn(`[pr-review-subagent] PR #${pr.number} still blocked after auto-fix`)
@@ -2132,6 +2209,23 @@ function getIsoAgeSeconds(iso: string, now = Date.now()): number {
   const parsed = Date.parse(iso)
   if (!Number.isFinite(parsed)) return 0
   return Math.max(0, Math.floor((now - parsed) / 1000))
+}
+
+async function readGitHeadRefOid(worktreePath: string): Promise<string> {
+  const proc = Bun.spawn(['git', '-C', worktreePath, 'rev-parse', 'HEAD'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(`git rev-parse HEAD failed in ${worktreePath}: ${(stderr || stdout).trim() || `exit ${exitCode}`}`)
+  }
+
+  return stdout.trim()
 }
 
 
