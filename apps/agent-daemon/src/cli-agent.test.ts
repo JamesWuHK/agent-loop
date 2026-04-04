@@ -17,6 +17,18 @@ const baseConfig: AgentConfig = {
   pat: 'ghp_test',
   pollIntervalMs: 60_000,
   concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
   worktreesBase: '/tmp/worktrees',
   project: {
     profile: 'generic',

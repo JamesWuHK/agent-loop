@@ -111,7 +111,14 @@ agent-loop/
   "pat": "ghp_xxx",
   "pollIntervalMs": 60000,
   "concurrency": 1,
-  "worktreesDir": "~/.agent-worktrees",
+  "scheduling": {
+    "concurrencyByRepo": {
+      "JamesWuHK/digital-employee": 2
+    },
+    "concurrencyByProfile": {
+      "desktop-vite": 1
+    }
+  },
   "project": {
     "profile": "generic"
   },
@@ -131,6 +138,7 @@ agent-loop/
 {
   "project": {
     "profile": "desktop-vite",
+    "maxConcurrency": 2,
     "promptGuidance": {
       "implementation": [
         "Run desktop frontend tests via `bun --cwd apps/desktop test ...` so Vitest loads jsdom from apps/desktop/vite.config.ts."
@@ -150,8 +158,14 @@ agent-loop/
 加载优先级：
 
 - `--repo` / `--pat` / CLI 参数 与环境变量优先处理机器运行时配置
-- `~/.agent-loop/config.json` 提供跨项目的默认值与本机 agent 路径
-- `./.agent-loop/project.json` 覆盖项目相关字段（例如 `project.profile`、`project.promptGuidance`、`agent.primary/fallback`、`git.defaultBranch`）
+- `~/.agent-loop/config.json` 提供跨项目的默认值、本机 agent 路径，以及 `scheduling.concurrencyByRepo` / `scheduling.concurrencyByProfile`
+- `./.agent-loop/project.json` 覆盖项目相关字段（例如 `project.profile`、`project.promptGuidance`、`project.maxConcurrency`、`agent.primary/fallback`、`git.defaultBranch`）
+
+并发控制现在区分“请求值”和“生效值”：
+
+- `concurrency` 是 daemon 请求的本地最大并发
+- 生效并发 = `min(concurrency, repo cap, profile cap, project.maxConcurrency)`，其中不存在或非法的 cap 会被忽略
+- daemon 的实际 claim / review / merge 调度使用生效并发，而不是只做观测
 
 `project.profile` 用来告诉 daemon 当前要开发的产品大致属于哪种工程形态。当前内置：
 
@@ -171,6 +185,9 @@ agent-loop/
 | `--concurrency N` | Max concurrent agent tasks |
 | `--poll-interval MS` | Poll interval (default: 60000ms) |
 | `--machine-id` | Override machine ID |
+| `--health-host HOST` | Health check host (default: 127.0.0.1) |
+| `--status` | Query the local daemon health + metrics summary and exit |
+| `--doctor` | Query the local daemon and print a detailed diagnostic report |
 | `--dry-run` | Simulate without making changes |
 | `--once` | Run one cycle then exit |
 | `--health-port PORT` | Health check port (default: 9310) |
@@ -197,7 +214,40 @@ curl http://127.0.0.1:9310/health
 
 # Prometheus metrics
 curl http://localhost:9090/metrics
+
+# Human / agent friendly local diagnostics
+agent-loop --status
+agent-loop --doctor
 ```
+
+`/health` 现在会返回：
+- 当前项目 profile 和默认分支
+- primary / fallback agent 选择
+- requested / effective concurrency，以及 repo/profile/project cap 来源
+- active worktrees、active PR reviews、in-flight issue/review loops
+- startup recovery 是否仍在 pending（例如启动时 GitHub/网络暂时不可达）
+- effective active task count（daemon 并发控制实际使用的值）
+- failed issue resume attempt / cooldown 跟踪计数
+- health / metrics endpoint 元信息，方便 `status` / `doctor` 自动发现
+
+`/metrics` 现在额外暴露：
+- `agent_loop_active_pr_reviews`
+- `agent_loop_inflight_issue_processes`
+- `agent_loop_inflight_pr_reviews`
+- `agent_loop_startup_recovery_pending`
+- `agent_loop_effective_active_tasks`
+- `agent_loop_project_info`
+- `agent_loop_concurrency_policy`
+- `agent_loop_pr_reviews_total`
+- `agent_loop_review_auto_fixes_total`
+- `agent_loop_pr_merge_recovery_total`
+- `agent_loop_polls_total`
+
+职责边界建议：
+
+- `/health` 保持为紧凑控制面摘要，适合 readiness / liveness 和快速判断 daemon 是否卡住
+- `/metrics` 承载细粒度 outcome、counter 和趋势，适合 dashboard、告警和 agent 读数
+- `agent-loop --status` / `agent-loop --doctor` 组合读取 `/health` + `/metrics`，给人和 agent 都提供可直接消费的排障视图
 
 ## Key Design Decisions
 

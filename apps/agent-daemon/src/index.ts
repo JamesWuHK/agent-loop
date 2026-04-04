@@ -10,8 +10,9 @@
  */
 
 import { parseArgs } from 'node:util'
-import { AgentDaemon, type HealthServerConfig } from './daemon'
+import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, type CliArgs } from './config'
+import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 
@@ -27,6 +28,7 @@ async function main() {
       'metrics-port': { type: 'string' },
       once: { type: 'boolean' },
       status: { type: 'boolean' },
+      doctor: { type: 'boolean' },
       'health-host': { type: 'string' },
       'health-port': { type: 'string' },
       help: { type: 'boolean' },
@@ -40,6 +42,16 @@ async function main() {
   if (args.help) {
     printHelp()
     process.exit(0)
+  }
+
+  if (args.status || args.doctor) {
+    const snapshot = await collectDaemonObservability({
+      healthHost: (args['health-host'] as string | undefined) ?? DEFAULT_HEALTH_SERVER_HOST,
+      healthPort: args['health-port'] ? parseInt(args['health-port'] as string) : DEFAULT_HEALTH_SERVER_PORT,
+      metricsPort,
+    })
+    console.log(args.doctor ? formatDoctorReport(snapshot) : formatStatusReport(snapshot))
+    process.exit(snapshot.ok ? 0 : 1)
   }
 
   const cliArgs: CliArgs = {
@@ -100,6 +112,8 @@ agent-loop — Distributed automation daemon
 
 Usage:
   agent-loop [options]
+  agent-loop --status [--health-port 9310]
+  agent-loop --doctor [--health-port 9310]
 
 Options:
   -r, --repo <owner/repo>     Target GitHub repository
@@ -110,6 +124,8 @@ Options:
       --health-host <host>    Health check server host (default: 127.0.0.1)
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
+      --status                Print a compact local daemon status report and exit
+      --doctor                Print a detailed local daemon diagnostic report and exit
       --dry-run               Simulate without making changes
       --once                  Run one poll cycle then exit
       --help                  Show this help message
@@ -130,6 +146,8 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --status
+  agent-loop --doctor --health-port 9311 --metrics-port 9091
   GITHUB_TOKEN=ghp_xxx agent-loop --once
 `)
 }

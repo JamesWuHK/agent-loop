@@ -18,6 +18,7 @@ interface RepoLocalConfig {
   project?: {
     profile?: ProjectProfileName
     promptGuidance?: ProjectPromptGuidanceOverrides
+    maxConcurrency?: number
   }
   agent?: {
     primary?: AgentConfig['agent']['primary']
@@ -69,6 +70,12 @@ export function buildConfig(
   const repoConfig = options.repoConfig ?? {}
   const env = options.env ?? process.env
   const homeDir = options.homeDir ?? homedir()
+  const requestedConcurrency = args.concurrency ?? fileConfig.concurrency ?? 1
+  const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
+  const scheduling = {
+    concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
+    concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
+  }
 
   const machineId =
     args.machineId ??
@@ -100,19 +107,30 @@ export function buildConfig(
     )
   }
 
+  const concurrencyPolicy = resolveConcurrencyPolicy({
+    requested: requestedConcurrency,
+    repoCap: scheduling.concurrencyByRepo[repo] ?? null,
+    profileCap: scheduling.concurrencyByProfile[projectProfile] ?? null,
+    projectCap: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency ?? null,
+  })
+
   const config: AgentConfig = {
     machineId,
     repo,
     pat,
     pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
-    concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,
+    concurrency: concurrencyPolicy.effective,
+    requestedConcurrency,
+    concurrencyPolicy,
+    scheduling,
     worktreesBase: resolve(homeDir, '.agent-worktrees', repo.replace('/', '-')),
     project: {
-      profile: repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic',
+      profile: projectProfile,
       promptGuidance: mergePromptGuidance(
         fileConfig.project?.promptGuidance,
         repoConfig.project?.promptGuidance,
       ),
+      maxConcurrency: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency,
     },
     agent: {
       primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
@@ -233,6 +251,40 @@ function saveConfigPartial(partial: Record<string, unknown>): void {
 
 export class ConfigError extends Error {
   name = 'ConfigError'
+}
+
+function resolveConcurrencyPolicy(input: {
+  requested: number
+  repoCap: number | null
+  profileCap: number | null
+  projectCap: number | null
+}) {
+  const requested = normalizePositiveInteger(input.requested, 1)
+  const repoCap = normalizeOptionalPositiveInteger(input.repoCap)
+  const profileCap = normalizeOptionalPositiveInteger(input.profileCap)
+  const projectCap = normalizeOptionalPositiveInteger(input.projectCap)
+  const caps = [requested, repoCap, profileCap, projectCap].filter(
+    (value): value is number => value !== null,
+  )
+
+  return {
+    requested,
+    effective: Math.max(1, Math.min(...caps)),
+    repoCap,
+    profileCap,
+    projectCap,
+  }
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const normalized = normalizeOptionalPositiveInteger(value)
+  return normalized ?? fallback
+}
+
+function normalizeOptionalPositiveInteger(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const integer = Math.trunc(value)
+  return integer >= 1 ? integer : null
 }
 
 export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }

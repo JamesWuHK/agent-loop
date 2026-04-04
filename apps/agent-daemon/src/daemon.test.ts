@@ -2,16 +2,103 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { AgentConfig } from '@agent/shared'
 import {
+  AgentDaemon,
+  buildDaemonRuntimeStatus,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  getStandaloneIssueTransitionForReviewLabels,
+  isRetryableDaemonLoopError,
   isMergeabilityFailure,
   rebaseManagedBranchOntoDefault,
+  shouldApplyStandaloneIssueTransition,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
 } from './daemon'
+import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 
 describe('daemon merge recovery helpers', () => {
+  test('includes effective concurrency policy and local endpoints in status snapshots', () => {
+    const config: AgentConfig = {
+      machineId: 'codex-dev',
+      repo: 'JamesWuHK/digital-employee',
+      pat: 'test-token',
+      pollIntervalMs: 60_000,
+      concurrency: 2,
+      requestedConcurrency: 5,
+      concurrencyPolicy: {
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      },
+      scheduling: {
+        concurrencyByRepo: {
+          'JamesWuHK/digital-employee': 4,
+        },
+        concurrencyByProfile: {
+          'desktop-vite': 2,
+        },
+      },
+      worktreesBase: '/tmp/worktrees',
+      project: {
+        profile: 'desktop-vite',
+        maxConcurrency: 3,
+      },
+      agent: {
+        primary: 'codex',
+        fallback: 'claude',
+        claudePath: 'claude',
+        codexPath: 'codex',
+        timeoutMs: 60_000,
+      },
+      git: {
+        defaultBranch: 'main',
+        authorName: 'agent-loop',
+        authorEmail: 'agent-loop@local',
+      },
+    }
+
+    const daemon = new AgentDaemon(
+      config,
+      console,
+      { host: '127.0.0.1', port: 9311 },
+      9091,
+    )
+
+    expect(daemon.getStatus()).toMatchObject({
+      repo: 'JamesWuHK/digital-employee',
+      concurrency: 2,
+      requestedConcurrency: 5,
+      concurrencyPolicy: {
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      },
+      project: {
+        profile: 'desktop-vite',
+        defaultBranch: 'main',
+        maxConcurrency: 3,
+      },
+      endpoints: {
+        health: {
+          host: '127.0.0.1',
+          port: 9311,
+          path: '/health',
+        },
+        metrics: {
+          host: '127.0.0.1',
+          port: 9091,
+          path: '/metrics',
+        },
+      },
+    })
+  })
+
   test('counts in-flight issue work before a worktree is registered', () => {
     expect(getEffectiveActiveTaskCount({
       activeWorktreeCount: 0,
@@ -28,6 +115,33 @@ describe('daemon merge recovery helpers', () => {
       activePrReviewCount: 1,
       hasInFlightPrReview: true,
     })).toBe(2)
+  })
+
+  test('builds runtime status snapshots for health and metrics surfaces', () => {
+    expect(buildDaemonRuntimeStatus({
+      activeWorktreeCount: 1,
+      activePrReviewCount: 2,
+      hasInFlightProcess: true,
+      hasInFlightPrReview: true,
+      startupRecoveryPending: true,
+      failedIssueResumeAttemptCount: 3,
+      failedIssueResumeCooldownCount: 2,
+    })).toEqual({
+      activePrReviews: 2,
+      inFlightIssueProcess: true,
+      inFlightPrReview: true,
+      startupRecoveryPending: true,
+      effectiveActiveTasks: 3,
+      failedIssueResumeAttemptsTracked: 3,
+      failedIssueResumeCooldownsTracked: 2,
+    })
+  })
+
+  test('treats transient network-style daemon errors as retryable', () => {
+    expect(isRetryableDaemonLoopError(new Error('gh api failed: dial tcp: i/o timeout'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('Could not resolve host: api.github.com'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('Connection refused'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('malformed issue contract'))).toBe(false)
   })
 
   test('resumes working issues with a local worktree after daemon restart', () => {
@@ -134,6 +248,68 @@ describe('daemon merge recovery helpers', () => {
       now,
       5 * 60_000,
     )).toBe(false)
+  })
+
+  test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.DONE,
+    )).toBe(true)
+
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.FAILED,
+    )).toBe(false)
+
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.WORKING,
+    )).toBe(false)
+  })
+
+  test('reconciles human-needed PR labels back to agent:failed on startup', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED],
+      { state: 'working' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.FAILED,
+      reasonSuffix: 'is in human-needed state on startup',
+    })
+  })
+
+  test('reconciles retry and approved PR labels back to agent:working on startup', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+      { state: 'failed' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.WORKING,
+      reasonSuffix: 'is retrying review on startup',
+    })
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'failed' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.WORKING,
+      reasonSuffix: 'is approved and awaiting merge on startup',
+    })
+  })
+
+  test('does not emit redundant startup issue transitions when PR and issue already agree', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'working' },
+    )).toBeNull()
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED],
+      { state: 'failed' },
+    )).toBeNull()
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'done' },
+    )).toBeNull()
   })
 
   test('detects mergeability failures from GitHub merge API messages', () => {

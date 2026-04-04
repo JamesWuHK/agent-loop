@@ -1,23 +1,34 @@
 import { $ } from 'bun'
 import { resolve } from 'node:path'
 import type { AgentConfig, AgentIssue, DaemonStatus, ManagedPullRequest, WorktreeInfo } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
 import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, type PrReviewResult } from './pr-reviewer'
+import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
 import {
   recordPoll,
   recordPollDuration,
   recordIssueProcessed,
   recordIssueProcessingDuration,
+  recordPrReviewOutcome,
+  recordReviewAutoFixOutcome,
+  recordPrMergeRecoveryOutcome,
   recordPrCreated,
   setActiveWorktrees,
+  setActivePrReviews,
   setConcurrencyLimit,
+  setConcurrencyPolicy,
   setDaemonUptime,
+  setEffectiveActiveTasks,
+  setInFlightIssueProcesses,
+  setInFlightPrReviews,
+  setProjectInfo,
+  setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
+  METRICS_PATH,
   type MetricsServer,
 } from './metrics'
 
@@ -26,8 +37,27 @@ export interface HealthServerConfig {
   port: number
 }
 
-const DEFAULT_HEALTH_SERVER_PORT = 9310
-const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
+export const HEALTH_PATH = '/health'
+export const DEFAULT_HEALTH_SERVER_PORT = 9310
+export const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
+const LOCAL_METRICS_HOST = '127.0.0.1'
+const RETRYABLE_DAEMON_ERROR_PATTERNS = [
+  'timeout',
+  'timed out',
+  'temporary failure',
+  'connection refused',
+  'connection reset',
+  'network is unreachable',
+  'could not resolve host',
+  'failed to connect',
+  'tls handshake timeout',
+  'i/o timeout',
+  'context deadline exceeded',
+  'econn',
+  'enotfound',
+  'socket hang up',
+  'no route to host',
+] as const
 
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
@@ -53,6 +83,7 @@ export class AgentDaemon {
   private static readonly FAILED_ISSUE_RESUME_COOLDOWN_MS = 5 * 60 * 1000
   private failedIssueResumeAttempts = new Map<number, number>()
   private failedIssueResumeCooldownUntil = new Map<number, number>()
+  private startupRecoveryPending = true
 
   constructor(
     private config: AgentConfig,
@@ -70,29 +101,36 @@ export class AgentDaemon {
     this.logger.log(`[daemon] starting agent-loop v0.1.0`)
     this.logger.log(`[daemon] machineId: ${this.config.machineId}`)
     this.logger.log(`[daemon] repo: ${this.config.repo}`)
-    this.logger.log(`[daemon] concurrency: ${this.config.concurrency}`)
+    this.logger.log(
+      `[daemon] concurrency: effective=${this.config.concurrency} requested=${this.config.requestedConcurrency} repoCap=${this.config.concurrencyPolicy.repoCap ?? 'none'} profileCap=${this.config.concurrencyPolicy.profileCap ?? 'none'} projectCap=${this.config.concurrencyPolicy.projectCap ?? 'none'}`,
+    )
     this.logger.log(`[daemon] poll interval: ${this.config.pollIntervalMs}ms`)
 
     // Set initial metrics
     setConcurrencyLimit(this.config.concurrency)
+    setConcurrencyPolicy(this.config.concurrencyPolicy)
     setActiveWorktrees(0)
+    setProjectInfo({
+      repo: this.config.repo,
+      profile: this.config.project.profile,
+      primaryAgent: this.config.agent.primary,
+      fallbackAgent: this.config.agent.fallback,
+      defaultBranch: this.config.git.defaultBranch,
+      machineId: this.config.machineId,
+    })
+    this.syncRuntimeMetrics()
 
     // Start metrics server
     this.metricsServer = await startMetricsServer(this.metricsPort, this.logger)
-
-    // Clean up orphaned worktrees from previous runs
-    await cleanupOrphanedWorktrees(this.config)
-
-    // Recover zombie issues: working/claimed issues that lost their local worktree
-    await this.reconcileIssueStates()
-    await this.reconcileStandalonePrIssueStates()
 
     // Start HTTP health check server
     this.startHealthServer()
 
     this.running = true
-    // Run first poll immediately; subsequent polls scheduled by pollCycle
-    await this.pollCycle()
+    this.syncRuntimeMetrics()
+
+    // Run first recovery + poll immediately; subsequent polls are self-scheduled
+    await this.runPollCycleSafely()
   }
 
   /**
@@ -141,39 +179,16 @@ export class AgentDaemon {
       const issueNumber = extractIssueNumberFromPrTitle(pr.title)
       if (issueNumber === null) continue
 
-      const issue = issueMap.get(issueNumber)
-      if (!issue) continue
+      const issue = issueMap.get(issueNumber) ?? await getAgentIssueByNumber(issueNumber, this.config)
+      const transition = getStandaloneIssueTransitionForReviewLabels(pr.labels, issue)
+      if (!transition) continue
 
-      const labels = new Set(pr.labels)
-
-      if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && issue.state !== 'failed') {
-        await this.transitionStandaloneIssue(
-          issueNumber,
-          ISSUE_LABELS.FAILED,
-          `Recovered PR #${pr.number} is in human-needed state on startup`,
-          pr.number,
-        )
-        continue
-      }
-
-      if (labels.has(PR_REVIEW_LABELS.RETRY) && issue.state === 'stale') {
-        await this.transitionStandaloneIssue(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          `Recovered PR #${pr.number} is retrying review on startup`,
-          pr.number,
-        )
-        continue
-      }
-
-      if (labels.has(PR_REVIEW_LABELS.APPROVED) && issue.state === 'stale') {
-        await this.transitionStandaloneIssue(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          `Recovered PR #${pr.number} is approved and awaiting merge on startup`,
-          pr.number,
-        )
-      }
+      await this.transitionStandaloneIssue(
+        issueNumber,
+        transition.nextLabel,
+        `Recovered PR #${pr.number} ${transition.reasonSuffix}`,
+        pr.number,
+      )
     }
   }
 
@@ -186,7 +201,7 @@ export class AgentDaemon {
       fetch: (request) => {
         const url = new URL(request.url)
 
-        if (request.method === 'GET' && url.pathname === '/health') {
+        if (request.method === 'GET' && url.pathname === HEALTH_PATH) {
           return Response.json({
             status: this.running ? 'running' : 'stopped',
             mode: 'agent-loop-daemon',
@@ -244,16 +259,42 @@ export class AgentDaemon {
     }
 
     this.running = false
+    this.syncRuntimeMetrics()
     this.logger.log(`[daemon] stopped. Worktrees preserved for debugging.`)
   }
 
   getStatus(): DaemonStatus {
+    const runtime = this.buildRuntimeStatus()
     return {
       running: this.running,
       machineId: this.config.machineId,
       repo: this.config.repo,
       pollIntervalMs: this.config.pollIntervalMs,
       concurrency: this.config.concurrency,
+      requestedConcurrency: this.config.requestedConcurrency,
+      concurrencyPolicy: this.config.concurrencyPolicy,
+      project: {
+        profile: this.config.project.profile,
+        defaultBranch: this.config.git.defaultBranch,
+        maxConcurrency: this.config.project.maxConcurrency ?? null,
+      },
+      agent: {
+        primary: this.config.agent.primary,
+        fallback: this.config.agent.fallback,
+      },
+      endpoints: {
+        health: {
+          host: this.healthServerConfig.host,
+          port: this.healthServerConfig.port,
+          path: HEALTH_PATH,
+        },
+        metrics: {
+          host: LOCAL_METRICS_HOST,
+          port: this.metricsPort,
+          path: METRICS_PATH,
+        },
+      },
+      runtime,
       activeWorktrees: Array.from(this.activeWorktrees.values()),
       lastPollAt: this.lastPollAt,
       lastClaimedAt: this.lastClaimedAt,
@@ -267,10 +308,12 @@ export class AgentDaemon {
     if (this._inFlightProcess) {
       await this._inFlightProcess
       this._inFlightProcess = null
+      this.syncRuntimeMetrics()
     }
     if (this._inFlightPrReview) {
       await this._inFlightPrReview
       this._inFlightPrReview = null
+      this.syncRuntimeMetrics()
     }
   }
 
@@ -278,9 +321,53 @@ export class AgentDaemon {
     if (this.shutdownRequested) return
 
     this.pollTimeoutId = setTimeout(
-      () => { this.pollCycle().catch(err => this.logger.error('[daemon] poll error:', err)) },
+      () => { this.runPollCycleSafely().catch(err => this.logger.error('[daemon] poll wrapper error:', err)) },
       this.config.pollIntervalMs,
     )
+  }
+
+  private async runPollCycleSafely(): Promise<void> {
+    const startedAt = Date.now()
+
+    try {
+      await this.runStartupMaintenanceIfNeeded()
+      await this.pollCycle()
+    } catch (err) {
+      const formatted = formatDaemonError(err)
+      if (isRetryableDaemonLoopError(err)) {
+        this.logger.warn(`[daemon] transient loop error; will retry on next poll: ${formatted}`)
+      } else {
+        this.logger.error(`[daemon] poll cycle failed; will retry on next poll: ${formatted}`)
+      }
+      recordPoll('error')
+      recordPollDuration(Date.now() - startedAt)
+      if (!this.shutdownRequested && this.running) {
+        this.scheduleNextPoll()
+      }
+    }
+  }
+
+  private async runStartupMaintenanceIfNeeded(): Promise<void> {
+    if (!this.startupRecoveryPending) return
+
+    try {
+      await cleanupOrphanedWorktrees(this.config)
+      await this.reconcileIssueStates()
+      await this.reconcileStandalonePrIssueStates()
+      this.startupRecoveryPending = false
+      this.syncRuntimeMetrics()
+      this.logger.log('[daemon] startup recovery complete')
+    } catch (err) {
+      this.startupRecoveryPending = true
+      this.syncRuntimeMetrics()
+      const formatted = formatDaemonError(err)
+      if (isRetryableDaemonLoopError(err)) {
+        this.logger.warn(`[daemon] startup recovery deferred until connectivity recovers: ${formatted}`)
+        return
+      }
+
+      this.logger.error(`[daemon] startup recovery failed; will retry on next poll: ${formatted}`)
+    }
   }
 
   private async pollCycle(): Promise<void> {
@@ -288,6 +375,7 @@ export class AgentDaemon {
 
     const pollStartTime = Date.now()
     this.lastPollAt = new Date().toISOString()
+    this.syncRuntimeMetrics()
     this.logger.log(`[daemon] poll cycle at ${this.lastPollAt}`)
 
     // Update uptime metric
@@ -358,10 +446,12 @@ export class AgentDaemon {
       .finally(() => {
         if (this._inFlightProcess === processPromise) {
           this._inFlightProcess = null
+          this.syncRuntimeMetrics()
         }
       })
 
     this._inFlightProcess = processPromise
+    this.syncRuntimeMetrics()
 
     this.scheduleNextPoll()
   }
@@ -373,6 +463,7 @@ export class AgentDaemon {
     if (!pendingPr) return false
 
     this.activePrReviews.add(pendingPr.number)
+    this.syncRuntimeMetrics()
     const reviewPromise = this.processStandalonePrReview(pendingPr)
       .catch((err) => {
         this.logger.error(`[pr-review-subagent] PR #${pendingPr.number} threw:`, err)
@@ -382,9 +473,11 @@ export class AgentDaemon {
         if (this._inFlightPrReview === reviewPromise) {
           this._inFlightPrReview = null
         }
+        this.syncRuntimeMetrics()
       })
 
     this._inFlightPrReview = reviewPromise
+    this.syncRuntimeMetrics()
     return true
   }
 
@@ -395,6 +488,7 @@ export class AgentDaemon {
     if (!pendingPr) return false
 
     this.activePrReviews.add(pendingPr.number)
+    this.syncRuntimeMetrics()
     const mergePromise = this.processStandaloneApprovedPrMerge(pendingPr)
       .catch((err) => {
         this.logger.error(`[pr-merge-subagent] PR #${pendingPr.number} threw:`, err)
@@ -404,9 +498,11 @@ export class AgentDaemon {
         if (this._inFlightPrReview === mergePromise) {
           this._inFlightPrReview = null
         }
+        this.syncRuntimeMetrics()
       })
 
     this._inFlightPrReview = mergePromise
+    this.syncRuntimeMetrics()
     return true
   }
 
@@ -423,10 +519,12 @@ export class AgentDaemon {
       .finally(() => {
         if (this._inFlightProcess === processPromise) {
           this._inFlightProcess = null
+          this.syncRuntimeMetrics()
         }
       })
 
     this._inFlightProcess = processPromise
+    this.syncRuntimeMetrics()
     return true
   }
 
@@ -563,6 +661,7 @@ export class AgentDaemon {
         this.config,
         this.logger,
       )
+      recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
 
       if (firstReview.approved && firstReview.canMerge) {
         await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved'), this.config)
@@ -601,6 +700,7 @@ export class AgentDaemon {
         this.config,
         this.logger,
       )
+      recordReviewAutoFixOutcome(fixResult.outcome)
 
       if (!fixResult.success) {
         const failedReview: PrReviewResult = {
@@ -616,7 +716,18 @@ export class AgentDaemon {
         return
       }
 
-      await pushBranch(detached.worktreePath, pr.headRefName, this.logger)
+      try {
+        await pushBranch(detached.worktreePath, pr.headRefName, this.logger)
+      } catch (err) {
+        recordReviewAutoFixOutcome('push_failed')
+        const failedReview = buildAutoFixPushFailedReview(err)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, failedReview, nextAttempt + 1, 'human-needed'), this.config)
+        await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+        await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, `Standalone PR auto-fix push failed: ${failedReview.reason}`)
+        this.logger.warn(`[pr-review-subagent] PR #${pr.number} needs human intervention after auto-fix push failure`)
+        return
+      }
+
       this.logger.log(`[pr-review-subagent] pushed auto-fix commit to ${pr.headRefName}`)
       const secondReview = await reviewPr(
         pr.number,
@@ -625,6 +736,7 @@ export class AgentDaemon {
         this.config,
         this.logger,
       )
+      recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
 
       if (secondReview.approved && secondReview.canMerge) {
         await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'approved'), this.config)
@@ -690,15 +802,20 @@ export class AgentDaemon {
     reason: string,
     prNumber?: number,
   ): Promise<void> {
-    const issues = await listOpenAgentIssues(this.config)
-    const issue = issues.find((candidate) => candidate.number === issueNumber)
-    if (!issue) return
+    const issue = await getAgentIssueByNumber(issueNumber, this.config)
+    if (!issue || !shouldApplyStandaloneIssueTransition(issue, nextLabel)) {
+      this.logger.log(
+        `[daemon] skipping standalone issue transition for #${issueNumber}: current=${issue?.state ?? 'missing'} target=${nextLabel}`,
+      )
+      return
+    }
 
     const currentLabel =
       issue.state === 'working' ? ISSUE_LABELS.WORKING
         : issue.state === 'claimed' ? ISSUE_LABELS.CLAIMED
           : issue.state === 'stale' ? ISSUE_LABELS.STALE
             : issue.state === 'failed' ? ISSUE_LABELS.FAILED
+              : issue.state === 'done' ? ISSUE_LABELS.DONE
               : issue.state === 'ready' ? ISSUE_LABELS.READY
                 : null
 
@@ -767,7 +884,7 @@ export class AgentDaemon {
         createdAt: new Date().toISOString(),
       }
       this.activeWorktrees.set(issueNumber, wt)
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
 
       await restoreManagedWorktreeState(worktreePath, this.logger)
 
@@ -800,6 +917,7 @@ export class AgentDaemon {
       if (finalized) {
         this.failedIssueResumeAttempts.delete(issueNumber)
         this.failedIssueResumeCooldownUntil.delete(issueNumber)
+        this.syncRuntimeMetrics()
       } else {
         this.registerFailedIssueResume(issueNumber)
       }
@@ -815,7 +933,7 @@ export class AgentDaemon {
       }
 
       this.activeWorktrees.delete(issueNumber)
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     }
   }
@@ -828,10 +946,12 @@ export class AgentDaemon {
   ): Promise<{ merged: boolean; message: string; sha?: string; review?: PrReviewResult }> {
     const mergeResult = await mergePullRequest(prNumber, this.config)
     if (mergeResult.merged) {
+      recordPrMergeRecoveryOutcome('merged_initial')
       return mergeResult
     }
 
     if (!isMergeabilityFailure(mergeResult.message)) {
+      recordPrMergeRecoveryOutcome('blocked_non_mergeable')
       await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, mergeResult.message), this.config)
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return mergeResult
@@ -850,6 +970,7 @@ export class AgentDaemon {
       this.logger,
     )
     if (!refreshResult.success) {
+      recordPrMergeRecoveryOutcome('refresh_failed')
       const blockedResult = {
         merged: false,
         message: `Branch refresh failed: ${refreshResult.message}`,
@@ -859,10 +980,24 @@ export class AgentDaemon {
       return blockedResult
     }
 
-    await pushBranch(worktreePath, branch, this.logger)
+    try {
+      await pushBranch(worktreePath, branch, this.logger)
+    } catch (err) {
+      recordPrMergeRecoveryOutcome('refresh_push_failed')
+      const blockedResult = {
+        merged: false,
+        message: `Branch refresh push failed: ${formatDaemonError(err)}`,
+      }
+      await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, blockedResult.message), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+      return blockedResult
+    }
+
     const review = await this.runDetachedPrReview(prNumber, prUrl)
+    recordPrReviewOutcome('merge_refresh', classifyPrReviewOutcome(review))
 
     if (!(review.approved && review.canMerge)) {
+      recordPrMergeRecoveryOutcome('refresh_review_blocked')
       await commentOnPr(prNumber, buildPrReviewComment(prNumber, review, 2, 'human-needed'), this.config)
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return {
@@ -877,12 +1012,14 @@ export class AgentDaemon {
 
     const retriedMergeResult = await mergePullRequest(prNumber, this.config)
     if (retriedMergeResult.merged) {
+      recordPrMergeRecoveryOutcome('merged_after_refresh')
       return {
         ...retriedMergeResult,
         review,
       }
     }
 
+    recordPrMergeRecoveryOutcome('retry_merge_failed')
     await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, retriedMergeResult.message), this.config)
     await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
     return {
@@ -898,6 +1035,7 @@ export class AgentDaemon {
       issueNumber,
       Date.now() + AgentDaemon.FAILED_ISSUE_RESUME_COOLDOWN_MS,
     )
+    this.syncRuntimeMetrics()
   }
 
   private async reviewAndPossiblyAutoFix(
@@ -908,6 +1046,7 @@ export class AgentDaemon {
     prUrl: string,
   ): Promise<{ approved: boolean; review: PrReviewResult }> {
     const firstReview = await this.runDetachedPrReview(prNumber, prUrl)
+    recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
     await commentOnPr(
       prNumber,
       buildPrReviewComment(
@@ -944,6 +1083,7 @@ export class AgentDaemon {
       this.config,
       this.logger,
     )
+    recordReviewAutoFixOutcome(fixResult.outcome)
 
     if (!fixResult.success) {
       const failedReview: PrReviewResult = {
@@ -957,8 +1097,18 @@ export class AgentDaemon {
       return { approved: false, review: failedReview }
     }
 
-    await pushBranch(worktreePath, branch, this.logger)
+    try {
+      await pushBranch(worktreePath, branch, this.logger)
+    } catch (err) {
+      recordReviewAutoFixOutcome('push_failed')
+      const failedReview = buildAutoFixPushFailedReview(err)
+      await commentOnPr(prNumber, buildPrReviewComment(prNumber, failedReview, 2, 'human-needed'), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+      return { approved: false, review: failedReview }
+    }
+
     const secondReview = await this.runDetachedPrReview(prNumber, prUrl)
+    recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
 
     if (secondReview.approved && secondReview.canMerge) {
       await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'approved'), this.config)
@@ -1021,7 +1171,7 @@ export class AgentDaemon {
         this.logger.error(`[daemon] issue #${issue.number} review approved but merge failed: PR #${pr.prNumber} (${mergeResult.message})`)
         recordIssueProcessed('failed')
         this.activeWorktrees.delete(issue.number)
-        setActiveWorktrees(this.activeWorktrees.size)
+        this.syncRuntimeMetrics()
         return false
       }
 
@@ -1048,7 +1198,7 @@ export class AgentDaemon {
 
       await removeWorktree(worktreePath, branch)
       this.activeWorktrees.delete(issue.number)
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
       return true
     }
 
@@ -1070,7 +1220,7 @@ export class AgentDaemon {
     this.logger.error(`[daemon] issue #${issue.number} failed review and needs human intervention: PR #${pr.prNumber}`)
     recordIssueProcessed('failed')
     this.activeWorktrees.delete(issue.number)
-    setActiveWorktrees(this.activeWorktrees.size)
+    this.syncRuntimeMetrics()
     return false
   }
 
@@ -1090,7 +1240,7 @@ export class AgentDaemon {
 
     recordIssueProcessed('failed')
     this.activeWorktrees.delete(issueNumber)
-    setActiveWorktrees(this.activeWorktrees.size)
+    this.syncRuntimeMetrics()
   }
 
   private async processIssue(issue: AgentIssue): Promise<void> {
@@ -1127,7 +1277,7 @@ export class AgentDaemon {
         createdAt: new Date().toISOString(),
       }
       this.activeWorktrees.set(issueNumber, wt)
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
 
       // Run planning agent + subtask loop
       const result = await runSubtaskExecutor(
@@ -1160,14 +1310,14 @@ export class AgentDaemon {
         this.logger.error(`[daemon] issue #${issueNumber} failed (${doneCount}/${result.subtasks.length} subtasks done): ${result.error}`)
         recordIssueProcessed('failed')
         this.activeWorktrees.delete(issueNumber)
-        setActiveWorktrees(this.activeWorktrees.size)
+        this.syncRuntimeMetrics()
       }
 
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
       this.logger.error(`[daemon] failed to process issue #${issueNumber}:`, err)
       recordIssueProcessed('error')
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
 
       try {
         await transitionIssueState(
@@ -1187,9 +1337,31 @@ export class AgentDaemon {
       }
 
       this.activeWorktrees.delete(issueNumber)
-      setActiveWorktrees(this.activeWorktrees.size)
+      this.syncRuntimeMetrics()
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     }
+  }
+
+  private buildRuntimeStatus(): DaemonStatus['runtime'] {
+    return buildDaemonRuntimeStatus({
+      activeWorktreeCount: this.activeWorktrees.size,
+      activePrReviewCount: this.activePrReviews.size,
+      hasInFlightProcess: this._inFlightProcess !== null,
+      hasInFlightPrReview: this._inFlightPrReview !== null,
+      startupRecoveryPending: this.startupRecoveryPending,
+      failedIssueResumeAttemptCount: this.failedIssueResumeAttempts.size,
+      failedIssueResumeCooldownCount: this.failedIssueResumeCooldownUntil.size,
+    })
+  }
+
+  private syncRuntimeMetrics(): void {
+    const runtime = this.buildRuntimeStatus()
+    setActiveWorktrees(this.activeWorktrees.size)
+    setActivePrReviews(runtime.activePrReviews)
+    setInFlightIssueProcesses(runtime.inFlightIssueProcess)
+    setInFlightPrReviews(runtime.inFlightPrReview)
+    setStartupRecoveryPending(runtime.startupRecoveryPending)
+    setEffectiveActiveTasks(runtime.effectiveActiveTasks)
   }
 }
 
@@ -1210,6 +1382,36 @@ export function getEffectiveActiveTaskCount(input: {
   const prTaskCount = Math.max(input.activePrReviewCount, input.hasInFlightPrReview ? 1 : 0)
 
   return issueTaskCount + prTaskCount
+}
+
+export function buildDaemonRuntimeStatus(input: {
+  activeWorktreeCount: number
+  activePrReviewCount: number
+  hasInFlightProcess: boolean
+  hasInFlightPrReview: boolean
+  startupRecoveryPending: boolean
+  failedIssueResumeAttemptCount: number
+  failedIssueResumeCooldownCount: number
+}): DaemonStatus['runtime'] {
+  return {
+    activePrReviews: input.activePrReviewCount,
+    inFlightIssueProcess: input.hasInFlightProcess,
+    inFlightPrReview: input.hasInFlightPrReview,
+    startupRecoveryPending: input.startupRecoveryPending,
+    effectiveActiveTasks: getEffectiveActiveTaskCount({
+      activeWorktreeCount: input.activeWorktreeCount,
+      hasInFlightProcess: input.hasInFlightProcess,
+      activePrReviewCount: input.activePrReviewCount,
+      hasInFlightPrReview: input.hasInFlightPrReview,
+    }),
+    failedIssueResumeAttemptsTracked: input.failedIssueResumeAttemptCount,
+    failedIssueResumeCooldownsTracked: input.failedIssueResumeCooldownCount,
+  }
+}
+
+export function isRetryableDaemonLoopError(error: unknown): boolean {
+  const message = formatDaemonError(error).toLowerCase()
+  return RETRYABLE_DAEMON_ERROR_PATTERNS.some((pattern) => message.includes(pattern))
 }
 
 export function shouldResumeManagedIssue(
@@ -1251,8 +1453,77 @@ export function shouldRequeueFailedIssue(
   return updatedAtMs + cooldownMs <= now
 }
 
+export function shouldApplyStandaloneIssueTransition(
+  issue: Pick<AgentIssue, 'state'> | null,
+  nextLabel: typeof ISSUE_LABELS.DONE | typeof ISSUE_LABELS.FAILED | typeof ISSUE_LABELS.WORKING,
+): boolean {
+  if (!issue) return false
+  if (issue.state === 'done') {
+    return nextLabel === ISSUE_LABELS.DONE
+  }
+
+  return true
+}
+
+export function getStandaloneIssueTransitionForReviewLabels(
+  prLabels: string[],
+  issue: Pick<AgentIssue, 'state'> | null,
+): {
+  nextLabel: typeof ISSUE_LABELS.FAILED | typeof ISSUE_LABELS.WORKING
+  reasonSuffix: string
+} | null {
+  if (!issue || issue.state === 'done') return null
+
+  const labels = new Set(prLabels)
+  const desired = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+    ? {
+        nextLabel: ISSUE_LABELS.FAILED,
+        reasonSuffix: 'is in human-needed state on startup',
+      }
+    : labels.has(PR_REVIEW_LABELS.RETRY)
+      ? {
+          nextLabel: ISSUE_LABELS.WORKING,
+          reasonSuffix: 'is retrying review on startup',
+        }
+      : labels.has(PR_REVIEW_LABELS.APPROVED)
+        ? {
+            nextLabel: ISSUE_LABELS.WORKING,
+            reasonSuffix: 'is approved and awaiting merge on startup',
+          }
+        : labels.has(PR_REVIEW_LABELS.FAILED)
+          ? {
+              nextLabel: ISSUE_LABELS.FAILED,
+              reasonSuffix: 'has a failed automated review on startup',
+            }
+          : null
+
+  if (!desired) return null
+
+  const issueAlreadyMatchesDesired =
+    (desired.nextLabel === ISSUE_LABELS.WORKING && issue.state === 'working')
+    || (desired.nextLabel === ISSUE_LABELS.FAILED && issue.state === 'failed')
+  if (issueAlreadyMatchesDesired) {
+    return null
+  }
+
+  return desired
+}
+
 function shouldMergeManagedPr(pr: ManagedPullRequest): boolean {
   return new Set(pr.labels).has(PR_REVIEW_LABELS.APPROVED)
+}
+
+function formatDaemonError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function buildAutoFixPushFailedReview(error: unknown): PrReviewResult {
+  return {
+    approved: false,
+    canMerge: false,
+    reason: `Auto-fix push failed: ${formatDaemonError(error)}`,
+    reviewFailed: true,
+  }
 }
 
 export function isMergeabilityFailure(message: string): boolean {

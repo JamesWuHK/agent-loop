@@ -155,6 +155,7 @@ export async function runSubtaskExecutor(
 export interface ReviewAutoFixResult {
   success: boolean
   exitCode: 0 | 1 | 2 | 3
+  outcome: 'committed' | 'salvaged' | 'agent_failed' | 'no_commit'
   error?: string
   commitSha?: string
 }
@@ -371,6 +372,7 @@ export async function runReviewAutoFix(
       return {
         success: true,
         exitCode: 0,
+        outcome: 'salvaged',
         commitSha: salvagedCommit,
       }
     }
@@ -378,6 +380,7 @@ export async function runReviewAutoFix(
     return {
       success: false,
       exitCode: result.exitCode,
+      outcome: 'agent_failed',
       error: result.stderr || result.stdout || `exit code ${result.exitCode}`,
     }
   }
@@ -395,6 +398,7 @@ export async function runReviewAutoFix(
       return {
         success: true,
         exitCode: 0,
+        outcome: 'salvaged',
         commitSha: salvagedCommit,
       }
     }
@@ -402,6 +406,7 @@ export async function runReviewAutoFix(
     return {
       success: false,
       exitCode: 1,
+      outcome: 'no_commit',
       error: 'auto-fix agent exited 0 but no commit was made',
     }
   }
@@ -410,6 +415,7 @@ export async function runReviewAutoFix(
   return {
     success: true,
     exitCode: 0,
+    outcome: 'committed',
     commitSha: afterHead,
   }
 }

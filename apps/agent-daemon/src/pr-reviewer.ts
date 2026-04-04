@@ -565,6 +565,24 @@ export function parsePrReviewResponse(responseText: string): PrReviewResult {
   return review
 }
 
+export function classifyPrReviewOutcome(
+  review: Pick<PrReviewResult, 'approved' | 'canMerge' | 'reviewFailed' | 'reason'>,
+): 'approved' | 'rejected' | 'invalid_output' | 'execution_failed' {
+  if (review.approved && review.canMerge) {
+    return 'approved'
+  }
+
+  if (!review.reviewFailed) {
+    return 'rejected'
+  }
+
+  if (review.reason.startsWith('Review output failed validation:')) {
+    return 'invalid_output'
+  }
+
+  return 'execution_failed'
+}
+
 export function normalizeWorktreePath(path: string): string {
   try {
     return realpathSync(path)

@@ -16,6 +16,18 @@ const TEST_CONFIG: AgentConfig = {
   pat: 'test-token',
   pollIntervalMs: 60_000,
   concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
   worktreesBase: '/tmp',
   project: {
     profile: 'desktop-vite',

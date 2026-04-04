@@ -106,6 +106,20 @@ export interface ProjectPromptGuidanceOverrides {
 export interface ProjectProfileConfig {
   profile: ProjectProfileName
   promptGuidance?: ProjectPromptGuidanceOverrides
+  maxConcurrency?: number
+}
+
+export interface AgentSchedulingConfig {
+  concurrencyByRepo: Record<string, number>
+  concurrencyByProfile: Partial<Record<ProjectProfileName, number>>
+}
+
+export interface ConcurrencyPolicy {
+  requested: number
+  effective: number
+  repoCap: number | null
+  profileCap: number | null
+  projectCap: number | null
 }
 
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
@@ -129,6 +143,9 @@ export interface AgentConfig {
   pat: string
   pollIntervalMs: number
   concurrency: number
+  requestedConcurrency: number
+  concurrencyPolicy: ConcurrencyPolicy
+  scheduling: AgentSchedulingConfig
   worktreesBase: string
   project: ProjectProfileConfig
   agent: {
@@ -189,6 +206,38 @@ export interface DaemonStatus {
   repo: string
   pollIntervalMs: number
   concurrency: number
+  requestedConcurrency: number
+  concurrencyPolicy: ConcurrencyPolicy
+  project: {
+    profile: ProjectProfileName
+    defaultBranch: string
+    maxConcurrency: number | null
+  }
+  agent: {
+    primary: AgentConfig['agent']['primary']
+    fallback: AgentConfig['agent']['fallback']
+  }
+  endpoints: {
+    health: {
+      host: string
+      port: number
+      path: string
+    }
+    metrics: {
+      host: string
+      port: number
+      path: string
+    }
+  }
+  runtime: {
+    activePrReviews: number
+    inFlightIssueProcess: boolean
+    inFlightPrReview: boolean
+    startupRecoveryPending: boolean
+    effectiveActiveTasks: number
+    failedIssueResumeAttemptsTracked: number
+    failedIssueResumeCooldownsTracked: number
+  }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null
   lastClaimedAt: string | null

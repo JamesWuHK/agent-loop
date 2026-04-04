@@ -7,6 +7,7 @@ import {
   buildReviewRepairPrompt,
   buildReviewPrompt,
   canResumeAutomatedPrReview,
+  classifyPrReviewOutcome,
   buildReviewFeedback,
   collectDependencyDirectories,
   extractLatestAutomatedPrReviewState,
@@ -28,6 +29,18 @@ const TEST_CONFIG: AgentConfig = {
   pat: 'test-token',
   pollIntervalMs: 60_000,
   concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
   worktreesBase: '/tmp',
   project: {
     profile: 'generic',
@@ -83,6 +96,34 @@ describe('pr-reviewer', () => {
         },
       ],
     })
+  })
+
+  test('classifies approved, rejected, invalid-output, and execution-failed review outcomes', () => {
+    expect(classifyPrReviewOutcome({
+      approved: true,
+      canMerge: true,
+      reason: 'ready',
+    })).toBe('approved')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'contract mismatch',
+    })).toBe('rejected')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'Review output failed validation: missing mustFix',
+      reviewFailed: true,
+    })).toBe('invalid_output')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'Review failed: Agent exited with code 1',
+      reviewFailed: true,
+    })).toBe('execution_failed')
   })
 
   test('builds detailed review feedback from findings', () => {

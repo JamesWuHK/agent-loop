@@ -4,9 +4,19 @@ import {
   recordClaim,
   recordIssueProcessed,
   recordAgentExecution,
+  recordPrReviewOutcome,
+  recordReviewAutoFixOutcome,
+  recordPrMergeRecoveryOutcome,
   recordPrCreated,
   setActiveWorktrees,
+  setActivePrReviews,
+  setInFlightIssueProcesses,
+  setInFlightPrReviews,
+  setStartupRecoveryPending,
+  setEffectiveActiveTasks,
+  setProjectInfo,
   setConcurrencyLimit,
+  setConcurrencyPolicy,
   setDaemonUptime,
   recordPollDuration,
   recordIssueProcessingDuration,
@@ -101,6 +111,47 @@ describe('metrics', () => {
     })
   })
 
+  describe('review and merge metrics', () => {
+    test('increments pr_reviews_total counter with stage and outcome labels', async () => {
+      recordPrReviewOutcome('initial', 'approved')
+      recordPrReviewOutcome('post_fix', 'rejected')
+      recordPrReviewOutcome('merge_refresh', 'invalid_output')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_pr_reviews_total')
+      expect(metrics).toContain('stage="initial"')
+      expect(metrics).toContain('stage="post_fix"')
+      expect(metrics).toContain('stage="merge_refresh"')
+      expect(metrics).toContain('outcome="approved"')
+      expect(metrics).toContain('outcome="rejected"')
+      expect(metrics).toContain('outcome="invalid_output"')
+    })
+
+    test('increments review_auto_fixes_total counter with outcome labels', async () => {
+      recordReviewAutoFixOutcome('committed')
+      recordReviewAutoFixOutcome('salvaged')
+      recordReviewAutoFixOutcome('push_failed')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_review_auto_fixes_total')
+      expect(metrics).toContain('outcome="committed"')
+      expect(metrics).toContain('outcome="salvaged"')
+      expect(metrics).toContain('outcome="push_failed"')
+    })
+
+    test('increments pr_merge_recovery_total counter with outcome labels', async () => {
+      recordPrMergeRecoveryOutcome('merged_initial')
+      recordPrMergeRecoveryOutcome('refresh_push_failed')
+      recordPrMergeRecoveryOutcome('merged_after_refresh')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_pr_merge_recovery_total')
+      expect(metrics).toContain('outcome="merged_initial"')
+      expect(metrics).toContain('outcome="refresh_push_failed"')
+      expect(metrics).toContain('outcome="merged_after_refresh"')
+    })
+  })
+
   describe('recordPrCreated', () => {
     test('increments prs_created_total counter', async () => {
       recordPrCreated()
@@ -120,6 +171,21 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_active_worktrees')
     })
 
+    test('tracks active PR reviews and in-flight task gauges', async () => {
+      setActivePrReviews(2)
+      setInFlightIssueProcesses(true)
+      setInFlightPrReviews(false)
+      setStartupRecoveryPending(true)
+      setEffectiveActiveTasks(3)
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_active_pr_reviews')
+      expect(metrics).toContain('agent_loop_inflight_issue_processes')
+      expect(metrics).toContain('agent_loop_inflight_pr_reviews')
+      expect(metrics).toContain('agent_loop_startup_recovery_pending')
+      expect(metrics).toContain('agent_loop_effective_active_tasks')
+    })
+
     test('setConcurrencyLimit sets the concurrency limit gauge', async () => {
       setConcurrencyLimit(4)
 
@@ -127,11 +193,49 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_concurrency_limit')
     })
 
+    test('setConcurrencyPolicy publishes requested, effective, and cap values', async () => {
+      setConcurrencyPolicy({
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      })
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_concurrency_policy')
+      expect(metrics).toContain('kind="requested"')
+      expect(metrics).toContain('kind="effective"')
+      expect(metrics).toContain('kind="repo_cap"')
+      expect(metrics).toContain('kind="profile_cap"')
+      expect(metrics).toContain('kind="project_cap"')
+    })
+
     test('setDaemonUptime sets the uptime gauge', async () => {
       setDaemonUptime(3600)
 
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_uptime_seconds')
+    })
+
+    test('publishes project info labels for project profile and agent selection', async () => {
+      setProjectInfo({
+        repo: 'JamesWuHK/digital-employee',
+        profile: 'desktop-vite',
+        primaryAgent: 'codex',
+        fallbackAgent: 'claude',
+        defaultBranch: 'main',
+        machineId: 'codex-verify',
+      })
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_project_info')
+      expect(metrics).toContain('repo="JamesWuHK/digital-employee"')
+      expect(metrics).toContain('profile="desktop-vite"')
+      expect(metrics).toContain('primary_agent="codex"')
+      expect(metrics).toContain('fallback_agent="claude"')
+      expect(metrics).toContain('default_branch="main"')
+      expect(metrics).toContain('machine_id="codex-verify"')
     })
   })
 

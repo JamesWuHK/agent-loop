@@ -6,9 +6,19 @@
  * - agent_loop_claims_total: Counter of claim attempts (labels: outcome)
  * - agent_loop_issues_processed_total: Counter of processed issues (labels: outcome)
  * - agent_loop_agent_executions_total: Counter of agent executions (labels: success)
+ * - agent_loop_pr_reviews_total: Counter of automated PR review results (labels: stage, outcome)
+ * - agent_loop_review_auto_fixes_total: Counter of automated review auto-fix attempts (labels: outcome)
+ * - agent_loop_pr_merge_recovery_total: Counter of merge recovery results (labels: outcome)
  * - agent_loop_prs_created_total: Counter of PRs created
  * - agent_loop_active_worktrees: Gauge of active worktrees
+ * - agent_loop_active_pr_reviews: Gauge of active PR review workers
+ * - agent_loop_inflight_issue_processes: Gauge of in-flight issue processors
+ * - agent_loop_inflight_pr_reviews: Gauge of in-flight PR review/merge workers
+ * - agent_loop_startup_recovery_pending: Gauge showing whether startup recovery is still pending
+ * - agent_loop_effective_active_tasks: Gauge of effective active task count used by concurrency control
+ * - agent_loop_project_info: Gauge carrying project/runtime configuration labels
  * - agent_loop_concurrency_limit: Gauge of configured concurrency limit
+ * - agent_loop_concurrency_policy: Gauge carrying requested/effective/cap concurrency values
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
@@ -21,6 +31,7 @@ import {
   Registry,
   collectDefaultMetrics,
 } from 'prom-client'
+import type { ConcurrencyPolicy } from '@agent/shared'
 
 export const METRICS_PORT_DEFAULT = 9090
 export const METRICS_PATH = '/metrics'
@@ -82,6 +93,62 @@ export const agentExecutionsTotal = new Counter({
   registers: [registry],
 })
 
+export type PrReviewStage = 'initial' | 'post_fix' | 'merge_refresh'
+export type PrReviewOutcome = 'approved' | 'rejected' | 'invalid_output' | 'execution_failed'
+
+/**
+ * Total number of automated PR reviews performed by the daemon.
+ * Labels:
+ *   - stage: "initial" | "post_fix" | "merge_refresh"
+ *   - outcome: "approved" | "rejected" | "invalid_output" | "execution_failed"
+ */
+export const prReviewsTotal = new Counter({
+  name: 'agent_loop_pr_reviews_total',
+  help: 'Total number of automated PR review outcomes',
+  labelNames: ['stage', 'outcome'] as const,
+  registers: [registry],
+})
+
+export type ReviewAutoFixOutcome =
+  | 'committed'
+  | 'salvaged'
+  | 'agent_failed'
+  | 'no_commit'
+  | 'push_failed'
+
+/**
+ * Total number of automated review auto-fix attempts.
+ * Labels:
+ *   - outcome: "committed" | "salvaged" | "agent_failed" | "no_commit" | "push_failed"
+ */
+export const reviewAutoFixesTotal = new Counter({
+  name: 'agent_loop_review_auto_fixes_total',
+  help: 'Total number of review auto-fix outcomes',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+export type PrMergeRecoveryOutcome =
+  | 'merged_initial'
+  | 'blocked_non_mergeable'
+  | 'refresh_failed'
+  | 'refresh_push_failed'
+  | 'refresh_review_blocked'
+  | 'merged_after_refresh'
+  | 'retry_merge_failed'
+
+/**
+ * Total number of merge recovery outcomes for already-approved PRs.
+ * Labels:
+ *   - outcome: merge recovery terminal outcome
+ */
+export const prMergeRecoveryTotal = new Counter({
+  name: 'agent_loop_pr_merge_recovery_total',
+  help: 'Total number of merge recovery outcomes for approved PRs',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
 /**
  * Total number of PRs created.
  */
@@ -112,11 +179,76 @@ export const activeWorktrees = new Gauge({
 })
 
 /**
+ * Current number of active standalone PR review workers.
+ */
+export const activePrReviews = new Gauge({
+  name: 'agent_loop_active_pr_reviews',
+  help: 'Current number of active PR review workers',
+  registers: [registry],
+})
+
+/**
+ * Whether an issue processing loop is currently in flight.
+ */
+export const inFlightIssueProcesses = new Gauge({
+  name: 'agent_loop_inflight_issue_processes',
+  help: 'Whether an issue processing loop is currently in flight',
+  registers: [registry],
+})
+
+/**
+ * Whether a PR review/merge loop is currently in flight.
+ */
+export const inFlightPrReviews = new Gauge({
+  name: 'agent_loop_inflight_pr_reviews',
+  help: 'Whether a PR review or merge loop is currently in flight',
+  registers: [registry],
+})
+
+/**
+ * Whether startup recovery/reconcile is still pending.
+ */
+export const startupRecoveryPending = new Gauge({
+  name: 'agent_loop_startup_recovery_pending',
+  help: 'Whether startup recovery is still pending because initial GitHub-dependent reconcile has not completed successfully',
+  registers: [registry],
+})
+
+/**
+ * Effective active task count used by concurrency control.
+ */
+export const effectiveActiveTasks = new Gauge({
+  name: 'agent_loop_effective_active_tasks',
+  help: 'Effective active task count used by daemon concurrency control',
+  registers: [registry],
+})
+
+/**
+ * Static project/runtime metadata for the running daemon.
+ */
+export const projectInfo = new Gauge({
+  name: 'agent_loop_project_info',
+  help: 'Project/runtime configuration labels for the running daemon',
+  labelNames: ['repo', 'profile', 'primary_agent', 'fallback_agent', 'default_branch', 'machine_id'] as const,
+  registers: [registry],
+})
+
+/**
  * Configured concurrency limit.
  */
 export const concurrencyLimit = new Gauge({
   name: 'agent_loop_concurrency_limit',
   help: 'Configured concurrency limit',
+  registers: [registry],
+})
+
+/**
+ * Requested/effective/cap concurrency values for the running daemon.
+ */
+export const concurrencyPolicyGauge = new Gauge({
+  name: 'agent_loop_concurrency_policy',
+  help: 'Requested, effective, and cap concurrency values for the running daemon',
+  labelNames: ['kind'] as const,
   registers: [registry],
 })
 
@@ -224,6 +356,34 @@ export function recordAgentExecution(
 }
 
 /**
+ * Record an automated PR review result.
+ */
+export function recordPrReviewOutcome(
+  stage: PrReviewStage,
+  outcome: PrReviewOutcome,
+): void {
+  prReviewsTotal.inc({ stage, outcome })
+}
+
+/**
+ * Record an automated review auto-fix result.
+ */
+export function recordReviewAutoFixOutcome(
+  outcome: ReviewAutoFixOutcome,
+): void {
+  reviewAutoFixesTotal.inc({ outcome })
+}
+
+/**
+ * Record an automated merge recovery result.
+ */
+export function recordPrMergeRecoveryOutcome(
+  outcome: PrMergeRecoveryOutcome,
+): void {
+  prMergeRecoveryTotal.inc({ outcome })
+}
+
+/**
  * Record a PR creation.
  */
 export function recordPrCreated(): void {
@@ -238,10 +398,88 @@ export function setActiveWorktrees(count: number): void {
 }
 
 /**
+ * Update active PR review workers gauge.
+ */
+export function setActivePrReviews(count: number): void {
+  activePrReviews.set(count)
+}
+
+/**
+ * Update whether an issue processing loop is in flight.
+ */
+export function setInFlightIssueProcesses(active: boolean): void {
+  inFlightIssueProcesses.set(active ? 1 : 0)
+}
+
+/**
+ * Update whether a PR review/merge loop is in flight.
+ */
+export function setInFlightPrReviews(active: boolean): void {
+  inFlightPrReviews.set(active ? 1 : 0)
+}
+
+/**
+ * Update whether startup recovery is still pending.
+ */
+export function setStartupRecoveryPending(active: boolean): void {
+  startupRecoveryPending.set(active ? 1 : 0)
+}
+
+/**
+ * Update effective active task count gauge.
+ */
+export function setEffectiveActiveTasks(count: number): void {
+  effectiveActiveTasks.set(count)
+}
+
+/**
+ * Update static project/runtime info gauge.
+ */
+export function setProjectInfo(input: {
+  repo: string
+  profile: string
+  primaryAgent: string
+  fallbackAgent: string | null
+  defaultBranch: string
+  machineId: string
+}): void {
+  projectInfo.reset()
+  projectInfo.labels({
+    repo: input.repo,
+    profile: input.profile,
+    primary_agent: input.primaryAgent,
+    fallback_agent: input.fallbackAgent ?? 'none',
+    default_branch: input.defaultBranch,
+    machine_id: input.machineId,
+  }).set(1)
+}
+
+/**
  * Update concurrency limit gauge.
  */
 export function setConcurrencyLimit(limit: number): void {
   concurrencyLimit.set(limit)
+}
+
+/**
+ * Update requested/effective/cap concurrency gauges.
+ */
+export function setConcurrencyPolicy(policy: ConcurrencyPolicy): void {
+  concurrencyPolicyGauge.reset()
+  concurrencyPolicyGauge.labels({ kind: 'requested' }).set(policy.requested)
+  concurrencyPolicyGauge.labels({ kind: 'effective' }).set(policy.effective)
+
+  const optionalCaps = [
+    ['repo_cap', policy.repoCap],
+    ['profile_cap', policy.profileCap],
+    ['project_cap', policy.projectCap],
+  ] as const
+
+  for (const [kind, value] of optionalCaps) {
+    if (value !== null) {
+      concurrencyPolicyGauge.labels({ kind }).set(value)
+    }
+  }
 }
 
 /**

@@ -228,6 +228,13 @@ async function fetchIssuesByNumbers(
   return resolved
 }
 
+export async function getAgentIssueByNumber(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<AgentIssue | null> {
+  return fetchIssuesByNumbers([issueNumber], config).then((issues) => issues.get(issueNumber) ?? null)
+}
+
 async function enrichClaimability(
   issues: AgentIssue[],
   config: AgentConfig,

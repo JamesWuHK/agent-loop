@@ -8,6 +8,18 @@ const baseFileConfig: Partial<AgentConfig> = {
   pat: 'ghp-test',
   pollIntervalMs: 60_000,
   concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
   project: {
     profile: 'generic',
     promptGuidance: {
@@ -63,11 +75,21 @@ describe('buildConfig', () => {
     expect(config.project.promptGuidance?.reviewFix).toEqual([
       'stay within issue AllowedFiles boundaries',
     ])
+    expect(config.project.maxConcurrency).toBeUndefined()
     expect(config.agent.primary).toBe('codex')
     expect(config.agent.fallback).toBe('claude')
     expect(config.agent.claudePath).toBe('claude-home')
     expect(config.agent.codexPath).toBe('codex-home')
     expect(config.git.defaultBranch).toBe('main')
+    expect(config.requestedConcurrency).toBe(1)
+    expect(config.concurrency).toBe(1)
+    expect(config.concurrencyPolicy).toEqual({
+      requested: 1,
+      effective: 1,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
+    })
     expect(config.worktreesBase).toBe('/tmp/agent-loop-home/.agent-worktrees/JamesWuHK-digital-employee')
   })
 
@@ -86,7 +108,87 @@ describe('buildConfig', () => {
     expect(config.project.promptGuidance?.implementation).toEqual([
       'reuse the existing repo test commands',
     ])
+    expect(config.project.maxConcurrency).toBeUndefined()
     expect(config.agent.primary).toBe('claude')
     expect(config.git.defaultBranch).toBe('master')
+    expect(config.requestedConcurrency).toBe(1)
+    expect(config.concurrency).toBe(1)
+  })
+
+  test('applies repo, profile, and project concurrency caps to the effective daemon limit', () => {
+    const config = buildConfig(
+      {
+        concurrency: 5,
+      },
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          scheduling: {
+            concurrencyByRepo: {
+              'JamesWuHK/digital-employee': 4,
+            },
+            concurrencyByProfile: {
+              'desktop-vite': 2,
+            },
+          },
+        },
+        repoConfig: {
+          project: {
+            profile: 'desktop-vite',
+            maxConcurrency: 3,
+          },
+        },
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.requestedConcurrency).toBe(5)
+    expect(config.concurrency).toBe(2)
+    expect(config.project.maxConcurrency).toBe(3)
+    expect(config.concurrencyPolicy).toEqual({
+      requested: 5,
+      effective: 2,
+      repoCap: 4,
+      profileCap: 2,
+      projectCap: 3,
+    })
+  })
+
+  test('ignores invalid cap values instead of reducing concurrency to zero', () => {
+    const config = buildConfig(
+      {
+        concurrency: 4,
+      },
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          scheduling: {
+            concurrencyByRepo: {
+              'JamesWuHK/digital-employee': 0,
+            },
+            concurrencyByProfile: {
+              generic: -2,
+            },
+          },
+        },
+        repoConfig: {
+          project: {
+            maxConcurrency: 0,
+          },
+        },
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.concurrency).toBe(4)
+    expect(config.concurrencyPolicy).toEqual({
+      requested: 4,
+      effective: 4,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
+    })
   })
 })
