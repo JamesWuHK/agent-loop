@@ -1,7 +1,19 @@
 import { $ } from 'bun'
 import { existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { AgentConfig, AgentIssue, DaemonStatus, ManagedLeaseComment, ManagedLeaseScope, ManagedPullRequest, WorktreeInfo } from '@agent/shared'
+import type {
+  ActiveLeaseRuntimeDetail,
+  AgentConfig,
+  AgentIssue,
+  DaemonStatus,
+  ManagedLease,
+  ManagedLeaseComment,
+  ManagedLeaseScope,
+  ManagedPullRequest,
+  RecoveryActionRuntimeDetail,
+  StalledWorkerRuntimeDetail,
+  WorktreeInfo,
+} from '@agent/shared'
 import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
 import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
@@ -74,14 +86,30 @@ interface ResumableIssueCandidate {
   requiresRemoteAdoption: boolean
 }
 
+interface ActiveLeaseRuntimeReader {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  commentId: number
+  readSnapshot: () => ManagedLease
+  readHeartbeatAgeSeconds: () => number
+}
+
+interface StalledWorkerState {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  since: string
+  reason: string
+}
+
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
   private shutdownRequested = false
   private readonly daemonInstanceId = `${process.pid}-${crypto.randomUUID()}`
   private activeWorktrees = new Map<number, WorktreeInfo>()
-  private activeLeaseHeartbeatReaders = new Map<string, () => number>()
-  private stalledWorkers = new Map<string, { scope: ManagedLeaseScope; targetNumber: number; since: string; reason: string }>()
+  private activeLeaseReaders = new Map<string, ActiveLeaseRuntimeReader>()
+  private stalledWorkers = new Map<string, StalledWorkerState>()
+  private recoveryActionHistory: RecoveryActionRuntimeDetail[] = []
   private lastRecoveryActionAt: string | null = null
   private lastRecoveryActionKind: string | null = null
   private startedAt = Date.now()
@@ -147,16 +175,19 @@ export class AgentDaemon {
     targetNumber: number,
     handle: ManagedLeaseHandle,
   ): void {
-    this.activeLeaseHeartbeatReaders.set(
-      this.buildLeaseKey(scope, targetNumber),
-      () => handle.heartbeatAgeSeconds(),
-    )
+    this.activeLeaseReaders.set(this.buildLeaseKey(scope, targetNumber), {
+      scope,
+      targetNumber,
+      commentId: handle.getCommentId(),
+      readSnapshot: () => handle.getSnapshot(),
+      readHeartbeatAgeSeconds: () => handle.heartbeatAgeSeconds(),
+    })
     this.clearStalledWorker(scope, targetNumber)
     this.syncRuntimeMetrics()
   }
 
   private unregisterActiveLease(scope: ManagedLeaseScope, targetNumber: number): void {
-    this.activeLeaseHeartbeatReaders.delete(this.buildLeaseKey(scope, targetNumber))
+    this.activeLeaseReaders.delete(this.buildLeaseKey(scope, targetNumber))
     this.syncRuntimeMetrics()
   }
 
@@ -188,9 +219,26 @@ export class AgentDaemon {
   private noteRecoveryAction(
     kind: string,
     outcome: 'recoverable' | 'completed' | 'blocked' | 'failed',
+    details: {
+      scope?: ManagedLeaseScope
+      targetNumber?: number
+      reason?: string
+    } = {},
   ): void {
-    this.lastRecoveryActionAt = new Date().toISOString()
+    const at = new Date().toISOString()
+    this.lastRecoveryActionAt = at
     this.lastRecoveryActionKind = kind
+    this.recoveryActionHistory.unshift({
+      at,
+      kind,
+      outcome,
+      scope: details.scope ?? null,
+      targetNumber: details.targetNumber ?? null,
+      reason: details.reason ?? null,
+    })
+    if (this.recoveryActionHistory.length > 10) {
+      this.recoveryActionHistory.length = 10
+    }
     recordRecoveryAction(kind, outcome)
     this.syncRuntimeMetrics()
   }
@@ -220,12 +268,20 @@ export class AgentDaemon {
           } else {
             this.clearStalledWorker(scope, targetNumber)
           }
-          this.noteRecoveryAction(recoveryKind, 'recoverable')
+          this.noteRecoveryAction(recoveryKind, 'recoverable', {
+            scope,
+            targetNumber,
+            reason: recoveryReason,
+          })
         }
       } else {
         this.clearStalledWorker(scope, targetNumber)
         if (recoveryKind) {
-          this.noteRecoveryAction(recoveryKind, 'completed')
+          this.noteRecoveryAction(recoveryKind, 'completed', {
+            scope,
+            targetNumber,
+            reason: recoveryReason,
+          })
         }
       }
     }
@@ -259,7 +315,13 @@ export class AgentDaemon {
         `[lease] skipping ${options.scope} ${options.targetNumber}; active lease is held by ${acquired.activeLease?.lease.daemonInstanceId ?? 'unknown daemon'}`,
       )
       recordLeaseConflict(options.scope)
-      this.noteRecoveryAction(`${options.scope}-lease-conflict`, 'blocked')
+      this.noteRecoveryAction(`${options.scope}-lease-conflict`, 'blocked', {
+        scope: options.scope,
+        targetNumber: options.targetNumber,
+        reason: acquired.activeLease
+          ? `held by ${acquired.activeLease.lease.daemonInstanceId}`
+          : 'active lease exists',
+      })
       await this.sleepWithLeaseBackoff()
       return null
     }
@@ -1929,11 +1991,14 @@ export class AgentDaemon {
       startupRecoveryPending: this.startupRecoveryPending,
       failedIssueResumeAttemptCount: this.failedIssueResumeAttempts.size,
       failedIssueResumeCooldownCount: this.failedIssueResumeCooldownUntil.size,
-      activeLeaseCount: this.activeLeaseHeartbeatReaders.size,
+      activeLeaseCount: this.activeLeaseReaders.size,
       oldestLeaseHeartbeatAgeSeconds: this.getOldestLeaseHeartbeatAgeSeconds(),
+      activeLeaseDetails: this.getActiveLeaseDetails(),
       stalledWorkerCount: this.stalledWorkers.size,
+      stalledWorkerDetails: this.getStalledWorkerDetails(),
       lastRecoveryActionAt: this.lastRecoveryActionAt,
       lastRecoveryActionKind: this.lastRecoveryActionKind,
+      recentRecoveryActions: [...this.recoveryActionHistory],
     })
   }
 
@@ -1951,12 +2016,55 @@ export class AgentDaemon {
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {
-    const ages = [...this.activeLeaseHeartbeatReaders.values()]
-      .map((readAge) => readAge())
+    const ages = [...this.activeLeaseReaders.values()]
+      .map((reader) => reader.readHeartbeatAgeSeconds())
       .filter((age) => Number.isFinite(age))
 
     if (ages.length === 0) return 0
     return Math.max(...ages)
+  }
+
+  private getActiveLeaseDetails(now = Date.now()): ActiveLeaseRuntimeDetail[] {
+    return [...this.activeLeaseReaders.values()]
+      .map((reader) => {
+        const lease = reader.readSnapshot()
+        const heartbeatAgeSeconds = reader.readHeartbeatAgeSeconds()
+        const progressAgeSeconds = getIsoAgeSeconds(lease.lastProgressAt, now)
+        const expiresAt = Date.parse(lease.expiresAt)
+        const expiresInSeconds = Number.isFinite(expiresAt)
+          ? Math.max(0, Math.ceil((expiresAt - now) / 1000))
+          : 0
+
+        return {
+          scope: reader.scope,
+          targetNumber: reader.targetNumber,
+          commentId: reader.commentId,
+          issueNumber: lease.issueNumber ?? null,
+          prNumber: lease.prNumber ?? null,
+          machineId: lease.machineId,
+          daemonInstanceId: lease.daemonInstanceId,
+          branch: lease.branch ?? null,
+          worktreeId: lease.worktreeId ?? null,
+          phase: lease.phase,
+          attempt: lease.attempt,
+          status: lease.status,
+          lastProgressKind: lease.lastProgressKind ?? null,
+          heartbeatAgeSeconds,
+          progressAgeSeconds,
+          expiresInSeconds,
+          adoptable: Number.isFinite(expiresAt) ? expiresAt <= now : false,
+        } satisfies ActiveLeaseRuntimeDetail
+      })
+      .sort((left, right) => left.scope.localeCompare(right.scope) || left.targetNumber - right.targetNumber)
+  }
+
+  private getStalledWorkerDetails(now = Date.now()): StalledWorkerRuntimeDetail[] {
+    return [...this.stalledWorkers.values()]
+      .map((worker) => ({
+        ...worker,
+        durationSeconds: getIsoAgeSeconds(worker.since, now),
+      }))
+      .sort((left, right) => left.scope.localeCompare(right.scope) || left.targetNumber - right.targetNumber)
   }
 }
 
@@ -1989,9 +2097,12 @@ export function buildDaemonRuntimeStatus(input: {
   failedIssueResumeCooldownCount: number
   activeLeaseCount: number
   oldestLeaseHeartbeatAgeSeconds: number
+  activeLeaseDetails: ActiveLeaseRuntimeDetail[]
   stalledWorkerCount: number
+  stalledWorkerDetails: StalledWorkerRuntimeDetail[]
   lastRecoveryActionAt: string | null
   lastRecoveryActionKind: string | null
+  recentRecoveryActions: RecoveryActionRuntimeDetail[]
 }): DaemonStatus['runtime'] {
   return {
     activePrReviews: input.activePrReviewCount,
@@ -2008,11 +2119,21 @@ export function buildDaemonRuntimeStatus(input: {
     failedIssueResumeCooldownsTracked: input.failedIssueResumeCooldownCount,
     activeLeaseCount: input.activeLeaseCount,
     oldestLeaseHeartbeatAgeSeconds: input.oldestLeaseHeartbeatAgeSeconds,
+    activeLeaseDetails: input.activeLeaseDetails,
     stalledWorkerCount: input.stalledWorkerCount,
+    stalledWorkerDetails: input.stalledWorkerDetails,
     lastRecoveryActionAt: input.lastRecoveryActionAt,
     lastRecoveryActionKind: input.lastRecoveryActionKind,
+    recentRecoveryActions: input.recentRecoveryActions,
   }
 }
+
+function getIsoAgeSeconds(iso: string, now = Date.now()): number {
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.floor((now - parsed) / 1000))
+}
+
 
 export function isRetryableDaemonLoopError(error: unknown): boolean {
   const message = formatDaemonError(error).toLowerCase()

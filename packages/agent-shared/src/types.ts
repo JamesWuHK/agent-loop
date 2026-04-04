@@ -164,6 +164,43 @@ export interface ManagedLeaseComment extends IssueComment {
   lease: ManagedLease
 }
 
+export interface ActiveLeaseRuntimeDetail {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  commentId: number
+  issueNumber: number | null
+  prNumber: number | null
+  machineId: string
+  daemonInstanceId: string
+  branch: string | null
+  worktreeId: string | null
+  phase: string
+  attempt: number
+  status: ManagedLeaseStatus
+  lastProgressKind: ManagedLeaseProgressKind | null
+  heartbeatAgeSeconds: number
+  progressAgeSeconds: number
+  expiresInSeconds: number
+  adoptable: boolean
+}
+
+export interface StalledWorkerRuntimeDetail {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  since: string
+  durationSeconds: number
+  reason: string
+}
+
+export interface RecoveryActionRuntimeDetail {
+  at: string
+  kind: string
+  outcome: 'recoverable' | 'completed' | 'blocked' | 'failed'
+  scope: ManagedLeaseScope | null
+  targetNumber: number | null
+  reason: string | null
+}
+
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
 
 export interface ClaimEvent {
@@ -284,9 +321,12 @@ export interface DaemonStatus {
     failedIssueResumeCooldownsTracked: number
     activeLeaseCount: number
     oldestLeaseHeartbeatAgeSeconds: number
+    activeLeaseDetails: ActiveLeaseRuntimeDetail[]
     stalledWorkerCount: number
+    stalledWorkerDetails: StalledWorkerRuntimeDetail[]
     lastRecoveryActionAt: string | null
     lastRecoveryActionKind: string | null
+    recentRecoveryActions: RecoveryActionRuntimeDetail[]
   }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null

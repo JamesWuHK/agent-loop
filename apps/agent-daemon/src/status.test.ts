@@ -67,9 +67,76 @@ const baseHealth: DaemonStatus & {
     failedIssueResumeCooldownsTracked: 1,
     activeLeaseCount: 2,
     oldestLeaseHeartbeatAgeSeconds: 75,
+    activeLeaseDetails: [
+      {
+        scope: 'issue-process',
+        targetNumber: 77,
+        commentId: 11,
+        issueNumber: 77,
+        prNumber: null,
+        machineId: 'codex-dev',
+        daemonInstanceId: 'daemon-codex-dev-1',
+        branch: 'agent/77/codex-dev',
+        worktreeId: 'issue-77-codex-dev',
+        phase: 'implementation',
+        attempt: 2,
+        status: 'active',
+        lastProgressKind: 'stdout',
+        heartbeatAgeSeconds: 75,
+        progressAgeSeconds: 42,
+        expiresInSeconds: 0,
+        adoptable: true,
+      },
+      {
+        scope: 'pr-review',
+        targetNumber: 108,
+        commentId: 18,
+        issueNumber: 89,
+        prNumber: 108,
+        machineId: 'codex-dev',
+        daemonInstanceId: 'daemon-codex-dev-1',
+        branch: 'agent/89/codex-dev',
+        worktreeId: 'pr-review-108',
+        phase: 'pr-review',
+        attempt: 1,
+        status: 'active',
+        lastProgressKind: 'phase',
+        heartbeatAgeSeconds: 15,
+        progressAgeSeconds: 5,
+        expiresInSeconds: 45,
+        adoptable: false,
+      },
+    ],
     stalledWorkerCount: 1,
+    stalledWorkerDetails: [
+      {
+        scope: 'issue-process',
+        targetNumber: 77,
+        since: '2026-04-05T08:07:15.000Z',
+        durationSeconds: 75,
+        reason: 'worker idle timeout',
+      },
+    ],
     lastRecoveryActionAt: '2026-04-05T08:08:30.000Z',
     lastRecoveryActionKind: 'issue-process-idle-timeout',
+    recentRecoveryActions: [
+      {
+        at: '2026-04-05T08:08:30.000Z',
+        kind: 'issue-process-idle-timeout',
+        outcome: 'recoverable',
+        scope: 'issue-process',
+        targetNumber: 77,
+        reason: 'worker idle timeout',
+      },
+      {
+        at: '2026-04-05T08:06:00.000Z',
+        kind: 'issue-process-idle-timeout',
+        outcome: 'recoverable',
+        scope: 'issue-process',
+        targetNumber: 77,
+        reason: 'worker idle timeout',
+      },
+    ],
   },
   activeWorktrees: [
     {
@@ -182,6 +249,8 @@ describe('status helpers', () => {
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
+    expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
+    expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -206,9 +275,60 @@ describe('status helpers', () => {
     expect(report).toContain('daemon instance: daemon-codex-dev-1')
     expect(report).toContain('Active Worktrees')
     expect(report).toContain('#77 agent/77/codex-dev /tmp/issue-77-codex-dev')
+    expect(report).toContain('Active Leases')
+    expect(report).toContain('issue-process#77 comment=11')
+    expect(report).toContain('pr-review#108 comment=18')
+    expect(report).toContain('Stalled Workers')
+    expect(report).toContain('issue-process#77 stuck 75s')
+    expect(report).toContain('Recent Recovery Actions')
+    expect(report).toContain('issue-process-idle-timeout/recoverable | target=issue-process#77')
     expect(report).toContain('merge-recovery: merged_initial=1')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('- review auto-fix push failures observed: 1')
+  })
+
+  test('doctor warnings call out adoptable leases and repeated recoveries for the same target', async () => {
+    const metricsServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => new Response(metricsText, {
+        headers: { 'content-type': 'text/plain' },
+      }),
+    })
+
+    const healthPayload = {
+      ...baseHealth,
+      endpoints: {
+        ...baseHealth.endpoints,
+        metrics: {
+          host: '127.0.0.1',
+          port: metricsServer.port,
+          path: '/metrics',
+        },
+      },
+    }
+
+    const healthServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => Response.json(healthPayload),
+    })
+
+    try {
+      const snapshot = await collectDaemonObservability({
+        healthHost: '127.0.0.1',
+        healthPort: healthServer.port,
+      })
+      const report = formatDoctorReport(snapshot)
+
+      expect(snapshot.warnings).toContain('adoptable leases detected: issue-process#77')
+      expect(snapshot.warnings).toContain('same target recovered multiple times recently: issue-process#77=2')
+      expect(report).toContain('- adoptable leases detected: issue-process#77')
+      expect(report).toContain('- same target recovered multiple times recently: issue-process#77=2')
+    } finally {
+      healthServer.stop(true)
+      metricsServer.stop(true)
+    }
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {

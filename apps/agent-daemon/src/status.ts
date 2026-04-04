@@ -164,6 +164,13 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'}`,
   ]
 
+  if (health.runtime.activeLeaseDetails.length > 0) {
+    lines.push(`lease detail: ${formatActiveLeaseInlineSummary(health.runtime.activeLeaseDetails)}`)
+  }
+  if (health.runtime.recentRecoveryActions.length > 0) {
+    lines.push(`recent recovery: ${formatRecoveryActionInlineSummary(health.runtime.recentRecoveryActions)}`)
+  }
+
   if (snapshot.metrics) {
     const reviewTotals = summarizeReviewOutcomes(snapshot.metrics.prReviews)
     lines.push(
@@ -203,6 +210,15 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
   const worktreeLines = health.activeWorktrees.length === 0
     ? ['none']
     : health.activeWorktrees.map((worktree) => `#${worktree.issueNumber} ${worktree.branch} ${worktree.path}`)
+  const activeLeaseLines = health.runtime.activeLeaseDetails.length === 0
+    ? ['none']
+    : health.runtime.activeLeaseDetails.map((lease) => formatActiveLeaseDoctorLine(lease))
+  const stalledWorkerLines = health.runtime.stalledWorkerDetails.length === 0
+    ? ['none']
+    : health.runtime.stalledWorkerDetails.map((worker) => formatStalledWorkerLine(worker))
+  const recoveryHistoryLines = health.runtime.recentRecoveryActions.length === 0
+    ? ['none']
+    : health.runtime.recentRecoveryActions.map((action) => formatRecoveryActionDoctorLine(action))
   const outcomeLines = snapshot.metrics
     ? [
         `polls: ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)}`,
@@ -259,6 +275,15 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     '',
     'Active Worktrees',
     ...worktreeLines,
+    '',
+    'Active Leases',
+    ...activeLeaseLines,
+    '',
+    'Stalled Workers',
+    ...stalledWorkerLines,
+    '',
+    'Recent Recovery Actions',
+    ...recoveryHistoryLines,
     '',
     'Warnings',
     ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
@@ -387,8 +412,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (snapshot.health.runtime.failedIssueResumeCooldownsTracked > 0) {
     warnings.push('one or more failed issues are currently cooling down before resume/requeue')
   }
-  if (snapshot.health.runtime.activeLeaseCount > 0 && snapshot.health.runtime.oldestLeaseHeartbeatAgeSeconds > snapshot.health.recovery.leaseTtlMs / 1000) {
-    warnings.push('one or more active leases have heartbeat ages older than the configured lease TTL')
+  const adoptableLeases = snapshot.health.runtime.activeLeaseDetails.filter((lease) => lease.adoptable)
+  if (adoptableLeases.length > 0) {
+    warnings.push(`adoptable leases detected: ${adoptableLeases.map((lease) => formatLeaseIdentity(lease.scope, lease.targetNumber)).join(', ')}`)
   }
   if (snapshot.health.runtime.stalledWorkerCount > 0) {
     warnings.push(`stalled workers currently tracked: ${snapshot.health.runtime.stalledWorkerCount}`)
@@ -405,11 +431,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (Object.values(snapshot.metrics?.workerIdleTimeouts ?? {}).reduce((sum, value) => sum + value, 0) > 0) {
     warnings.push(`worker idle timeouts observed: ${formatInlineKeyValue(snapshot.metrics?.workerIdleTimeouts ?? {})}`)
   }
-  const repeatedRecoveries = Object.entries(snapshot.metrics?.recoveryActions ?? {})
-    .map(([kind, outcomes]) => [kind, Object.values(outcomes).reduce((sum, value) => sum + value, 0)] as const)
-    .filter(([, count]) => count >= 2)
-  if (repeatedRecoveries.length > 0) {
-    warnings.push(`repeated recovery actions observed: ${repeatedRecoveries.map(([kind, count]) => `${kind}=${count}`).join(', ')}`)
+  const repeatedRecoveriesByTarget = summarizeRepeatedRecoveriesByTarget(snapshot.health.runtime.recentRecoveryActions)
+  if (repeatedRecoveriesByTarget.length > 0) {
+    warnings.push(`same target recovered multiple times recently: ${repeatedRecoveriesByTarget.join(', ')}`)
   }
   if ((snapshot.metrics?.autoFixes.push_failed ?? 0) > 0) {
     warnings.push(`review auto-fix push failures observed: ${snapshot.metrics?.autoFixes.push_failed}`)
@@ -487,6 +511,83 @@ function formatRecoveryActionSummary(values: Record<string, Record<string, numbe
   })
 
   return parts.join(', ') || 'none'
+}
+
+function formatActiveLeaseInlineSummary(details: DaemonHealthPayload['runtime']['activeLeaseDetails']): string {
+  const rendered = details.slice(0, 3).map((lease) => {
+    const activity = `${formatLeaseIdentity(lease.scope, lease.targetNumber)} ${lease.phase}`
+    const heartbeat = `hb=${formatNullableSeconds(lease.heartbeatAgeSeconds)}`
+    const progress = `progress=${formatNullableSeconds(lease.progressAgeSeconds)}`
+    const adoption = lease.adoptable ? 'adoptable=yes' : 'adoptable=no'
+    return `${activity} ${heartbeat} ${progress} ${adoption}`
+  })
+
+  if (details.length > 3) {
+    rendered.push(`+${details.length - 3} more`)
+  }
+
+  return rendered.join(' | ')
+}
+
+function formatRecoveryActionInlineSummary(actions: DaemonHealthPayload['runtime']['recentRecoveryActions']): string {
+  const rendered = actions.slice(0, 3).map((action) => {
+    const target = action.scope && action.targetNumber !== null
+      ? ` ${formatLeaseIdentity(action.scope, action.targetNumber)}`
+      : ''
+    return `${action.kind}/${action.outcome}${target}`
+  })
+
+  if (actions.length > 3) {
+    rendered.push(`+${actions.length - 3} more`)
+  }
+
+  return rendered.join(' | ')
+}
+
+function formatActiveLeaseDoctorLine(lease: DaemonHealthPayload['runtime']['activeLeaseDetails'][number]): string {
+  return [
+    `${formatLeaseIdentity(lease.scope, lease.targetNumber)} comment=${lease.commentId}`,
+    `phase=${lease.phase}`,
+    `attempt=${lease.attempt}`,
+    `status=${lease.status}`,
+    `hb=${formatNullableSeconds(lease.heartbeatAgeSeconds)}`,
+    `progress=${formatNullableSeconds(lease.progressAgeSeconds)}`,
+    `expires=${formatNullableSeconds(lease.expiresInSeconds)}`,
+    `adoptable=${lease.adoptable ? 'yes' : 'no'}`,
+    `daemon=${lease.daemonInstanceId}`,
+    `branch=${lease.branch ?? 'n/a'}`,
+  ].join(' | ')
+}
+
+function formatStalledWorkerLine(worker: DaemonHealthPayload['runtime']['stalledWorkerDetails'][number]): string {
+  return `${formatLeaseIdentity(worker.scope, worker.targetNumber)} stuck ${formatNullableSeconds(worker.durationSeconds)} | since ${worker.since} | ${worker.reason}`
+}
+
+function formatRecoveryActionDoctorLine(action: DaemonHealthPayload['runtime']['recentRecoveryActions'][number]): string {
+  const target = action.scope && action.targetNumber !== null
+    ? formatLeaseIdentity(action.scope, action.targetNumber)
+    : 'n/a'
+  return `${action.at} | ${action.kind}/${action.outcome} | target=${target} | reason=${action.reason ?? 'n/a'}`
+}
+
+function summarizeRepeatedRecoveriesByTarget(
+  actions: DaemonHealthPayload['runtime']['recentRecoveryActions'],
+): string[] {
+  const counts = new Map<string, number>()
+
+  for (const action of actions) {
+    if (action.outcome !== 'recoverable' || !action.scope || action.targetNumber === null) continue
+    const key = formatLeaseIdentity(action.scope, action.targetNumber)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .map(([key, count]) => `${key}=${count}`)
+}
+
+function formatLeaseIdentity(scope: string, targetNumber: number): string {
+  return `${scope}#${targetNumber}`
 }
 
 function formatError(error: unknown): string {
