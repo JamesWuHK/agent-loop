@@ -55,6 +55,15 @@ Agent Loop 用自己的 Issues 管理自己的开发任务：
 4. Daemon 自动认领、规划、执行、提交 PR
 5. Review PR → Merge → Issue 自动标记 `agent:done`
 
+当 daemon 以 continuous mode 跑着，但看起来“没有继续消费”时，先做只读 queue audit：
+
+```bash
+cd apps/agent-daemon
+bun run issues:audit -- --repo JamesWuHK/agent-loop
+```
+
+这条命令会复用 daemon 的同一套认证配置，所以也需要你已经配置好 `~/.agent-loop/config.json`，或者先提供 `GH_TOKEN` / `GITHUB_TOKEN`。它只读取当前 open managed issues，输出 `state`、`claimable`、`blockedBy`、`errors` 等信息，帮助你判断是依赖未满足、contract 不完整，还是 ready 池本身为空。它不会自动修改 issue label、assignee 或 comment。
+
 ```
 JamesWuHK/agent-loop
   Issues (agent:ready) ← daemon polling
