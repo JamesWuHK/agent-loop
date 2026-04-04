@@ -111,7 +111,7 @@ export interface ProjectProfileConfig {
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
 
 export interface ClaimEvent {
-  event: 'claimed' | 'done' | 'failed' | 'stale' | 'stale-requeue'
+  event: 'claimed' | 'done' | 'failed' | 'stale' | 'stale-requeue' | 'failed-requeue'
   machine: string
   ts: string
   worktreeId?: string

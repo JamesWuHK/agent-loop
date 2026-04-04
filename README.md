@@ -154,6 +154,8 @@ agent:claimed  → working (daemon starts)
 agent:working  → done (PR created)
                 → failed (agent error)
                 → stale (daemon shutdown / 30min timeout)
+agent:failed   → working (resume existing local worktree)
+                → ready (auto requeue after cooldown when no local worktree / open PR remains)
 agent:stale    → ready (re-enqueue)
 ```
 

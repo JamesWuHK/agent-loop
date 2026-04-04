@@ -323,6 +323,13 @@ export class AgentDaemon {
       return
     }
 
+    if (await this.maybeRequeueFailedIssue()) {
+      recordPoll('success')
+      recordPollDuration(Date.now() - pollStartTime)
+      this.scheduleNextPoll()
+      return
+    }
+
     // Claim an issue
     const claimedIssue = await pollAndClaim(this.config, this.logger)
 
@@ -415,6 +422,61 @@ export class AgentDaemon {
 
     this._inFlightProcess = processPromise
     return true
+  }
+
+  private async maybeRequeueFailedIssue(): Promise<boolean> {
+    const issue = await this.findFailedIssueToRequeue()
+    if (!issue) return false
+
+    await transitionIssueState(
+      issue.number,
+      ISSUE_LABELS.READY,
+      ISSUE_LABELS.FAILED,
+      {
+        event: 'failed-requeue',
+        machine: this.config.machineId,
+        ts: new Date().toISOString(),
+        reason: 'auto-requeue-no-recovery-state',
+      },
+      this.config,
+    )
+
+    this.logger.log(`[daemon] re-queued failed issue #${issue.number} into ${ISSUE_LABELS.READY} because no local worktree or open PR remained`)
+    return true
+  }
+
+  private async findFailedIssueToRequeue(): Promise<AgentIssue | null> {
+    const [issues, prs] = await Promise.all([
+      listOpenAgentIssues(this.config),
+      listOpenAgentPullRequests(this.config),
+    ])
+    const now = Date.now()
+    const openPrIssueNumbers = new Set(
+      prs
+        .map((pr) => extractIssueNumberFromPrTitle(pr.title))
+        .filter((issueNumber): issueNumber is number => issueNumber !== null),
+    )
+
+    for (const issue of issues) {
+      const eligible = shouldRequeueFailedIssue(
+        issue,
+        hasWorktreeForIssue(issue.number, this.config),
+        openPrIssueNumbers.has(issue.number),
+        now,
+        AgentDaemon.FAILED_ISSUE_RESUME_COOLDOWN_MS,
+      )
+      if (!eligible) continue
+
+      const activeClaimMachine = await this.getActiveClaimMachine(issue.number)
+      if (activeClaimMachine && activeClaimMachine !== this.config.machineId) {
+        this.logger.log(`[daemon] skipping failed requeue for #${issue.number}; active machine is ${activeClaimMachine}`)
+        continue
+      }
+
+      return issue
+    }
+
+    return null
   }
 
   private async findResumableIssue(): Promise<AgentIssue | null> {
@@ -1136,6 +1198,24 @@ export function shouldResumeManagedIssue(
   if (cooldownUntil > now) return false
 
   return true
+}
+
+export function shouldRequeueFailedIssue(
+  issue: Pick<AgentIssue, 'state' | 'updatedAt' | 'hasExecutableContract'>,
+  hasLocalWorktree: boolean,
+  hasOpenPr: boolean,
+  now: number,
+  cooldownMs: number,
+): boolean {
+  if (issue.state !== 'failed') return false
+  if (hasLocalWorktree) return false
+  if (hasOpenPr) return false
+  if (!issue.hasExecutableContract) return false
+
+  const updatedAtMs = Date.parse(issue.updatedAt)
+  if (!Number.isFinite(updatedAtMs)) return true
+
+  return updatedAtMs + cooldownMs <= now
 }
 
 function shouldMergeManagedPr(pr: ManagedPullRequest): boolean {
