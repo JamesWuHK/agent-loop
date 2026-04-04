@@ -52,6 +52,18 @@ interface StructuredReviewFeedbackPayload {
   findings: PrReviewFinding[]
 }
 
+interface AutomatedPrReviewMetadata {
+  pr: number
+  attempt: number
+  approved: boolean
+  canMerge: boolean
+}
+
+export interface LatestAutomatedPrReviewState {
+  metadata: AutomatedPrReviewMetadata
+  feedback: StructuredReviewFeedbackPayload | null
+}
+
 export interface ReviewAgentResponse {
   responseText: string
 }
@@ -438,6 +450,44 @@ export function extractAutomatedReviewReasons(
   return reasons
 }
 
+export function extractLatestAutomatedPrReviewState(
+  comments: Array<{ body: string }>,
+): LatestAutomatedPrReviewState | null {
+  for (let index = comments.length - 1; index >= 0; index--) {
+    const metadata = extractAutomatedPrReviewMetadata(comments[index]?.body ?? '')
+    if (!metadata) continue
+
+    return {
+      metadata,
+      feedback: extractStructuredReviewFeedback(comments[index]?.body ?? ''),
+    }
+  }
+
+  return null
+}
+
+export function getNextAutomatedPrReviewAttempt(
+  comments: Array<{ body: string }>,
+): number {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  return latest ? latest.metadata.attempt + 1 : 1
+}
+
+export function canResumeAutomatedPrReview(
+  comments: Array<{ body: string }>,
+  maxAttempt: number,
+): boolean {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return false
+
+  return (
+    latest.metadata.approved === false
+    && latest.metadata.canMerge === false
+    && latest.feedback !== null
+    && latest.metadata.attempt < maxAttempt
+  )
+}
+
 export function buildReviewRunOptions(
   prompt: string,
   worktreePath: string,
@@ -577,6 +627,29 @@ function buildStructuredReviewFeedbackPayload(review: PrReviewResult): Structure
 
 function shouldEmbedStructuredReviewFeedback(review: PrReviewResult): boolean {
   return !review.reviewFailed
+}
+
+function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetadata | null {
+  const match = body.match(/<!-- agent-loop:pr-review ([\s\S]*?) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<AutomatedPrReviewMetadata>
+    const pr = Number(parsed.pr)
+    const attempt = Number(parsed.attempt)
+    if (!Number.isFinite(pr) || !Number.isFinite(attempt)) {
+      return null
+    }
+
+    return {
+      pr,
+      attempt,
+      approved: parsed.approved === true,
+      canMerge: parsed.canMerge === true,
+    }
+  } catch {
+    return null
+  }
 }
 
 function serializeStructuredReviewFeedback(payload: StructuredReviewFeedbackPayload): string {

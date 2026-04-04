@@ -6,7 +6,7 @@ import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, type PrReviewResult } from './pr-reviewer'
+import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, type PrReviewResult } from './pr-reviewer'
 import {
   recordPoll,
   recordPollDuration,
@@ -30,6 +30,7 @@ const DEFAULT_HEALTH_SERVER_PORT = 9310
 const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
 
 export class AgentDaemon {
+  private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
   private shutdownRequested = false
   private activeWorktrees = new Map<number, WorktreeInfo>()
@@ -529,15 +530,29 @@ export class AgentDaemon {
 
   private async findPendingStandalonePrReview(): Promise<ManagedPullRequest | null> {
     const prs = await listOpenAgentPullRequests(this.config)
-    return prs.find((pr) => {
-      if (pr.isDraft) return false
-      if (this.activePrReviews.has(pr.number)) return false
-      return shouldReviewManagedPr(pr)
-    }) ?? null
+    for (const pr of prs) {
+      if (pr.isDraft) continue
+      if (this.activePrReviews.has(pr.number)) continue
+
+      if (shouldReviewManagedPr(pr)) {
+        return pr
+      }
+
+      if (!new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)) continue
+
+      const comments = await listIssueComments(pr.number, this.config)
+      if (canResumeAutomatedPrReview(comments, AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS)) {
+        return pr
+      }
+    }
+
+    return null
   }
 
   private async processStandalonePrReview(pr: ManagedPullRequest): Promise<void> {
     this.logger.log(`[pr-review-subagent] reviewing existing PR #${pr.number}: "${pr.title}"`)
+    const priorComments = await listIssueComments(pr.number, this.config)
+    const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
 
     const detached = await createDetachedPrWorktree(pr.number, this.config, this.logger)
     try {
@@ -550,7 +565,7 @@ export class AgentDaemon {
       )
 
       if (firstReview.approved && firstReview.canMerge) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, 1, 'approved'), this.config)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved'), this.config)
         await setManagedPrReviewLabels(pr.number, 'approved', this.config)
         this.logger.log(`[pr-review-subagent] approved PR #${pr.number}`)
         return
@@ -559,7 +574,7 @@ export class AgentDaemon {
       const issueNumber = extractIssueNumberFromPrTitle(pr.title)
 
       if (firstReview.reviewFailed) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, 1, 'human-needed'), this.config)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed'), this.config)
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         if (issueNumber !== null) {
           await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
@@ -569,13 +584,13 @@ export class AgentDaemon {
       }
 
       if (issueNumber === null) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, 1, 'human-needed'), this.config)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed'), this.config)
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
         return
       }
 
-      await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, 1, 'retrying'), this.config)
+      await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'retrying'), this.config)
       await setManagedPrReviewLabels(pr.number, 'retry', this.config)
       const fixResult = await runReviewAutoFix(
         detached.worktreePath,
@@ -594,7 +609,7 @@ export class AgentDaemon {
           reason: `Auto-fix failed: ${fixResult.error ?? 'unknown error'}`,
           reviewFailed: true,
         }
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, failedReview, 2, 'human-needed'), this.config)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, failedReview, nextAttempt + 1, 'human-needed'), this.config)
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
         await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, `Standalone PR auto-fix failed: ${failedReview.reason}`)
         this.logger.warn(`[pr-review-subagent] PR #${pr.number} needs human intervention after failed auto-fix`)
@@ -612,13 +627,13 @@ export class AgentDaemon {
       )
 
       if (secondReview.approved && secondReview.canMerge) {
-        await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, 2, 'approved'), this.config)
+        await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'approved'), this.config)
         await setManagedPrReviewLabels(pr.number, 'approved', this.config)
         this.logger.log(`[pr-review-subagent] approved PR #${pr.number} after auto-fix`)
         return
       }
 
-      await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, 2, 'human-needed'), this.config)
+      await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'human-needed'), this.config)
       await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
       await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, secondReview.reason)
       this.logger.warn(`[pr-review-subagent] PR #${pr.number} still blocked after auto-fix`)
