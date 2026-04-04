@@ -66,6 +66,12 @@ interface MetricSample {
   value: number
 }
 
+interface LocalEndpointResponse {
+  statusCode: number
+  statusText: string
+  body: string
+}
+
 export async function collectDaemonObservability(
   options: StatusCommandOptions = {},
 ): Promise<DaemonObservabilitySnapshot> {
@@ -75,20 +81,20 @@ export async function collectDaemonObservability(
 
   let health: DaemonHealthPayload
   try {
-    const response = await fetch(healthUrl)
-    if (!response.ok) {
+    const response = await requestLocalEndpoint(healthUrl)
+    if (response.statusCode < 200 || response.statusCode >= 300) {
       return {
         ok: false,
         healthUrl,
         metricsUrl: null,
-        error: `GET ${healthUrl} returned ${response.status} ${response.statusText}`.trim(),
+        error: `GET ${healthUrl} returned ${response.statusCode} ${response.statusText}`.trim(),
         health: null,
         metrics: null,
         metricsError: null,
         warnings: [`daemon health endpoint is not reachable at ${healthUrl}`],
       }
     }
-    health = await response.json() as DaemonHealthPayload
+    health = JSON.parse(response.body) as DaemonHealthPayload
   } catch (error) {
     return {
       ok: false,
@@ -110,11 +116,11 @@ export async function collectDaemonObservability(
   let metrics: DaemonMetricSummary | null = null
   let metricsError: string | null = null
   try {
-    const response = await fetch(metricsUrl)
-    if (!response.ok) {
-      metricsError = `GET ${metricsUrl} returned ${response.status} ${response.statusText}`.trim()
+    const response = await requestLocalEndpoint(metricsUrl)
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      metricsError = `GET ${metricsUrl} returned ${response.statusCode} ${response.statusText}`.trim()
     } else {
-      metrics = summarizeDaemonMetrics(await response.text())
+      metrics = summarizeDaemonMetrics(response.body)
     }
   } catch (error) {
     metricsError = `GET ${metricsUrl} failed: ${formatError(error)}`
@@ -485,4 +491,46 @@ function formatRecoveryActionSummary(values: Record<string, Record<string, numbe
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function requestLocalEndpoint(url: string): Promise<LocalEndpointResponse> {
+  const proc = Bun.spawn([
+    'curl',
+    '--noproxy',
+    '*',
+    '--silent',
+    '--show-error',
+    '--output',
+    '-',
+    '--write-out',
+    '\n__AGENT_LOOP_STATUS__%{http_code}',
+    url,
+  ], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || `curl exited ${exitCode}`)
+  }
+
+  const marker = '\n__AGENT_LOOP_STATUS__'
+  const markerIndex = stdout.lastIndexOf(marker)
+  if (markerIndex === -1) {
+    throw new Error('curl response did not include HTTP status marker')
+  }
+
+  const body = stdout.slice(0, markerIndex)
+  const statusCode = Number.parseInt(stdout.slice(markerIndex + marker.length).trim(), 10)
+
+  return {
+    statusCode: Number.isFinite(statusCode) ? statusCode : 0,
+    statusText: '',
+    body,
+  }
 }

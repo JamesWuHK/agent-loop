@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { DaemonStatus } from '@agent/shared'
 import {
+  collectDaemonObservability,
   formatDoctorReport,
   formatStatusReport,
   parsePrometheusSamples,
@@ -208,5 +209,65 @@ describe('status helpers', () => {
     expect(report).toContain('merge-recovery: merged_initial=1')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('- review auto-fix push failures observed: 1')
+  })
+
+  test('collects local observability without being hijacked by proxy env vars', async () => {
+    const previousHttpProxy = process.env.http_proxy
+    const previousHttpsProxy = process.env.https_proxy
+    const previousAllProxy = process.env.all_proxy
+
+    process.env.http_proxy = 'http://127.0.0.1:1'
+    process.env.https_proxy = 'http://127.0.0.1:1'
+    process.env.all_proxy = 'socks5://127.0.0.1:1'
+
+    const metricsServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => new Response(metricsText, {
+        headers: { 'content-type': 'text/plain' },
+      }),
+    })
+
+    const healthPayload = {
+      ...baseHealth,
+      endpoints: {
+        ...baseHealth.endpoints,
+        metrics: {
+          host: '127.0.0.1',
+          port: metricsServer.port,
+          path: '/metrics',
+        },
+      },
+    }
+
+    const healthServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => Response.json(healthPayload),
+    })
+
+    try {
+      const snapshot = await collectDaemonObservability({
+        healthHost: '127.0.0.1',
+        healthPort: healthServer.port,
+      })
+
+      expect(snapshot.ok).toBe(true)
+      expect(snapshot.health?.repo).toBe('JamesWuHK/digital-employee')
+      expect(snapshot.metrics?.leaseConflicts).toBe(1)
+      expect(snapshot.metrics?.workerIdleTimeouts['issue-process']).toBe(2)
+    } finally {
+      healthServer.stop(true)
+      metricsServer.stop(true)
+
+      if (previousHttpProxy === undefined) delete process.env.http_proxy
+      else process.env.http_proxy = previousHttpProxy
+
+      if (previousHttpsProxy === undefined) delete process.env.https_proxy
+      else process.env.https_proxy = previousHttpsProxy
+
+      if (previousAllProxy === undefined) delete process.env.all_proxy
+      else process.env.all_proxy = previousAllProxy
+    }
   })
 })
