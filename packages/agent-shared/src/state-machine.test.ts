@@ -59,6 +59,10 @@ describe('canTransition', () => {
   it('allows failed issues to resume into working', () => {
     expect(canTransition('failed', 'working')).toBe(true)
   })
+
+  it('allows failed issues to requeue into ready for a fresh attempt', () => {
+    expect(canTransition('failed', 'ready')).toBe(true)
+  })
 })
 
 describe('parseClaimEventComment', () => {
@@ -133,6 +137,38 @@ describe('resolveActiveClaimMachine', () => {
           machine: 'codex-a',
           ts: '2026-04-04T08:30:00.000Z',
           reason: 'startup-reconcile-requeue',
+        }),
+        createdAt: '2026-04-04T08:30:01Z',
+      },
+      {
+        body: buildEventComment({
+          event: 'claimed',
+          machine: 'codex-b',
+          ts: '2026-04-04T08:31:00.000Z',
+        }),
+        createdAt: '2026-04-04T08:31:02Z',
+      },
+    ]
+
+    expect(resolveActiveClaimMachine(comments)).toBe('codex-b')
+  })
+
+  it('hands ownership to a later claimant after failed-requeue resets the epoch', () => {
+    const comments = [
+      {
+        body: buildEventComment({
+          event: 'claimed',
+          machine: 'codex-a',
+          ts: '2026-04-04T08:00:03.369Z',
+        }),
+        createdAt: '2026-04-04T08:00:04Z',
+      },
+      {
+        body: buildEventComment({
+          event: 'failed-requeue',
+          machine: 'codex-a',
+          ts: '2026-04-04T08:30:00.000Z',
+          reason: 'auto-requeue-no-recovery-state',
         }),
         createdAt: '2026-04-04T08:30:01Z',
       },

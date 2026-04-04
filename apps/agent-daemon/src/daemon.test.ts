@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildPrMergeRetryComment, isMergeabilityFailure, rebaseManagedBranchOntoDefault, shouldResumeManagedIssue } from './daemon'
+import {
+  buildPrMergeRetryComment,
+  isMergeabilityFailure,
+  rebaseManagedBranchOntoDefault,
+  shouldRequeueFailedIssue,
+  shouldResumeManagedIssue,
+} from './daemon'
 
 describe('daemon merge recovery helpers', () => {
   test('resumes working issues with a local worktree after daemon restart', () => {
@@ -44,6 +50,70 @@ describe('daemon merge recovery helpers', () => {
       now + 60_000,
       now,
       2,
+    )).toBe(false)
+  })
+
+  test('requeues failed issues without local recovery state after cooldown', () => {
+    const now = Date.now()
+
+    expect(shouldRequeueFailedIssue(
+      {
+        state: 'failed',
+        updatedAt: new Date(now - 6 * 60_000).toISOString(),
+        hasExecutableContract: true,
+      },
+      false,
+      false,
+      now,
+      5 * 60_000,
+    )).toBe(true)
+
+    expect(shouldRequeueFailedIssue(
+      {
+        state: 'failed',
+        updatedAt: new Date(now - 60_000).toISOString(),
+        hasExecutableContract: true,
+      },
+      false,
+      false,
+      now,
+      5 * 60_000,
+    )).toBe(false)
+
+    expect(shouldRequeueFailedIssue(
+      {
+        state: 'failed',
+        updatedAt: new Date(now - 6 * 60_000).toISOString(),
+        hasExecutableContract: true,
+      },
+      true,
+      false,
+      now,
+      5 * 60_000,
+    )).toBe(false)
+
+    expect(shouldRequeueFailedIssue(
+      {
+        state: 'failed',
+        updatedAt: new Date(now - 6 * 60_000).toISOString(),
+        hasExecutableContract: true,
+      },
+      false,
+      true,
+      now,
+      5 * 60_000,
+    )).toBe(false)
+
+    expect(shouldRequeueFailedIssue(
+      {
+        state: 'failed',
+        updatedAt: new Date(now - 6 * 60_000).toISOString(),
+        hasExecutableContract: false,
+      },
+      false,
+      false,
+      now,
+      5 * 60_000,
     )).toBe(false)
   })
 

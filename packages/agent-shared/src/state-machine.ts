@@ -7,7 +7,7 @@ const VALID_TRANSITIONS: Record<IssueState, IssueState[]> = {
   claimed: ['working', 'stale'],
   working: ['done', 'failed', 'stale'],
   done: [],       // terminal
-  failed: ['working'], // resumable when the daemon preserves local state
+  failed: ['working', 'ready'], // resumable locally or requeueable for a fresh attempt
   stale: ['ready'],
   unknown: [],
 }
@@ -45,7 +45,7 @@ export function buildEventComment(event: ClaimEvent): string {
 }
 
 const CLAIM_EVENT_PATTERN = /<!--\s*({[\s\S]*})\s*-->/
-const CLAIM_RESET_EVENTS = new Set<ClaimEvent['event']>(['done', 'failed', 'stale', 'stale-requeue'])
+const CLAIM_RESET_EVENTS = new Set<ClaimEvent['event']>(['done', 'failed', 'stale', 'stale-requeue', 'failed-requeue'])
 
 export function parseClaimEventComment(body: string): ClaimEvent | null {
   const match = body.match(CLAIM_EVENT_PATTERN)
@@ -60,6 +60,7 @@ export function parseClaimEventComment(body: string): ClaimEvent | null {
       && parsed.event !== 'failed'
       && parsed.event !== 'stale'
       && parsed.event !== 'stale-requeue'
+      && parsed.event !== 'failed-requeue'
     ) {
       return null
     }
