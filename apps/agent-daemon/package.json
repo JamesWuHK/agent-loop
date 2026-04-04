@@ -10,6 +10,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch run src/index.ts",
+    "issues:audit": "bun run src/audit-issue-contracts.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
