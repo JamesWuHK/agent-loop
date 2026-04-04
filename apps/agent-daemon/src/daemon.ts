@@ -1603,46 +1603,75 @@ export class AgentDaemon {
     prUrl: string,
     monitor?: TaskExecutionMonitor,
   ): Promise<{ approved: boolean; review: PrReviewResult; recoverable?: boolean }> {
-    const firstReview = await this.runDetachedPrReview(prNumber, prUrl, monitor)
-    recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
-
-    if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
-      return { approved: false, review: firstReview, recoverable: true }
-    }
-
-    await commentOnPr(
-      prNumber,
-      buildPrReviewComment(
-        prNumber,
-        firstReview,
-        1,
-        firstReview.approved && firstReview.canMerge
-          ? 'approved'
-          : firstReview.reviewFailed
-            ? 'human-needed'
-            : 'retrying',
-      ),
-      this.config,
+    const priorComments = await listIssueComments(prNumber, this.config)
+    const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
+    const currentHeadRefOid = await readGitHeadRefOid(worktreePath)
+    const reusableFeedback = getReusableAutomatedPrReviewFeedback(
+      priorComments,
+      currentHeadRefOid,
+      AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
     )
 
-    if (firstReview.approved && firstReview.canMerge) {
-      await setManagedPrReviewLabels(prNumber, 'approved', this.config)
-      return { approved: true, review: firstReview }
-    }
+    let reviewForFix: PrReviewResult
+    let attemptAfterFix: number
 
-    if (firstReview.reviewFailed) {
-      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
-      return { approved: false, review: firstReview }
-    }
+    if (reusableFeedback) {
+      await setManagedPrReviewLabels(prNumber, 'retry', this.config)
+      reviewForFix = {
+        approved: reusableFeedback.feedback.approved,
+        canMerge: reusableFeedback.feedback.canMerge,
+        reason: reusableFeedback.feedback.reason,
+        findings: reusableFeedback.feedback.findings,
+      }
+      attemptAfterFix = nextAttempt
+      this.logger.log(
+        `[pr-review-subagent] reusing structured review feedback from attempt ${reusableFeedback.attempt} for PR #${prNumber} on unchanged head ${currentHeadRefOid.slice(0, 7)}`,
+      )
+    } else {
+      const firstReview = await this.runDetachedPrReview(prNumber, prUrl, monitor)
+      recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
 
-    await setManagedPrReviewLabels(prNumber, 'retry', this.config)
+      if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
+        return { approved: false, review: firstReview, recoverable: true }
+      }
+
+      await commentOnPr(
+        prNumber,
+        buildPrReviewComment(
+          prNumber,
+          firstReview,
+          nextAttempt,
+          firstReview.approved && firstReview.canMerge
+            ? 'approved'
+            : firstReview.reviewFailed
+              ? 'human-needed'
+              : 'retrying',
+          currentHeadRefOid,
+        ),
+        this.config,
+      )
+
+      if (firstReview.approved && firstReview.canMerge) {
+        await setManagedPrReviewLabels(prNumber, 'approved', this.config)
+        return { approved: true, review: firstReview }
+      }
+
+      if (firstReview.reviewFailed) {
+        await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+        return { approved: false, review: firstReview }
+      }
+
+      await setManagedPrReviewLabels(prNumber, 'retry', this.config)
+      reviewForFix = firstReview
+      attemptAfterFix = nextAttempt + 1
+    }
 
     const fixResult = await runReviewAutoFix(
       worktreePath,
       issue.number,
       prNumber,
       prUrl,
-      buildReviewFeedback(firstReview),
+      buildReviewFeedback(reviewForFix),
       this.config,
       this.logger,
       monitor,
@@ -1670,7 +1699,11 @@ export class AgentDaemon {
         reason: `Auto-fix failed: ${fixResult.error ?? 'unknown error'}`,
         reviewFailed: true,
       }
-      await commentOnPr(prNumber, buildPrReviewComment(prNumber, failedReview, 2, 'human-needed'), this.config)
+      await commentOnPr(
+        prNumber,
+        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed'),
+        this.config,
+      )
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return { approved: false, review: failedReview }
     }
@@ -1680,11 +1713,16 @@ export class AgentDaemon {
     } catch (err) {
       recordReviewAutoFixOutcome('push_failed')
       const failedReview = buildAutoFixPushFailedReview(err)
-      await commentOnPr(prNumber, buildPrReviewComment(prNumber, failedReview, 2, 'human-needed'), this.config)
+      await commentOnPr(
+        prNumber,
+        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed'),
+        this.config,
+      )
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return { approved: false, review: failedReview }
     }
 
+    const updatedHeadRefOid = await readGitHeadRefOid(worktreePath)
     const secondReview = await this.runDetachedPrReview(prNumber, prUrl, monitor)
     recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
 
@@ -1693,12 +1731,20 @@ export class AgentDaemon {
     }
 
     if (secondReview.approved && secondReview.canMerge) {
-      await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'approved'), this.config)
+      await commentOnPr(
+        prNumber,
+        buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid),
+        this.config,
+      )
       await setManagedPrReviewLabels(prNumber, 'approved', this.config)
       return { approved: true, review: secondReview }
     }
 
-    await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'human-needed'), this.config)
+    await commentOnPr(
+      prNumber,
+      buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid),
+      this.config,
+    )
     await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
     return { approved: false, review: secondReview }
   }

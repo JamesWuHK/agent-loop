@@ -180,6 +180,17 @@ describe('pr-reviewer', () => {
     expect(comment).toContain('## Automated review still failing')
   })
 
+  test('includes headRefOid metadata when provided in PR review comments', () => {
+    const comment = buildPrReviewComment(61, {
+      approved: true,
+      canMerge: true,
+      reason: 'ready',
+      findings: [],
+    }, 2, 'approved', 'abc123def456')
+
+    expect(comment).toContain('"headRefOid":"abc123def456"')
+  })
+
   test('does not embed structured review feedback when the reviewer output itself failed validation', () => {
     const comment = buildPrReviewComment(61, {
       approved: false,
