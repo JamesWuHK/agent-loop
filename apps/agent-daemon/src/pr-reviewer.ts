@@ -52,8 +52,20 @@ interface StructuredReviewFeedbackPayload {
   findings: PrReviewFinding[]
 }
 
+export interface ReviewAgentResponse {
+  responseText: string
+}
+
+export type ReviewAgentRunner = (
+  prompt: string,
+  worktreePath: string,
+  config: AgentConfig,
+  logger?: typeof console,
+) => Promise<ReviewAgentResponse>
+
 const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
+const MAX_REVIEW_OUTPUT_ATTEMPTS = 2
 
 /**
  * Review a PR using the configured CLI agent to determine if it can be merged.
@@ -69,8 +81,15 @@ export async function reviewPr(
 
   try {
     const context = await fetchPrReviewContext(prNumber, config)
-    const prompt = buildReviewPrompt(prNumber, prUrl, config.repo, context)
-    const result = await runReviewSubagent(prompt, worktreePath, config, logger)
+    const result = await reviewPrAgainstContext(
+      prNumber,
+      prUrl,
+      worktreePath,
+      config.repo,
+      context,
+      config,
+      logger,
+    )
     logger.log(`[pr-review] PR #${prNumber} review complete: ${result.approved ? 'APPROVED' : 'REJECTED'}`)
     return result
   } catch (err) {
@@ -82,6 +101,63 @@ export async function reviewPr(
       reviewFailed: true,
     }
   }
+}
+
+export async function reviewPrAgainstContext(
+  prNumber: number,
+  prUrl: string,
+  worktreePath: string,
+  repo: string,
+  context: PrReviewContext,
+  config: AgentConfig,
+  logger = console,
+  runAgent: ReviewAgentRunner = runReviewSubagentResponse,
+): Promise<PrReviewResult> {
+  const basePrompt = buildReviewPrompt(prNumber, prUrl, repo, context)
+
+  let prompt = basePrompt
+  let lastParsedReview: PrReviewResult | null = null
+  let lastFailureMessage = ''
+
+  for (let attempt = 1; attempt <= MAX_REVIEW_OUTPUT_ATTEMPTS; attempt++) {
+    const response = await runAgent(prompt, worktreePath, config, logger)
+
+    try {
+      const parsed = parsePrReviewResponse(response.responseText)
+      if (!parsed.reviewFailed) {
+        return parsed
+      }
+
+      lastParsedReview = parsed
+      lastFailureMessage = parsed.reason
+    } catch {
+      lastFailureMessage = `Failed to parse review response: ${response.responseText}`
+    }
+
+    if (attempt >= MAX_REVIEW_OUTPUT_ATTEMPTS) {
+      if (lastParsedReview) {
+        return lastParsedReview
+      }
+
+      throw new Error(lastFailureMessage)
+    }
+
+    logger.warn(
+      `[pr-review] output contract invalid on attempt ${attempt}; retrying reviewer before commenting`,
+    )
+    prompt = buildReviewRepairPrompt(
+      basePrompt,
+      response.responseText,
+      lastFailureMessage,
+      attempt + 1,
+    )
+  }
+
+  if (lastParsedReview) {
+    return lastParsedReview
+  }
+
+  throw new Error(lastFailureMessage || 'Review failed without producing a usable result')
 }
 
 async function fetchPrReviewContext(prNumber: number, config: AgentConfig): Promise<PrReviewContext> {
@@ -251,6 +327,33 @@ Respond with JSON only:
 }`
 }
 
+export function buildReviewRepairPrompt(
+  basePrompt: string,
+  invalidResponseText: string,
+  failureReason: string,
+  attempt: number,
+): string {
+  return `${basePrompt}
+
+Your previous review output failed agent-loop validation before any PR comment was posted.
+Repair attempt: ${attempt}
+
+Validation failure:
+${failureReason}
+
+Previous response:
+\`\`\`
+${invalidResponseText.trim() || '(empty response)'}
+\`\`\`
+
+Return corrected JSON only.
+Requirements:
+- Keep the same review target: this PR, its checked-out branch, and the linked issue contract.
+- If you reject, every finding must include \`mustFix\`, \`mustNotDo\`, \`validation\`, and \`scopeRationale\`.
+- Do not output prose before or after the JSON.
+- Do not use markdown fences around the corrected JSON.`
+}
+
 export function buildPrReviewComment(
   prNumber: number,
   review: PrReviewResult,
@@ -272,8 +375,9 @@ export function buildPrReviewComment(
   const findingsBlock = review.findings && review.findings.length > 0
     ? `\n- Findings:\n${review.findings.slice(0, 5).map((finding) => `  - ${formatReviewFinding(finding)}`).join('\n')}\n`
     : ''
-  const feedbackPayload = buildStructuredReviewFeedbackPayload(review)
-  const structuredFeedbackBlock = `<!-- agent-loop:review-feedback ${JSON.stringify(feedbackPayload)} -->`
+  const structuredFeedbackBlock = shouldEmbedStructuredReviewFeedback(review)
+    ? `\n<!-- agent-loop:review-feedback ${JSON.stringify(buildStructuredReviewFeedbackPayload(review))} -->`
+    : ''
 
   return `<!-- agent-loop:pr-review {"pr":${prNumber},"attempt":${attempt},"approved":${review.approved},"canMerge":${review.canMerge}} -->
 ${structuredFeedbackBlock}
@@ -288,6 +392,10 @@ ${nextStep}`
 }
 
 export function buildReviewFeedback(review: PrReviewResult): string {
+  if (review.reviewFailed) {
+    return review.reason
+  }
+
   return serializeStructuredReviewFeedback(buildStructuredReviewFeedbackPayload(review))
 }
 
@@ -421,12 +529,12 @@ function isMissingGitWorktreeError(error: unknown): boolean {
   return message.includes('is not a working tree')
 }
 
-async function runReviewSubagent(
+async function runReviewSubagentResponse(
   prompt: string,
   worktreePath: string,
   config: AgentConfig,
   logger = console,
-): Promise<PrReviewResult> {
+): Promise<ReviewAgentResponse> {
   logger.log(`[pr-review] launching review subagent in ${worktreePath}`)
   const result = await runConfiguredAgent(buildReviewRunOptions(
     prompt,
@@ -439,10 +547,8 @@ async function runReviewSubagent(
     throw new Error(`Agent exited with code ${result.exitCode}: ${result.stderr || result.stdout}`)
   }
 
-  try {
-    return parsePrReviewResponse(result.responseText)
-  } catch {
-    throw new Error(`Failed to parse review response: ${result.responseText}`)
+  return {
+    responseText: result.responseText,
   }
 }
 
@@ -467,6 +573,10 @@ function buildStructuredReviewFeedbackPayload(review: PrReviewResult): Structure
     reason: review.reason,
     findings: review.findings ?? [],
   }
+}
+
+function shouldEmbedStructuredReviewFeedback(review: PrReviewResult): boolean {
+  return !review.reviewFailed
 }
 
 function serializeStructuredReviewFeedback(payload: StructuredReviewFeedbackPayload): string {

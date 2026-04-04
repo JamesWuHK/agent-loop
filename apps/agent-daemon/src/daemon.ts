@@ -575,6 +575,7 @@ export class AgentDaemon {
         return
       }
 
+      await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, 1, 'retrying'), this.config)
       await setManagedPrReviewLabels(pr.number, 'retry', this.config)
       const fixResult = await runReviewAutoFix(
         detached.worktreePath,
