@@ -17,6 +17,9 @@ const TEST_CONFIG: AgentConfig = {
   pollIntervalMs: 60_000,
   concurrency: 1,
   worktreesBase: '/tmp',
+  project: {
+    profile: 'desktop-vite',
+  },
   agent: {
     primary: 'codex',
     fallback: null,
@@ -142,6 +145,7 @@ describe('buildIssueRecoveryPrompt', () => {
       [
         'App stays on /login because there is no real login flow yet.',
       ],
+      TEST_CONFIG.project,
     )
 
     expect(prompt).toContain('Treat the latest blocking review feedback as input, but verify it against the issue scope before changing code.')
@@ -163,6 +167,7 @@ describe('buildReviewAutoFixPrompt', () => {
       61,
       'https://example.com/pr/61',
       'Fix the unauthenticated login route regression.',
+      TEST_CONFIG.project,
     )
 
     expect(prompt).toContain('cd apps/desktop && bun run --bun test src/App.test.tsx')
@@ -170,5 +175,17 @@ describe('buildReviewAutoFixPrompt', () => {
     expect(prompt).toContain('Vitest loads `vite.config.ts` and the `jsdom` environment')
     expect(prompt).toContain('Preserve the linked issue\'s explicit acceptance contract')
     expect(prompt).toContain('Do not introduce new API calls, persistence, gateway actions, or unrelated refactors')
+  })
+
+  it('falls back to generic toolchain guidance when no project profile is provided', () => {
+    const prompt = buildReviewAutoFixPrompt(
+      46,
+      61,
+      'https://example.com/pr/61',
+      'Fix the unauthenticated login route regression.',
+    )
+
+    expect(prompt).toContain('Validate fixes with the repository\'s existing commands')
+    expect(prompt).not.toContain('Vitest loads `vite.config.ts` and the `jsdom` environment')
   })
 })

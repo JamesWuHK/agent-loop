@@ -18,6 +18,9 @@ const baseConfig: AgentConfig = {
   pollIntervalMs: 60_000,
   concurrency: 1,
   worktreesBase: '/tmp/worktrees',
+  project: {
+    profile: 'generic',
+  },
   agent: {
     primary: 'codex',
     fallback: 'claude',

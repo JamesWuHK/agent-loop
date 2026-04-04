@@ -1,6 +1,11 @@
 import { resolve } from 'node:path'
 import { writeFileSync } from 'node:fs'
-import { renderIssueContractForPrompt, type AgentConfig, type AgentResult } from '@agent/shared'
+import {
+  getProjectPromptGuidance,
+  renderIssueContractForPrompt,
+  type AgentConfig,
+  type AgentResult,
+} from '@agent/shared'
 import { recordAgentExecution } from './metrics'
 import { runConfiguredAgent } from './cli-agent'
 
@@ -24,7 +29,7 @@ export async function runAgent(
 
   // Write prompt file for the agent
   const promptPath = resolve(worktreePath, 'prompt.md')
-  const prompt = buildPrompt(issueNumber, issueTitle, issueBody)
+  const prompt = buildPrompt(issueNumber, issueTitle, issueBody, config.project)
   writeFileSync(promptPath, prompt, 'utf-8')
 
   const runResult = await runConfiguredAgent({
@@ -52,7 +57,13 @@ export async function runAgent(
   return result
 }
 
-function buildPrompt(issueNumber: number, title: string, body: string): string {
+function buildPrompt(
+  issueNumber: number,
+  title: string,
+  body: string,
+  project: AgentConfig['project'],
+): string {
+  const projectGuidance = getProjectPromptGuidance(project, 'implementation')
   return `# Task: Fix Issue #${issueNumber}
 
 ## Issue Title
@@ -70,12 +81,14 @@ ${renderIssueContractForPrompt(body)}
 3. Make only the necessary code changes for this issue.
 4. Do not edit forbidden files or expand into out-of-scope follow-up work.
 5. Preserve required semantics and must-preserve behaviors from the issue, even if a shortcut would make review easier.
-6. For desktop frontend tests, use the existing Vitest/jsdom setup from \`apps/desktop/vite.config.ts\` and \`apps/desktop/src/test/setup.ts\`. Do not add manual \`JSDOM\` bootstrap, duplicate DOM globals, or replacement test harness files unless the issue explicitly requires that.
-7. Run the relevant tests from the issue contract if present.
-8. Run \`git diff --stat origin/main...HEAD\` and verify the changed file set still matches the issue contract before committing.
-9. Commit your changes with message: \`fix #${issueNumber}: <title>\`
-10. Push the branch to origin
+6. Run the relevant tests from the issue contract if present.
+7. Run \`git diff --stat origin/main...HEAD\` and verify the changed file set still matches the issue contract before committing.
+8. Commit your changes with message: \`fix #${issueNumber}: <title>\`
+9. Push the branch to origin
 
-Branch name should follow: agent/${issueNumber}/<machine-id>
+${projectGuidance.length > 0 ? `## Project Profile Guidance
+${projectGuidance.map((line) => `- ${line}`).join('\n')}
+
+` : ''}Branch name should follow: agent/${issueNumber}/<machine-id>
 `
 }
