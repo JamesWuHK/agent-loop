@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { applyDependencyClaimability } from './github-api'
+import { applyDependencyClaimability, deriveIssueStateFromRaw } from './github-api'
 import type { AgentIssue } from './types'
 
 function makeIssue(overrides: Partial<AgentIssue> = {}): AgentIssue {
@@ -16,6 +16,8 @@ function makeIssue(overrides: Partial<AgentIssue> = {}): AgentIssue {
     hasDependencyMetadata: false,
     dependencyParseError: false,
     claimBlockedBy: [],
+    hasExecutableContract: true,
+    contractValidationErrors: [],
     ...overrides,
   }
 }
@@ -54,5 +56,22 @@ describe('applyDependencyClaimability', () => {
     ])
     expect(issue!.isClaimable).toBe(false)
     expect(issue!.claimBlockedBy).toEqual([45])
+  })
+
+  it('blocks issue when executable contract validation failed', () => {
+    const [issue] = applyDependencyClaimability([
+      makeIssue({
+        number: 46,
+        hasExecutableContract: false,
+        contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
+      }),
+    ])
+    expect(issue!.isClaimable).toBe(false)
+  })
+})
+
+describe('deriveIssueStateFromRaw', () => {
+  it('treats closed issues as done even if stale labels remain', () => {
+    expect(deriveIssueStateFromRaw(['agent:failed'], 'closed')).toBe('done')
   })
 })

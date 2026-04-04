@@ -2,17 +2,39 @@
 
 This document defines the canonical GitHub Issue format for repositories driven by Agent Loop.
 
+Agent Loop should consume issues as executable contracts, not loose task descriptions.
+
 ## Goal
 
-Agent Loop consumes GitHub Issues as executable work items. For reliable planning and scheduling, issue bodies must be:
+For reliable planning, scheduling, review, and auto-fix, an executable issue must be:
 
 - readable by humans
 - stable for agents
 - parseable for dependency-aware claiming
+- specific enough for reviewer scope checks
+- structured enough for rejection feedback to map back to the issue contract
 
-## Required Structure
+## Issue Types
 
-Every executable issue should follow this structure:
+### Tracking parent
+
+Use parent issues to track decomposition, milestones, and rollout order.
+
+- usually do not need full RED tests
+- usually should not enter `agent:ready`
+- usually exist to coordinate child issues
+
+### Executable child
+
+Use child issues for daemon-consumable implementation slices.
+
+- must be execution-sized
+- must normally produce a real code change and a real commit on the happy path
+- must include the full executable contract below
+
+## Canonical Child Structure
+
+Every executable child issue should follow this structure:
 
 ```md
 ## 用户故事
@@ -28,11 +50,32 @@ Every executable issue should follow this structure:
 
 ### Constraints
 - [约束 / 禁止事项 / 范围限制]
-- [可选：涉及文件、不可修改区域、实现边界]
+
+### AllowedFiles
+- [允许修改的精确文件或目录]
+
+### ForbiddenFiles
+- [明确禁止修改的文件或目录]
+
+### MustPreserve
+- [必须保持不变的已有行为、接口或状态语义]
+
+### OutOfScope
+- [明确不在本 issue 内的后续工作]
+
+### RequiredSemantics
+- [本 issue 完成后必须成立的行为]
+
+### ReviewHints
+- [reviewer 应优先检查的风险点]
+
+### Validation
+- `自动化验证命令`
+- `scope 或语义自检动作`
 
 ## RED 测试
 ```typescript
-[完整测试代码，agent 可直接复制到测试文件]
+[完整失败测试，agent 可直接复制到测试文件]
 ```
 
 ## 实现步骤
@@ -41,33 +84,22 @@ Every executable issue should follow this structure:
 3. [步骤3]
 
 ## 验收
-- [ ] 运行测试，确认 FAIL（RED）
-- [ ] 完成最小实现
-- [ ] 运行测试，确认 PASS（GREEN）
-- [ ] 完成 git commit
+- [ ] 只修改 `AllowedFiles` 内文件
+- [ ] `MustPreserve` 行为未回归
+- [ ] `OutOfScope` 内容没有混入
+- [ ] RED 测试转绿
+- [ ] 完成 `Validation` 中要求的验证
 ```
 
-## Dependencies Format
+## Dependencies Rules
 
 Dependency metadata lives inside `## Context` -> `### Dependencies` as a fenced JSON block.
 
-Example:
-
-```md
-## Context
-### Dependencies
-```json
-{
-  "dependsOn": [123, 124]
-}
-```
-```
-
-### Rules
+Rules:
 
 - `dependsOn` must be an array of GitHub issue numbers
-- all listed dependencies must be completed before this issue is claimable
 - use issue numbers only, not URLs
+- all listed dependencies must be completed before the issue is claimable
 - if there are no dependencies, use:
 
 ```json
@@ -76,31 +108,38 @@ Example:
 }
 ```
 
-## Semantics
+- malformed dependency JSON is a configuration error and should block `agent:ready`
 
-- missing `## Context` on legacy issues is tolerated by the scheduler
-- missing `### Dependencies` is treated as no dependencies
-- malformed dependency JSON is treated as configuration error and should block claiming until fixed
+## Executable Contract Rules
 
-## Constraints Section
+These fields form the executable contract:
 
-Use `### Constraints` to record information that should shape implementation but does not affect scheduling, for example:
+- `AllowedFiles`
+- `ForbiddenFiles`
+- `MustPreserve`
+- `OutOfScope`
+- `RequiredSemantics`
+- `ReviewHints`
+- `Validation`
 
-- allowed files
-- prohibited files
-- non-goals
-- implementation boundaries
-- required interfaces or invariants
+Write them as hard boundaries, not fuzzy guidance.
+
+Good examples:
+
+- precise file paths, not "frontend files"
+- observable old behavior, not "keep existing logic"
+- concrete future exclusions, not "avoid scope creep"
+- exact validation commands, not "run tests"
 
 ## Authoring Guidance
 
-Good issues are:
+Good executable issues are:
 
 - small enough to finish in one focused implementation loop
 - explicit about RED tests
-- explicit about constraints
+- explicit about constraints and file boundaries
 - explicit about dependencies when another issue must land first
-- accurate on first publish: parent issue, child issue, and `dependsOn` values must be complete and correct before the daemon starts consuming them
+- accurate on first publish: parent issue, child issue, and `dependsOn` values should be correct before the daemon starts consuming them
 - scoped so the happy path should normally produce a real code change and a real commit
 
 Avoid:
@@ -122,71 +161,27 @@ When writing parent issues and child issues, optimize first for the normal execu
 
 If a subtask frequently ends with "no commit made", that is usually a task-authoring problem before it is an execution-engine problem.
 
-## Parent / Child Accuracy Rule
-
-For any issue tree intended for daemon execution:
-
-- create the parent issue and child issues as one coherent set
-- make sure every child issue has the final canonical body before labeling it `agent:ready`
-- make sure every `dependsOn` value points to the correct canonical issue number
-- verify fenced JSON blocks are valid markdown and valid JSON
-- do not rely on follow-up manual repair of issue metadata after publication
-
-## Minimal Example
-
-```md
-## 用户故事
-作为用户，我希望登录状态能被安全保存，这样我重启应用后无需重复登录。
-
-## Context
-### Dependencies
-```json
-{
-  "dependsOn": [35]
-}
-```
-
-### Constraints
-- 只修改 apps/desktop/src-tauri/src/*
-- 不要改动前端登录流程
-
-## RED 测试
-```rust
-// failing test here
-```
-
-## 实现步骤
-1. 添加 keychain 读写测试
-2. 实现持久化逻辑
-3. 注册 Tauri 命令
-
-## 验收
-- [ ] cargo test 先失败
-- [ ] 实现通过测试
-- [ ] 提交 commit
-```
-
 ## Ready Labeling and Daemon Scheduling
 
 When a parent issue has already been decomposed into execution-sized child issues, and each child issue has correct `dependsOn` metadata:
 
 - child issues should normally be labeled `agent:ready` immediately
 - the daemon should decide claimability from dependency state, not from manual sequential ready toggling
-- parent / epic issues should usually remain tracking-only and do not need `agent:ready`
+- parent issues should usually remain tracking-only and do not need `agent:ready`
 
-### Why
+## Ready Checklist
 
-Dependency-aware scheduling only works if the daemon can see the full executable pool. Holding dependent child issues in a non-ready state after orchestration is complete weakens the scheduler and reintroduces manual dispatch.
+Do not put a child issue into `agent:ready` if any answer below is "no":
 
-### Default authoring rule
-
-For any future issue-writing skill or prompt in Agent Loop:
-
-- emit the canonical issue body structure
-- include machine-readable `dependsOn` metadata
-- default executable child issues into the `agent:ready` pool once authored
-- rely on the daemon to expand the dependency graph automatically
+- Can a coding agent complete this without hidden context?
+- Would the happy path likely create a real code change and commit?
+- Are dependencies final and valid JSON?
+- Are allowed and forbidden files explicit?
+- Are preserved behaviors and required semantics observable?
+- Is future work clearly excluded?
+- Does the RED test contain concrete failing test code?
+- Do implementation steps and acceptance criteria align with the contract?
 
 ## Recommendation for Future Skill Prompts
 
-Any future issue-writing skill or prompt in Agent Loop should emit this exact structure by default so scheduling and execution stay aligned.
+Any issue-writing skill or prompt used with Agent Loop should emit this structure by default so scheduling, review, and auto-fix stay aligned.

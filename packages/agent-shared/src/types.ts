@@ -52,6 +52,15 @@ export interface GitHubIssue {
   url: string
 }
 
+export interface ManagedPullRequest {
+  number: number
+  title: string
+  url: string
+  headRefName: string
+  isDraft: boolean
+  labels: string[]
+}
+
 // ─── Internal Issue (derived) ───────────────────────────────────────────────
 
 export interface AgentIssue {
@@ -67,6 +76,8 @@ export interface AgentIssue {
   hasDependencyMetadata: boolean
   dependencyParseError: boolean
   claimBlockedBy: number[]
+  hasExecutableContract: boolean
+  contractValidationErrors: string[]
 }
 
 export interface IssueDependencyMetadata {

@@ -115,6 +115,16 @@ export async function runSubtaskExecutor(
 
     // HEAD verification: detect "exit 0 but no commit" false positives
     if (!realCommit) {
+      if (await shouldTreatCleanNoCommitSubtaskAsSuccess(
+        worktreePath,
+        config.git.defaultBranch,
+        subtask.order,
+      )) {
+        logger.log(`[subtask] #${subtask.id} exited 0 with no new commit, but the worktree is clean and earlier commits already exist on the branch — treating as no-op success`)
+        subtask.status = 'done'
+        continue
+      }
+
       logger.warn(`[subtask] #${subtask.id} agent exited 0 but no commit was made — treating as failed`)
       subtask.status = 'failed'
       totalRetries++
@@ -143,6 +153,28 @@ export interface ReviewAutoFixResult {
   exitCode: 0 | 1 | 2 | 3
   error?: string
   commitSha?: string
+}
+
+export async function shouldTreatCleanNoCommitSubtaskAsSuccess(
+  worktreePath: string,
+  defaultBranch: string,
+  subtaskOrder: number,
+): Promise<boolean> {
+  if (subtaskOrder <= 1) return false
+
+  const status = (await $`git -C ${worktreePath} status --short`.quiet().text()).trim()
+  if (status) return false
+
+  let branchCommitCountRaw = ''
+  try {
+    branchCommitCountRaw = (await $`git -C ${worktreePath} rev-list --count origin/${defaultBranch}..HEAD`.quiet().text()).trim()
+  } catch {
+    branchCommitCountRaw = (await $`git -C ${worktreePath} rev-list --count ${defaultBranch}..HEAD`.quiet().text()).trim()
+  }
+
+  const branchCommitCount = Number.parseInt(branchCommitCountRaw, 10)
+
+  return Number.isFinite(branchCommitCount) && branchCommitCount > 0
 }
 
 export async function runReviewAutoFix(

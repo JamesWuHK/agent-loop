@@ -4,7 +4,7 @@ import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { reviewPr, buildPrReviewComment, type PrReviewResult } from './pr-reviewer'
+import { reviewPr, buildPrReviewComment, buildReviewFeedback, type PrReviewResult } from './pr-reviewer'
 import {
   recordPoll,
   recordPollDuration,
@@ -266,12 +266,30 @@ export class AgentDaemon {
     prNumber: number,
     prUrl: string,
   ): Promise<{ approved: boolean; review: PrReviewResult }> {
-    const firstReview = await reviewPr(prNumber, prUrl, this.config, this.logger)
-    await commentOnPr(prNumber, buildPrReviewComment(prNumber, firstReview, 1, firstReview.approved && firstReview.canMerge ? 'approved' : 'retrying'), this.config)
+    const firstReview = await reviewPr(prNumber, prUrl, worktreePath, this.config, this.logger)
+    await commentOnPr(
+      prNumber,
+      buildPrReviewComment(
+        prNumber,
+        firstReview,
+        1,
+        firstReview.approved && firstReview.canMerge
+          ? 'approved'
+          : firstReview.reviewFailed
+            ? 'human-needed'
+            : 'retrying',
+      ),
+      this.config,
+    )
 
     if (firstReview.approved && firstReview.canMerge) {
       await setManagedPrReviewLabels(prNumber, 'approved', this.config)
       return { approved: true, review: firstReview }
+    }
+
+    if (firstReview.reviewFailed) {
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
+      return { approved: false, review: firstReview }
     }
 
     await setManagedPrReviewLabels(prNumber, 'retry', this.config)
@@ -281,7 +299,7 @@ export class AgentDaemon {
       issue.number,
       prNumber,
       prUrl,
-      firstReview.reason,
+      buildReviewFeedback(firstReview),
       this.config,
       this.logger,
     )
@@ -299,7 +317,7 @@ export class AgentDaemon {
     }
 
     await pushBranch(worktreePath, branch, this.logger)
-    const secondReview = await reviewPr(prNumber, prUrl, this.config, this.logger)
+    const secondReview = await reviewPr(prNumber, prUrl, worktreePath, this.config, this.logger)
 
     if (secondReview.approved && secondReview.canMerge) {
       await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'approved'), this.config)
