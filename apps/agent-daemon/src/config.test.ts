@@ -20,6 +20,12 @@ const baseFileConfig: Partial<AgentConfig> = {
     concurrencyByRepo: {},
     concurrencyByProfile: {},
   },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+  },
   project: {
     profile: 'generic',
     promptGuidance: {
@@ -90,6 +96,12 @@ describe('buildConfig', () => {
       profileCap: null,
       projectCap: null,
     })
+    expect(config.recovery).toEqual({
+      heartbeatIntervalMs: 30_000,
+      leaseTtlMs: 60_000,
+      workerIdleTimeoutMs: 300_000,
+      leaseAdoptionBackoffMs: 5_000,
+    })
     expect(config.worktreesBase).toBe('/tmp/agent-loop-home/.agent-worktrees/JamesWuHK-digital-employee')
   })
 
@@ -113,6 +125,7 @@ describe('buildConfig', () => {
     expect(config.git.defaultBranch).toBe('master')
     expect(config.requestedConcurrency).toBe(1)
     expect(config.concurrency).toBe(1)
+    expect(config.recovery.leaseTtlMs).toBe(60_000)
   })
 
   test('applies repo, profile, and project concurrency caps to the effective daemon limit', () => {
@@ -153,6 +166,7 @@ describe('buildConfig', () => {
       profileCap: 2,
       projectCap: 3,
     })
+    expect(config.recovery.heartbeatIntervalMs).toBe(30_000)
   })
 
   test('ignores invalid cap values instead of reducing concurrency to zero', () => {
@@ -189,6 +203,33 @@ describe('buildConfig', () => {
       repoCap: null,
       profileCap: null,
       projectCap: null,
+    })
+  })
+
+  test('derives recovery defaults and lets machine config override them', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          recovery: {
+            heartbeatIntervalMs: 10_000,
+            leaseTtlMs: 45_000,
+            workerIdleTimeoutMs: 90_000,
+            leaseAdoptionBackoffMs: 12_000,
+          },
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.recovery).toEqual({
+      heartbeatIntervalMs: 10_000,
+      leaseTtlMs: 45_000,
+      workerIdleTimeoutMs: 90_000,
+      leaseAdoptionBackoffMs: 12_000,
     })
   })
 })

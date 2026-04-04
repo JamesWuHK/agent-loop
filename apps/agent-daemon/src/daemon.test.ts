@@ -42,6 +42,12 @@ describe('daemon merge recovery helpers', () => {
           'desktop-vite': 2,
         },
       },
+      recovery: {
+        heartbeatIntervalMs: 30_000,
+        leaseTtlMs: 60_000,
+        workerIdleTimeoutMs: 300_000,
+        leaseAdoptionBackoffMs: 5_000,
+      },
       worktreesBase: '/tmp/worktrees',
       project: {
         profile: 'desktop-vite',
@@ -126,6 +132,11 @@ describe('daemon merge recovery helpers', () => {
       startupRecoveryPending: true,
       failedIssueResumeAttemptCount: 3,
       failedIssueResumeCooldownCount: 2,
+      activeLeaseCount: 2,
+      oldestLeaseHeartbeatAgeSeconds: 47,
+      stalledWorkerCount: 1,
+      lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
+      lastRecoveryActionKind: 'issue-process-idle-timeout',
     })).toEqual({
       activePrReviews: 2,
       inFlightIssueProcess: true,
@@ -134,6 +145,11 @@ describe('daemon merge recovery helpers', () => {
       effectiveActiveTasks: 3,
       failedIssueResumeAttemptsTracked: 3,
       failedIssueResumeCooldownsTracked: 2,
+      activeLeaseCount: 2,
+      oldestLeaseHeartbeatAgeSeconds: 47,
+      stalledWorkerCount: 1,
+      lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
+      lastRecoveryActionKind: 'issue-process-idle-timeout',
     })
   })
 

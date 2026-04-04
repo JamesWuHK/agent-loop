@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { buildGhEnv, renderIssueContractForPrompt, type AgentConfig } from '@agent/shared'
-import { runConfiguredAgent, type CliAgentRunOptions } from './cli-agent'
+import { runConfiguredAgent, type AgentFailureKind, type CliAgentRunOptions, type TaskExecutionMonitor } from './cli-agent'
 
 export interface PrReviewFinding {
   severity: string
@@ -21,6 +21,7 @@ export interface PrReviewResult {
   canMerge: boolean
   findings?: PrReviewFinding[]
   reviewFailed?: boolean
+  failureKind?: AgentFailureKind
 }
 
 interface ReviewFindingContractViolation {
@@ -73,7 +74,18 @@ export type ReviewAgentRunner = (
   worktreePath: string,
   config: AgentConfig,
   logger?: typeof console,
+  monitor?: TaskExecutionMonitor,
 ) => Promise<ReviewAgentResponse>
+
+class ReviewAgentExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly failureKind?: AgentFailureKind,
+  ) {
+    super(message)
+    this.name = 'ReviewAgentExecutionError'
+  }
+}
 
 const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
@@ -88,6 +100,7 @@ export async function reviewPr(
   worktreePath: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): Promise<PrReviewResult> {
   logger.log(`[pr-review] starting review for PR #${prNumber}`)
 
@@ -101,6 +114,8 @@ export async function reviewPr(
       context,
       config,
       logger,
+      runReviewSubagentResponse,
+      monitor,
     )
     logger.log(`[pr-review] PR #${prNumber} review complete: ${result.approved ? 'APPROVED' : 'REJECTED'}`)
     return result
@@ -111,6 +126,7 @@ export async function reviewPr(
       reason: `Review failed: ${String(err)}`,
       canMerge: false,
       reviewFailed: true,
+      failureKind: err instanceof ReviewAgentExecutionError ? err.failureKind : undefined,
     }
   }
 }
@@ -124,6 +140,7 @@ export async function reviewPrAgainstContext(
   config: AgentConfig,
   logger = console,
   runAgent: ReviewAgentRunner = runReviewSubagentResponse,
+  monitor?: TaskExecutionMonitor,
 ): Promise<PrReviewResult> {
   const basePrompt = buildReviewPrompt(prNumber, prUrl, repo, context)
 
@@ -132,7 +149,8 @@ export async function reviewPrAgainstContext(
   let lastFailureMessage = ''
 
   for (let attempt = 1; attempt <= MAX_REVIEW_OUTPUT_ATTEMPTS; attempt++) {
-    const response = await runAgent(prompt, worktreePath, config, logger)
+    monitor?.setPhase?.(attempt === 1 ? 'pr-review' : `pr-review-repair:${attempt}`)
+    const response = await runAgent(prompt, worktreePath, config, logger, monitor)
 
     try {
       const parsed = parsePrReviewResponse(response.responseText)
@@ -493,6 +511,7 @@ export function buildReviewRunOptions(
   worktreePath: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): CliAgentRunOptions {
   return {
     prompt,
@@ -501,6 +520,7 @@ export function buildReviewRunOptions(
     config,
     logger,
     allowWrites: false,
+    monitor: monitor?.agentMonitor,
   }
 }
 
@@ -602,6 +622,7 @@ async function runReviewSubagentResponse(
   worktreePath: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): Promise<ReviewAgentResponse> {
   logger.log(`[pr-review] launching review subagent in ${worktreePath}`)
   const result = await runConfiguredAgent(buildReviewRunOptions(
@@ -609,10 +630,14 @@ async function runReviewSubagentResponse(
     worktreePath,
     config,
     logger,
+    monitor,
   ))
 
   if (!result.ok) {
-    throw new Error(`Agent exited with code ${result.exitCode}: ${result.stderr || result.stdout}`)
+    throw new ReviewAgentExecutionError(
+      `Agent exited with code ${result.exitCode}: ${result.stderr || result.stdout}`,
+      result.failureKind,
+    )
   }
 
   return {

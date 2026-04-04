@@ -122,6 +122,48 @@ export interface ConcurrencyPolicy {
   projectCap: number | null
 }
 
+export interface RecoveryConfig {
+  heartbeatIntervalMs: number
+  leaseTtlMs: number
+  workerIdleTimeoutMs: number
+  leaseAdoptionBackoffMs: number
+}
+
+export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'
+export type ManagedLeaseStatus = 'active' | 'completed' | 'recoverable' | 'released'
+export type ManagedLeaseProgressKind = 'stdout' | 'stderr' | 'git-state' | 'phase'
+
+export interface ManagedLease {
+  leaseId: string
+  scope: ManagedLeaseScope
+  issueNumber?: number
+  prNumber?: number
+  machineId: string
+  daemonInstanceId: string
+  branch?: string
+  worktreeId?: string
+  phase: string
+  startedAt: string
+  lastHeartbeatAt: string
+  expiresAt: string
+  attempt: number
+  lastProgressAt: string
+  lastProgressKind?: ManagedLeaseProgressKind
+  status: ManagedLeaseStatus
+  recoveryReason?: string
+}
+
+export interface IssueComment {
+  commentId: number
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ManagedLeaseComment extends IssueComment {
+  lease: ManagedLease
+}
+
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
 
 export interface ClaimEvent {
@@ -146,6 +188,7 @@ export interface AgentConfig {
   requestedConcurrency: number
   concurrencyPolicy: ConcurrencyPolicy
   scheduling: AgentSchedulingConfig
+  recovery: RecoveryConfig
   worktreesBase: string
   project: ProjectProfileConfig
   agent: {
@@ -203,11 +246,13 @@ export interface Subtask {
 export interface DaemonStatus {
   running: boolean
   machineId: string
+  daemonInstanceId: string
   repo: string
   pollIntervalMs: number
   concurrency: number
   requestedConcurrency: number
   concurrencyPolicy: ConcurrencyPolicy
+  recovery: RecoveryConfig
   project: {
     profile: ProjectProfileName
     defaultBranch: string
@@ -237,6 +282,11 @@ export interface DaemonStatus {
     effectiveActiveTasks: number
     failedIssueResumeAttemptsTracked: number
     failedIssueResumeCooldownsTracked: number
+    activeLeaseCount: number
+    oldestLeaseHeartbeatAgeSeconds: number
+    stalledWorkerCount: number
+    lastRecoveryActionAt: string | null
+    lastRecoveryActionKind: string | null
   }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null

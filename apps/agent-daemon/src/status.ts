@@ -34,6 +34,12 @@ export interface DaemonMetricSummary {
   prReviews: Record<string, Record<string, number>>
   autoFixes: Record<string, number>
   mergeRecovery: Record<string, number>
+  recoveryActions: Record<string, Record<string, number>>
+  workerIdleTimeouts: Record<string, number>
+  activeLeases: number | null
+  leaseHeartbeatAgeSeconds: number | null
+  stalledWorkers: number | null
+  leaseConflicts: number
   rateLimitHits: number
 }
 
@@ -143,9 +149,12 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `daemon: ${health.status} v${health.version} (${health.mode})`,
     `repo: ${health.repo}`,
     `project: ${health.project.profile} | agents: ${health.agent.primary} -> ${health.agent.fallback ?? 'none'}`,
+    `daemon: ${health.machineId} / ${health.daemonInstanceId}`,
     `concurrency: ${formatConcurrencyPolicy(health.concurrencyPolicy)}`,
     `runtime: active ${health.runtime.effectiveActiveTasks}/${health.concurrency} | worktrees ${health.activeWorktrees.length} | pr reviews ${health.runtime.activePrReviews} | issue loop ${formatBoolean(health.runtime.inFlightIssueProcess)} | review loop ${formatBoolean(health.runtime.inFlightPrReview)}`,
-    `recovery: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked}`,
+    `recovery: heartbeat ${health.recovery.heartbeatIntervalMs}ms | ttl ${health.recovery.leaseTtlMs}ms | idle ${health.recovery.workerIdleTimeoutMs}ms | adopt backoff ${health.recovery.leaseAdoptionBackoffMs}ms`,
+    `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
+    `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked}`,
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'}`,
   ]
 
@@ -194,6 +203,9 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         ...REVIEW_STAGE_ORDER.map((stage) => `reviews.${stage}: ${formatOrderedMap(snapshot.metrics?.prReviews[stage] ?? {}, REVIEW_OUTCOME_ORDER)}`),
         `auto-fix: ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)}`,
         `merge-recovery: ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
+        `lease-conflicts: ${snapshot.metrics.leaseConflicts}`,
+        `worker-idle-timeouts: ${formatInlineKeyValue(snapshot.metrics.workerIdleTimeouts) || 'none'}`,
+        `recovery-actions: ${formatRecoveryActionSummary(snapshot.metrics.recoveryActions)}`,
         `rate-limit-hits: ${snapshot.metrics.rateLimitHits}`,
       ]
     : [`metrics unavailable: ${snapshot.metricsError ?? 'unknown error'}`]
@@ -211,7 +223,12 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `default branch: ${health.project.defaultBranch}`,
     `project max concurrency: ${health.project.maxConcurrency ?? 'none'}`,
     `agents: ${health.agent.primary} -> ${health.agent.fallback ?? 'none'}`,
+    `daemon instance: ${health.daemonInstanceId}`,
     `concurrency: ${formatConcurrencyPolicy(health.concurrencyPolicy)}`,
+    `recovery heartbeat: ${health.recovery.heartbeatIntervalMs}ms`,
+    `lease ttl: ${health.recovery.leaseTtlMs}ms`,
+    `worker idle timeout: ${health.recovery.workerIdleTimeoutMs}ms`,
+    `lease adoption backoff: ${health.recovery.leaseAdoptionBackoffMs}ms`,
     '',
     'Runtime',
     `pid: ${health.pid}`,
@@ -224,6 +241,10 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `in-flight issue loop: ${formatBoolean(health.runtime.inFlightIssueProcess)}`,
     `in-flight review loop: ${formatBoolean(health.runtime.inFlightPrReview)}`,
     `effective active tasks: ${health.runtime.effectiveActiveTasks}/${health.concurrency}`,
+    `active leases: ${health.runtime.activeLeaseCount}`,
+    `oldest lease heartbeat age: ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)}`,
+    `stalled workers: ${health.runtime.stalledWorkerCount}`,
+    `last recovery action: ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `failed issue resume attempts tracked: ${health.runtime.failedIssueResumeAttemptsTracked}`,
     `failed issue resume cooldowns tracked: ${health.runtime.failedIssueResumeCooldownsTracked}`,
     '',
@@ -244,6 +265,12 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     prReviews: {},
     autoFixes: {},
     mergeRecovery: {},
+    recoveryActions: {},
+    workerIdleTimeouts: {},
+    activeLeases: null,
+    leaseHeartbeatAgeSeconds: null,
+    stalledWorkers: null,
+    leaseConflicts: 0,
     rateLimitHits: 0,
   }
 
@@ -262,6 +289,26 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_pr_merge_recovery_total':
         if (sample.labels.outcome) summary.mergeRecovery[sample.labels.outcome] = sample.value
+        break
+      case 'agent_loop_recovery_actions_total':
+        if (!sample.labels.kind || !sample.labels.outcome) break
+        summary.recoveryActions[sample.labels.kind] ??= {}
+        summary.recoveryActions[sample.labels.kind]![sample.labels.outcome] = sample.value
+        break
+      case 'agent_loop_worker_idle_timeouts_total':
+        if (sample.labels.scope) summary.workerIdleTimeouts[sample.labels.scope] = sample.value
+        break
+      case 'agent_loop_active_leases':
+        summary.activeLeases = sample.value
+        break
+      case 'agent_loop_lease_heartbeat_age_seconds':
+        summary.leaseHeartbeatAgeSeconds = sample.value
+        break
+      case 'agent_loop_stalled_workers':
+        summary.stalledWorkers = sample.value
+        break
+      case 'agent_loop_lease_conflicts_total':
+        summary.leaseConflicts += sample.value
         break
       case 'agent_loop_rate_limit_hits_total':
         summary.rateLimitHits = sample.value
@@ -334,8 +381,29 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (snapshot.health.runtime.failedIssueResumeCooldownsTracked > 0) {
     warnings.push('one or more failed issues are currently cooling down before resume/requeue')
   }
+  if (snapshot.health.runtime.activeLeaseCount > 0 && snapshot.health.runtime.oldestLeaseHeartbeatAgeSeconds > snapshot.health.recovery.leaseTtlMs / 1000) {
+    warnings.push('one or more active leases have heartbeat ages older than the configured lease TTL')
+  }
+  if (snapshot.health.runtime.stalledWorkerCount > 0) {
+    warnings.push(`stalled workers currently tracked: ${snapshot.health.runtime.stalledWorkerCount}`)
+  }
+  if (snapshot.health.runtime.lastRecoveryActionKind && snapshot.health.runtime.lastRecoveryActionAt) {
+    warnings.push(`latest recovery action: ${snapshot.health.runtime.lastRecoveryActionKind} at ${snapshot.health.runtime.lastRecoveryActionAt}`)
+  }
   if ((snapshot.metrics?.polls.error ?? 0) > 0) {
     warnings.push(`poll loop has recorded ${snapshot.metrics?.polls.error} error result(s)`)
+  }
+  if ((snapshot.metrics?.leaseConflicts ?? 0) > 0) {
+    warnings.push(`managed lease conflicts observed: ${snapshot.metrics?.leaseConflicts}`)
+  }
+  if (Object.values(snapshot.metrics?.workerIdleTimeouts ?? {}).reduce((sum, value) => sum + value, 0) > 0) {
+    warnings.push(`worker idle timeouts observed: ${formatInlineKeyValue(snapshot.metrics?.workerIdleTimeouts ?? {})}`)
+  }
+  const repeatedRecoveries = Object.entries(snapshot.metrics?.recoveryActions ?? {})
+    .map(([kind, outcomes]) => [kind, Object.values(outcomes).reduce((sum, value) => sum + value, 0)] as const)
+    .filter(([, count]) => count >= 2)
+  if (repeatedRecoveries.length > 0) {
+    warnings.push(`repeated recovery actions observed: ${repeatedRecoveries.map(([kind, count]) => `${kind}=${count}`).join(', ')}`)
   }
   if ((snapshot.metrics?.autoFixes.push_failed ?? 0) > 0) {
     warnings.push(`review auto-fix push failures observed: ${snapshot.metrics?.autoFixes.push_failed}`)
@@ -389,6 +457,30 @@ function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
   if (minutes > 0) return `${minutes}m ${seconds}s`
   return `${seconds}s`
+}
+
+function formatNullableSeconds(seconds: number | null): string {
+  if (seconds === null) return 'n/a'
+  return `${seconds}s`
+}
+
+function formatLastRecovery(kind: string | null, at: string | null): string {
+  if (!kind || !at) return 'none'
+  return `${kind} @ ${at}`
+}
+
+function formatInlineKeyValue(values: Record<string, number>): string {
+  return Object.entries(values)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ')
+}
+
+function formatRecoveryActionSummary(values: Record<string, Record<string, number>>): string {
+  const parts = Object.entries(values).flatMap(([kind, outcomes]) => {
+    return Object.entries(outcomes).map(([outcome, count]) => `${kind}/${outcome}=${count}`)
+  })
+
+  return parts.join(', ') || 'none'
 }
 
 function formatError(error: unknown): string {

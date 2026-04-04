@@ -167,6 +167,43 @@ export const rateLimitHitsTotal = new Counter({
   registers: [registry],
 })
 
+/**
+ * Total number of managed lease conflicts encountered.
+ * Labels:
+ *   - scope: "issue-process" | "pr-review" | "pr-merge"
+ */
+export const leaseConflictsTotal = new Counter({
+  name: 'agent_loop_lease_conflicts_total',
+  help: 'Total number of lease conflicts encountered while adopting or starting work',
+  labelNames: ['scope'] as const,
+  registers: [registry],
+})
+
+/**
+ * Total number of recovery actions taken by the daemon.
+ * Labels:
+ *   - kind: recovery action kind
+ *   - outcome: "recoverable" | "completed" | "blocked" | "failed"
+ */
+export const recoveryActionsTotal = new Counter({
+  name: 'agent_loop_recovery_actions_total',
+  help: 'Total number of daemon recovery actions, labeled by kind and outcome',
+  labelNames: ['kind', 'outcome'] as const,
+  registers: [registry],
+})
+
+/**
+ * Total number of worker idle timeouts.
+ * Labels:
+ *   - scope: "issue-process" | "pr-review" | "pr-merge"
+ */
+export const workerIdleTimeoutsTotal = new Counter({
+  name: 'agent_loop_worker_idle_timeouts_total',
+  help: 'Total number of worker idle timeouts by managed lease scope',
+  labelNames: ['scope'] as const,
+  registers: [registry],
+})
+
 // ─── Gauges ───────────────────────────────────────────────────────────────────
 
 /**
@@ -258,6 +295,33 @@ export const concurrencyPolicyGauge = new Gauge({
 export const daemonUptimeSeconds = new Gauge({
   name: 'agent_loop_uptime_seconds',
   help: 'Daemon uptime in seconds',
+  registers: [registry],
+})
+
+/**
+ * Current number of active managed leases held by the daemon.
+ */
+export const activeLeases = new Gauge({
+  name: 'agent_loop_active_leases',
+  help: 'Current number of active managed leases held by the daemon',
+  registers: [registry],
+})
+
+/**
+ * Age in seconds of the oldest held lease heartbeat.
+ */
+export const leaseHeartbeatAgeSeconds = new Gauge({
+  name: 'agent_loop_lease_heartbeat_age_seconds',
+  help: 'Age in seconds of the oldest managed lease heartbeat held by the daemon',
+  registers: [registry],
+})
+
+/**
+ * Current number of stalled workers tracked by the daemon.
+ */
+export const stalledWorkers = new Gauge({
+  name: 'agent_loop_stalled_workers',
+  help: 'Current number of workers marked stalled by idle timeout or recoverable failure',
   registers: [registry],
 })
 
@@ -391,6 +455,34 @@ export function recordPrCreated(): void {
 }
 
 /**
+ * Record a lease conflict outcome for a managed lease scope.
+ */
+export function recordLeaseConflict(
+  scope: 'issue-process' | 'pr-review' | 'pr-merge',
+): void {
+  leaseConflictsTotal.inc({ scope })
+}
+
+/**
+ * Record a recovery action.
+ */
+export function recordRecoveryAction(
+  kind: string,
+  outcome: 'recoverable' | 'completed' | 'blocked' | 'failed',
+): void {
+  recoveryActionsTotal.inc({ kind, outcome })
+}
+
+/**
+ * Record a worker idle timeout for a managed lease scope.
+ */
+export function recordWorkerIdleTimeout(
+  scope: 'issue-process' | 'pr-review' | 'pr-merge',
+): void {
+  workerIdleTimeoutsTotal.inc({ scope })
+}
+
+/**
  * Update active worktrees gauge.
  */
 export function setActiveWorktrees(count: number): void {
@@ -487,6 +579,27 @@ export function setConcurrencyPolicy(policy: ConcurrencyPolicy): void {
  */
 export function setDaemonUptime(seconds: number): void {
   daemonUptimeSeconds.set(seconds)
+}
+
+/**
+ * Update active managed lease gauge.
+ */
+export function setActiveLeases(count: number): void {
+  activeLeases.set(count)
+}
+
+/**
+ * Update oldest lease heartbeat age gauge.
+ */
+export function setLeaseHeartbeatAgeSeconds(ageSeconds: number): void {
+  leaseHeartbeatAgeSeconds.set(ageSeconds)
+}
+
+/**
+ * Update stalled worker gauge.
+ */
+export function setStalledWorkers(count: number): void {
+  stalledWorkers.set(count)
 }
 
 /**

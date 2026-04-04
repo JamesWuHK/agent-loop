@@ -1,12 +1,15 @@
 import { $ } from 'bun'
+import { existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { AgentConfig, AgentIssue, DaemonStatus, ManagedPullRequest, WorktreeInfo } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
+import type { AgentConfig, AgentIssue, DaemonStatus, ManagedLeaseComment, ManagedLeaseScope, ManagedPullRequest, WorktreeInfo } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
 import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
 import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
+import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
+import type { TaskExecutionMonitor } from './cli-agent'
 import {
   recordPoll,
   recordPollDuration,
@@ -24,7 +27,13 @@ import {
   setEffectiveActiveTasks,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
+  setActiveLeases,
+  setLeaseHeartbeatAgeSeconds,
   setProjectInfo,
+  recordLeaseConflict,
+  recordRecoveryAction,
+  recordWorkerIdleTimeout,
+  setStalledWorkers,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -59,11 +68,22 @@ const RETRYABLE_DAEMON_ERROR_PATTERNS = [
   'no route to host',
 ] as const
 
+interface ResumableIssueCandidate {
+  issue: AgentIssue
+  priorLease: ManagedLeaseComment | null
+  requiresRemoteAdoption: boolean
+}
+
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
   private shutdownRequested = false
+  private readonly daemonInstanceId = `${process.pid}-${crypto.randomUUID()}`
   private activeWorktrees = new Map<number, WorktreeInfo>()
+  private activeLeaseHeartbeatReaders = new Map<string, () => number>()
+  private stalledWorkers = new Map<string, { scope: ManagedLeaseScope; targetNumber: number; since: string; reason: string }>()
+  private lastRecoveryActionAt: string | null = null
+  private lastRecoveryActionKind: string | null = null
   private startedAt = Date.now()
   private lastPollAt: string | null = null
   private lastClaimedAt: string | null = null
@@ -95,6 +115,178 @@ export class AgentDaemon {
       this.healthServerConfig = { ...this.healthServerConfig, ...healthServerConfig }
     }
     this.metricsPort = metricsPort ?? 9090
+  }
+
+  private buildLeaseKey(scope: ManagedLeaseScope, targetNumber: number): string {
+    return `${scope}:${targetNumber}`
+  }
+
+  private buildManagedLeaseMonitor(
+    scope: ManagedLeaseScope,
+    targetNumber: number,
+    handle: ManagedLeaseHandle,
+  ): TaskExecutionMonitor {
+    return {
+      setPhase: (phase) => {
+        handle.setPhase(phase)
+        this.clearStalledWorker(scope, targetNumber)
+      },
+      agentMonitor: {
+        heartbeatIntervalMs: this.config.recovery.heartbeatIntervalMs,
+        idleTimeoutMs: this.config.recovery.workerIdleTimeoutMs,
+        onActivity: (kind) => {
+          handle.recordActivity(kind)
+          this.clearStalledWorker(scope, targetNumber)
+        },
+      },
+    }
+  }
+
+  private registerActiveLease(
+    scope: ManagedLeaseScope,
+    targetNumber: number,
+    handle: ManagedLeaseHandle,
+  ): void {
+    this.activeLeaseHeartbeatReaders.set(
+      this.buildLeaseKey(scope, targetNumber),
+      () => handle.heartbeatAgeSeconds(),
+    )
+    this.clearStalledWorker(scope, targetNumber)
+    this.syncRuntimeMetrics()
+  }
+
+  private unregisterActiveLease(scope: ManagedLeaseScope, targetNumber: number): void {
+    this.activeLeaseHeartbeatReaders.delete(this.buildLeaseKey(scope, targetNumber))
+    this.syncRuntimeMetrics()
+  }
+
+  private clearStalledWorker(scope: ManagedLeaseScope, targetNumber: number): void {
+    const deleted = this.stalledWorkers.delete(this.buildLeaseKey(scope, targetNumber))
+    if (deleted) {
+      this.syncRuntimeMetrics()
+    }
+  }
+
+  private markStalledWorker(
+    scope: ManagedLeaseScope,
+    targetNumber: number,
+    reason: string,
+    recoveryKind: string,
+  ): void {
+    const now = new Date().toISOString()
+    this.stalledWorkers.set(this.buildLeaseKey(scope, targetNumber), {
+      scope,
+      targetNumber,
+      since: now,
+      reason,
+    })
+    this.lastRecoveryActionAt = now
+    this.lastRecoveryActionKind = recoveryKind
+    this.syncRuntimeMetrics()
+  }
+
+  private noteRecoveryAction(
+    kind: string,
+    outcome: 'recoverable' | 'completed' | 'blocked' | 'failed',
+  ): void {
+    this.lastRecoveryActionAt = new Date().toISOString()
+    this.lastRecoveryActionKind = kind
+    recordRecoveryAction(kind, outcome)
+    this.syncRuntimeMetrics()
+  }
+
+  private async sleepWithLeaseBackoff(): Promise<void> {
+    const jitterMs = Math.min(250, Math.max(50, Math.floor(this.config.recovery.leaseAdoptionBackoffMs / 10)))
+    const delayMs = this.config.recovery.leaseAdoptionBackoffMs + Math.floor(Math.random() * jitterMs)
+    await Bun.sleep(delayMs)
+  }
+
+  private async completeManagedLease(
+    scope: ManagedLeaseScope,
+    targetNumber: number,
+    handle: ManagedLeaseHandle,
+    status: 'completed' | 'recoverable' | 'released',
+    recoveryReason?: string,
+    recoveryKind?: string,
+  ): Promise<void> {
+    try {
+      await handle.complete(status, recoveryReason)
+    } finally {
+      this.unregisterActiveLease(scope, targetNumber)
+      if (status === 'recoverable') {
+        if (recoveryKind) {
+          if (recoveryKind.includes('idle-timeout')) {
+            this.markStalledWorker(scope, targetNumber, recoveryReason ?? 'recoverable worker interruption', recoveryKind)
+          } else {
+            this.clearStalledWorker(scope, targetNumber)
+          }
+          this.noteRecoveryAction(recoveryKind, 'recoverable')
+        }
+      } else {
+        this.clearStalledWorker(scope, targetNumber)
+        if (recoveryKind) {
+          this.noteRecoveryAction(recoveryKind, 'completed')
+        }
+      }
+    }
+  }
+
+  private async acquireLeaseForScope(options: {
+    targetNumber: number
+    scope: ManagedLeaseScope
+    branch?: string
+    worktreeId?: string
+    phase: string
+    issueNumber?: number
+    prNumber?: number
+  }): Promise<{ handle: ManagedLeaseHandle; adopted: boolean; priorLease: ManagedLeaseComment | null } | null> {
+    const acquired = await acquireManagedLease({
+      targetNumber: options.targetNumber,
+      scope: options.scope,
+      daemonInstanceId: this.daemonInstanceId,
+      machineId: this.config.machineId,
+      config: this.config,
+      logger: this.logger,
+      branch: options.branch,
+      worktreeId: options.worktreeId,
+      phase: options.phase,
+      issueNumber: options.issueNumber,
+      prNumber: options.prNumber,
+    })
+
+    if (acquired.status === 'blocked') {
+      this.logger.log(
+        `[lease] skipping ${options.scope} ${options.targetNumber}; active lease is held by ${acquired.activeLease?.lease.daemonInstanceId ?? 'unknown daemon'}`,
+      )
+      recordLeaseConflict(options.scope)
+      this.noteRecoveryAction(`${options.scope}-lease-conflict`, 'blocked')
+      await this.sleepWithLeaseBackoff()
+      return null
+    }
+
+    this.registerActiveLease(options.scope, options.targetNumber, acquired.handle)
+    return acquired
+  }
+
+  private isRecoverableAgentFailureKind(
+    failureKind: string | undefined,
+  ): boolean {
+    return failureKind === 'idle_timeout'
+  }
+
+  private async markIssueRecoverable(issueNumber: number, reason: string): Promise<void> {
+    await transitionIssueState(
+      issueNumber,
+      ISSUE_LABELS.WORKING,
+      ISSUE_LABELS.WORKING,
+      {
+        event: 'claimed',
+        machine: this.config.machineId,
+        ts: new Date().toISOString(),
+        reason: `recoverable:${reason}`,
+      },
+      this.config,
+    )
   }
 
   async start(): Promise<void> {
@@ -268,11 +460,13 @@ export class AgentDaemon {
     return {
       running: this.running,
       machineId: this.config.machineId,
+      daemonInstanceId: this.daemonInstanceId,
       repo: this.config.repo,
       pollIntervalMs: this.config.pollIntervalMs,
       concurrency: this.config.concurrency,
       requestedConcurrency: this.config.requestedConcurrency,
       concurrencyPolicy: this.config.concurrencyPolicy,
+      recovery: this.config.recovery,
       project: {
         profile: this.config.project.profile,
         defaultBranch: this.config.git.defaultBranch,
@@ -514,7 +708,7 @@ export class AgentDaemon {
 
     const processPromise = this.processResumableIssue(resumableIssue)
       .catch((err) => {
-        this.logger.error(`[daemon] processResumableIssue #${resumableIssue.number} threw:`, err)
+        this.logger.error(`[daemon] processResumableIssue #${resumableIssue.issue.number} threw:`, err)
       })
       .finally(() => {
         if (this._inFlightProcess === processPromise) {
@@ -583,30 +777,49 @@ export class AgentDaemon {
     return null
   }
 
-  private async findResumableIssue(): Promise<AgentIssue | null> {
+  private async canStartManagedScope(
+    targetNumber: number,
+    scope: ManagedLeaseScope,
+  ): Promise<boolean> {
+    const comments = await listIssueComments(targetNumber, this.config)
+    const activeLease = getActiveManagedLease(comments, scope)
+    return canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId)
+  }
+
+  private async findResumableIssue(): Promise<ResumableIssueCandidate | null> {
     const issues = await listOpenAgentIssues(this.config)
     const now = Date.now()
 
     for (const issue of issues) {
       const attempts = this.failedIssueResumeAttempts.get(issue.number) ?? 0
       const cooldownUntil = this.failedIssueResumeCooldownUntil.get(issue.number) ?? 0
+      const hasLocalWorktree = hasWorktreeForIssue(issue.number, this.config)
+      const comments = await listIssueComments(issue.number, this.config)
+      const activeLease = getActiveManagedLease(comments, 'issue-process', now)
+      const latestLease = getLatestManagedLease(comments, 'issue-process')
+      const canAdoptLease = canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId, now)
+      const canResumeFromLease = (
+        latestLease?.lease.scope === 'issue-process'
+        && Boolean(latestLease.lease.branch)
+        && canAdoptLease
+        && (latestLease.lease.status === 'recoverable' || activeLease === null)
+      )
       const resumable = shouldResumeManagedIssue(
         issue,
-        hasWorktreeForIssue(issue.number, this.config),
+        hasLocalWorktree || canResumeFromLease,
         attempts,
         cooldownUntil,
         now,
         AgentDaemon.MAX_FAILED_ISSUE_RESUMES,
       )
       if (!resumable) continue
+      if (!canAdoptLease) continue
 
-      const activeClaimMachine = await this.getActiveClaimMachine(issue.number)
-      if (activeClaimMachine && activeClaimMachine !== this.config.machineId) {
-        this.logger.log(`[daemon] skipping local resume for #${issue.number}; active machine is ${activeClaimMachine}`)
-        continue
+      return {
+        issue,
+        priorLease: latestLease,
+        requiresRemoteAdoption: !hasLocalWorktree,
       }
-
-      return issue
     }
 
     return null
@@ -617,13 +830,44 @@ export class AgentDaemon {
     return resolveActiveClaimMachine(comments)
   }
 
+  private async ensureResumableIssueWorktree(
+    issueNumber: number,
+    priorLease: ManagedLeaseComment | null,
+  ): Promise<{ worktreePath: string; branch: string; worktreeId: string }> {
+    const worktreeId = `issue-${issueNumber}-${this.config.machineId}`
+    const worktreePath = resolve(this.config.worktreesBase, worktreeId)
+    const branch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
+
+    if (hasWorktreeForIssue(issueNumber, this.config)) {
+      return {
+        worktreePath,
+        branch,
+        worktreeId,
+      }
+    }
+
+    if (!priorLease?.lease.branch) {
+      throw new Error(`cannot resume issue #${issueNumber} without a local worktree or recoverable lease branch`)
+    }
+
+    await createWorktreeFromRemoteBranch(worktreePath, priorLease.lease.branch, this.config, this.logger)
+    return {
+      worktreePath,
+      branch: priorLease.lease.branch,
+      worktreeId,
+    }
+  }
+
   private async findPendingStandaloneApprovedPrMerge(): Promise<ManagedPullRequest | null> {
     const prs = await listOpenAgentPullRequests(this.config)
-    return prs.find((pr) => {
-      if (pr.isDraft) return false
-      if (this.activePrReviews.has(pr.number)) return false
-      return shouldMergeManagedPr(pr)
-    }) ?? null
+    for (const pr of prs) {
+      if (pr.isDraft) continue
+      if (this.activePrReviews.has(pr.number)) continue
+      if (!shouldMergeManagedPr(pr)) continue
+      if (!(await this.canStartManagedScope(pr.number, 'pr-merge'))) continue
+      return pr
+    }
+    return null
   }
 
   private async findPendingStandalonePrReview(): Promise<ManagedPullRequest | null> {
@@ -631,6 +875,7 @@ export class AgentDaemon {
     for (const pr of prs) {
       if (pr.isDraft) continue
       if (this.activePrReviews.has(pr.number)) continue
+      if (!(await this.canStartManagedScope(pr.number, 'pr-review'))) continue
 
       if (shouldReviewManagedPr(pr)) {
         return pr
@@ -651,17 +896,39 @@ export class AgentDaemon {
     this.logger.log(`[pr-review-subagent] reviewing existing PR #${pr.number}: "${pr.title}"`)
     const priorComments = await listIssueComments(pr.number, this.config)
     const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
+    const lease = await this.acquireLeaseForScope({
+      targetNumber: pr.number,
+      scope: 'pr-review',
+      branch: pr.headRefName,
+      worktreeId: `pr-review-${pr.number}`,
+      phase: 'pr-review',
+      prNumber: pr.number,
+      issueNumber: extractIssueNumberFromPrTitle(pr.title) ?? undefined,
+    })
+    if (!lease) return
 
     const detached = await createDetachedPrWorktree(pr.number, this.config, this.logger)
+    let leaseStatus: 'completed' | 'recoverable' | 'released' = 'completed'
+    let leaseReason: string | undefined
+    let leaseRecoveryKind: string | undefined
     try {
+      const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
       const firstReview = await reviewPr(
         pr.number,
         pr.url,
         detached.worktreePath,
         this.config,
         this.logger,
+        monitor,
       )
       recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
+      if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
+        recordWorkerIdleTimeout('pr-review')
+        leaseStatus = 'recoverable'
+        leaseReason = firstReview.reason
+        leaseRecoveryKind = 'pr-review-idle-timeout'
+        return
+      }
 
       if (firstReview.approved && firstReview.canMerge) {
         await commentOnPr(pr.number, buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved'), this.config)
@@ -699,10 +966,19 @@ export class AgentDaemon {
         buildReviewFeedback(firstReview),
         this.config,
         this.logger,
+        monitor,
       )
       recordReviewAutoFixOutcome(fixResult.outcome)
 
       if (!fixResult.success) {
+        if (this.isRecoverableAgentFailureKind(fixResult.failureKind)) {
+          recordWorkerIdleTimeout('pr-review')
+          leaseStatus = 'recoverable'
+          leaseReason = fixResult.error ?? 'review auto-fix hit idle timeout'
+          leaseRecoveryKind = 'pr-review-idle-timeout'
+          return
+        }
+
         const failedReview: PrReviewResult = {
           approved: false,
           canMerge: false,
@@ -735,8 +1011,16 @@ export class AgentDaemon {
         detached.worktreePath,
         this.config,
         this.logger,
+        monitor,
       )
       recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
+      if (this.isRecoverableAgentFailureKind(secondReview.failureKind)) {
+        recordWorkerIdleTimeout('pr-review')
+        leaseStatus = 'recoverable'
+        leaseReason = secondReview.reason
+        leaseRecoveryKind = 'pr-review-idle-timeout'
+        return
+      }
 
       if (secondReview.approved && secondReview.canMerge) {
         await commentOnPr(pr.number, buildPrReviewComment(pr.number, secondReview, nextAttempt + 1, 'approved'), this.config)
@@ -749,22 +1033,57 @@ export class AgentDaemon {
       await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
       await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, secondReview.reason)
       this.logger.warn(`[pr-review-subagent] PR #${pr.number} still blocked after auto-fix`)
+    } catch (err) {
+      if (isRetryableDaemonLoopError(err)) {
+        leaseStatus = 'recoverable'
+        leaseReason = formatDaemonError(err)
+        leaseRecoveryKind = 'pr-review-retryable-error'
+        return
+      }
+      throw err
     } finally {
       await detached.cleanup()
+      await this.completeManagedLease('pr-review', pr.number, lease.handle, leaseStatus, leaseReason, leaseRecoveryKind)
     }
   }
 
   private async processStandaloneApprovedPrMerge(pr: ManagedPullRequest): Promise<void> {
     this.logger.log(`[pr-merge-subagent] attempting merge for approved PR #${pr.number}: "${pr.title}"`)
+    const lease = await this.acquireLeaseForScope({
+      targetNumber: pr.number,
+      scope: 'pr-merge',
+      branch: pr.headRefName,
+      worktreeId: `pr-merge-${pr.number}`,
+      phase: 'pr-merge',
+      prNumber: pr.number,
+      issueNumber: extractIssueNumberFromPrTitle(pr.title) ?? undefined,
+    })
+    if (!lease) return
 
     const detached = await createDetachedPrWorktree(pr.number, this.config, this.logger)
+    let leaseStatus: 'completed' | 'recoverable' | 'released' = 'completed'
+    let leaseReason: string | undefined
+    let leaseRecoveryKind: string | undefined
     try {
       const mergeResult = await this.attemptApprovedPrMergeWithRecovery(
         pr.number,
         pr.url,
         pr.headRefName,
         detached.worktreePath,
+        this.buildManagedLeaseMonitor('pr-merge', pr.number, lease.handle),
       )
+      if (mergeResult.recoverable) {
+        if (mergeResult.review?.failureKind === 'idle_timeout') {
+          recordWorkerIdleTimeout('pr-merge')
+          leaseRecoveryKind = 'pr-merge-idle-timeout'
+        } else {
+          leaseRecoveryKind = 'pr-merge-retryable-error'
+        }
+        leaseStatus = 'recoverable'
+        leaseReason = mergeResult.message
+        return
+      }
+
       if (mergeResult.merged) {
         const issueNumber = extractIssueNumberFromPrTitle(pr.title)
         if (issueNumber !== null) {
@@ -791,8 +1110,17 @@ export class AgentDaemon {
         )
       }
       this.logger.warn(`[pr-merge-subagent] PR #${pr.number} could not be auto-merged: ${mergeResult.message}`)
+    } catch (err) {
+      if (isRetryableDaemonLoopError(err)) {
+        leaseStatus = 'recoverable'
+        leaseReason = formatDaemonError(err)
+        leaseRecoveryKind = 'pr-merge-retryable-error'
+        return
+      }
+      throw err
     } finally {
       await detached.cleanup()
+      await this.completeManagedLease('pr-merge', pr.number, lease.handle, leaseStatus, leaseReason, leaseRecoveryKind)
     }
   }
 
@@ -838,15 +1166,23 @@ export class AgentDaemon {
     )
   }
 
-  private async processResumableIssue(issue: AgentIssue): Promise<void> {
+  private async processResumableIssue(candidate: ResumableIssueCandidate): Promise<void> {
+    const { issue, priorLease } = candidate
     const issueNumber = issue.number
     const processingStartTime = Date.now()
-    const branch = `agent/${issueNumber}/${this.config.machineId}`
-    const worktreePath = resolve(this.config.worktreesBase, `issue-${issueNumber}-${this.config.machineId}`)
-
     this.logger.log(`[daemon] resuming ${issue.state} issue #${issueNumber}: "${issue.title}"`)
 
+    let leaseHandle: ManagedLeaseHandle | null = null
+    let branch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
+    let worktreePath = resolve(this.config.worktreesBase, `issue-${issueNumber}-${this.config.machineId}`)
+    let worktreeId = `issue-${issueNumber}-${this.config.machineId}`
+
     try {
+      const ensured = await this.ensureResumableIssueWorktree(issueNumber, priorLease)
+      branch = ensured.branch
+      worktreePath = ensured.worktreePath
+      worktreeId = ensured.worktreeId
+
       if (issue.state === 'failed') {
         await transitionIssueState(
           issueNumber,
@@ -856,7 +1192,7 @@ export class AgentDaemon {
             event: 'claimed',
             machine: this.config.machineId,
             ts: new Date().toISOString(),
-            reason: 'resume-existing-worktree',
+            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
           },
           this.config,
         )
@@ -869,11 +1205,25 @@ export class AgentDaemon {
             event: 'claimed',
             machine: this.config.machineId,
             ts: new Date().toISOString(),
-            reason: 'resume-existing-worktree',
+            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
           },
           this.config,
         )
       }
+
+      const acquiredLease = await this.acquireLeaseForScope({
+        targetNumber: issueNumber,
+        scope: 'issue-process',
+        branch,
+        worktreeId,
+        phase: 'issue-recovery',
+        issueNumber,
+      })
+      if (!acquiredLease) {
+        recordIssueProcessingDuration(Date.now() - processingStartTime)
+        return
+      }
+      leaseHandle = acquiredLease.handle
 
       const wt: WorktreeInfo = {
         path: worktreePath,
@@ -887,6 +1237,7 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
 
       await restoreManagedWorktreeState(worktreePath, this.logger)
+      const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle)
 
       const prCheck = await checkPrExists(branch, this.config)
       const recentBlockingReasons = prCheck.prNumber !== null
@@ -903,33 +1254,81 @@ export class AgentDaemon {
           ? { number: prCheck.prNumber, url: prCheck.prUrl, branch }
           : null,
         recentBlockingReasons,
+        monitor,
       )
 
       if (!recoveryResult.success) {
+        if (this.isRecoverableAgentFailureKind(recoveryResult.failureKind)) {
+          recordWorkerIdleTimeout('issue-process')
+          await this.markIssueRecoverable(issueNumber, recoveryResult.error ?? 'issue recovery hit idle timeout')
+          await this.completeManagedLease(
+            'issue-process',
+            issueNumber,
+            leaseHandle,
+            'recoverable',
+            recoveryResult.error,
+            'issue-process-idle-timeout',
+          )
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+          return
+        }
+
         await this.markIssueFailed(issueNumber, recoveryResult.error)
         this.registerFailedIssueResume(issueNumber)
+        await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
         this.logger.error(`[daemon] resumed issue #${issueNumber} failed again: ${recoveryResult.error}`)
         recordIssueProcessingDuration(Date.now() - processingStartTime)
         return
       }
 
       const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch)
-      if (finalized) {
+      if (finalized.status === 'completed') {
         this.failedIssueResumeAttempts.delete(issueNumber)
         this.failedIssueResumeCooldownUntil.delete(issueNumber)
+        await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        this.syncRuntimeMetrics()
+      } else if (finalized.status === 'recoverable') {
+        await this.markIssueRecoverable(issueNumber, finalized.reason ?? 'recoverable resume handoff')
+        await this.completeManagedLease(
+          'issue-process',
+          issueNumber,
+          leaseHandle,
+          'recoverable',
+          finalized.reason,
+          'issue-process-recoverable',
+        )
+        this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       } else {
         this.registerFailedIssueResume(issueNumber)
+        await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
       }
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
       this.logger.error(`[daemon] failed to resume issue #${issueNumber}:`, err)
-      this.registerFailedIssueResume(issueNumber)
+      if (leaseHandle && isRetryableDaemonLoopError(err)) {
+        await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
+        await this.completeManagedLease(
+          'issue-process',
+          issueNumber,
+          leaseHandle,
+          'recoverable',
+          formatDaemonError(err),
+          'issue-process-retryable-error',
+        )
+      } else {
+        this.registerFailedIssueResume(issueNumber)
 
-      try {
-        await this.markIssueFailed(issueNumber, String(err))
-      } catch {
-        // ignore
+        try {
+          await this.markIssueFailed(issueNumber, String(err))
+        } catch {
+          // ignore
+        }
+        if (leaseHandle) {
+          await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        }
       }
 
       this.activeWorktrees.delete(issueNumber)
@@ -943,7 +1342,8 @@ export class AgentDaemon {
     prUrl: string,
     branch: string,
     worktreePath: string,
-  ): Promise<{ merged: boolean; message: string; sha?: string; review?: PrReviewResult }> {
+    monitor?: TaskExecutionMonitor,
+  ): Promise<{ merged: boolean; message: string; sha?: string; review?: PrReviewResult; recoverable?: boolean }> {
     const mergeResult = await mergePullRequest(prNumber, this.config)
     if (mergeResult.merged) {
       recordPrMergeRecoveryOutcome('merged_initial')
@@ -993,8 +1393,17 @@ export class AgentDaemon {
       return blockedResult
     }
 
-    const review = await this.runDetachedPrReview(prNumber, prUrl)
+    const review = await this.runDetachedPrReview(prNumber, prUrl, monitor)
     recordPrReviewOutcome('merge_refresh', classifyPrReviewOutcome(review))
+
+    if (this.isRecoverableAgentFailureKind(review.failureKind)) {
+      return {
+        merged: false,
+        message: review.reason,
+        review,
+        recoverable: true,
+      }
+    }
 
     if (!(review.approved && review.canMerge)) {
       recordPrMergeRecoveryOutcome('refresh_review_blocked')
@@ -1044,9 +1453,15 @@ export class AgentDaemon {
     branch: string,
     prNumber: number,
     prUrl: string,
-  ): Promise<{ approved: boolean; review: PrReviewResult }> {
-    const firstReview = await this.runDetachedPrReview(prNumber, prUrl)
+    monitor?: TaskExecutionMonitor,
+  ): Promise<{ approved: boolean; review: PrReviewResult; recoverable?: boolean }> {
+    const firstReview = await this.runDetachedPrReview(prNumber, prUrl, monitor)
     recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
+
+    if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
+      return { approved: false, review: firstReview, recoverable: true }
+    }
+
     await commentOnPr(
       prNumber,
       buildPrReviewComment(
@@ -1082,10 +1497,25 @@ export class AgentDaemon {
       buildReviewFeedback(firstReview),
       this.config,
       this.logger,
+      monitor,
     )
     recordReviewAutoFixOutcome(fixResult.outcome)
 
     if (!fixResult.success) {
+      if (this.isRecoverableAgentFailureKind(fixResult.failureKind)) {
+        return {
+          approved: false,
+          review: {
+            approved: false,
+            canMerge: false,
+            reason: `Auto-fix failed: ${fixResult.error ?? 'unknown error'}`,
+            reviewFailed: true,
+            failureKind: fixResult.failureKind,
+          },
+          recoverable: true,
+        }
+      }
+
       const failedReview: PrReviewResult = {
         approved: false,
         canMerge: false,
@@ -1107,8 +1537,12 @@ export class AgentDaemon {
       return { approved: false, review: failedReview }
     }
 
-    const secondReview = await this.runDetachedPrReview(prNumber, prUrl)
+    const secondReview = await this.runDetachedPrReview(prNumber, prUrl, monitor)
     recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
+
+    if (this.isRecoverableAgentFailureKind(secondReview.failureKind)) {
+      return { approved: false, review: secondReview, recoverable: true }
+    }
 
     if (secondReview.approved && secondReview.canMerge) {
       await commentOnPr(prNumber, buildPrReviewComment(prNumber, secondReview, 2, 'approved'), this.config)
@@ -1121,10 +1555,14 @@ export class AgentDaemon {
     return { approved: false, review: secondReview }
   }
 
-  private async runDetachedPrReview(prNumber: number, prUrl: string): Promise<PrReviewResult> {
+  private async runDetachedPrReview(
+    prNumber: number,
+    prUrl: string,
+    monitor?: TaskExecutionMonitor,
+  ): Promise<PrReviewResult> {
     const detached = await createDetachedPrWorktree(prNumber, this.config, this.logger)
     try {
-      return await reviewPr(prNumber, prUrl, detached.worktreePath, this.config, this.logger)
+      return await reviewPr(prNumber, prUrl, detached.worktreePath, this.config, this.logger, monitor)
     } finally {
       await detached.cleanup()
     }
@@ -1134,23 +1572,93 @@ export class AgentDaemon {
     issue: AgentIssue,
     worktreePath: string,
     branch: string,
-  ): Promise<boolean> {
+  ): Promise<{ status: 'completed' | 'failed' | 'recoverable'; reason?: string }> {
     const pr = await createOrFindPr(worktreePath, branch, issue.number, issue.title, this.config, this.logger)
+    const reviewLease = await this.acquireLeaseForScope({
+      targetNumber: pr.prNumber,
+      scope: 'pr-review',
+      branch,
+      worktreeId: this.buildLeaseKey('issue-process', issue.number),
+      phase: 'reviewing-pr',
+      issueNumber: issue.number,
+      prNumber: pr.prNumber,
+    })
+    if (!reviewLease) {
+      return {
+        status: 'recoverable',
+        reason: `pr-review lease conflict on PR #${pr.prNumber}`,
+      }
+    }
+
     const reviewOutcome = await this.reviewAndPossiblyAutoFix(
       issue,
       worktreePath,
       branch,
       pr.prNumber,
       pr.prUrl,
+      this.buildManagedLeaseMonitor('pr-review', pr.prNumber, reviewLease.handle),
     )
+    if (reviewOutcome.recoverable) {
+      if (reviewOutcome.review.failureKind === 'idle_timeout') {
+        recordWorkerIdleTimeout('pr-review')
+      }
+      await this.completeManagedLease(
+        'pr-review',
+        pr.prNumber,
+        reviewLease.handle,
+        'recoverable',
+        reviewOutcome.review.reason,
+        'pr-review-idle-timeout',
+      )
+      return {
+        status: 'recoverable',
+        reason: reviewOutcome.review.reason,
+      }
+    }
+    await this.completeManagedLease('pr-review', pr.prNumber, reviewLease.handle, 'completed')
 
     if (reviewOutcome.approved) {
+      const mergeLease = await this.acquireLeaseForScope({
+        targetNumber: pr.prNumber,
+        scope: 'pr-merge',
+        branch,
+        worktreeId: this.buildLeaseKey('issue-process', issue.number),
+        phase: 'merging-pr',
+        issueNumber: issue.number,
+        prNumber: pr.prNumber,
+      })
+      if (!mergeLease) {
+        return {
+          status: 'recoverable',
+          reason: `pr-merge lease conflict on PR #${pr.prNumber}`,
+        }
+      }
+
       const mergeResult = await this.attemptApprovedPrMergeWithRecovery(
         pr.prNumber,
         pr.prUrl,
         branch,
         worktreePath,
+        this.buildManagedLeaseMonitor('pr-merge', pr.prNumber, mergeLease.handle),
       )
+      if (mergeResult.recoverable) {
+        if (mergeResult.review?.failureKind === 'idle_timeout') {
+          recordWorkerIdleTimeout('pr-merge')
+        }
+        await this.completeManagedLease(
+          'pr-merge',
+          pr.prNumber,
+          mergeLease.handle,
+          'recoverable',
+          mergeResult.message,
+          'pr-merge-idle-timeout',
+        )
+        return {
+          status: 'recoverable',
+          reason: mergeResult.message,
+        }
+      }
+      await this.completeManagedLease('pr-merge', pr.prNumber, mergeLease.handle, 'completed')
 
       if (!mergeResult.merged) {
         await transitionIssueState(
@@ -1172,7 +1680,10 @@ export class AgentDaemon {
         recordIssueProcessed('failed')
         this.activeWorktrees.delete(issue.number)
         this.syncRuntimeMetrics()
-        return false
+        return {
+          status: 'failed',
+          reason: mergeResult.message,
+        }
       }
 
       await transitionIssueState(
@@ -1199,7 +1710,7 @@ export class AgentDaemon {
       await removeWorktree(worktreePath, branch)
       this.activeWorktrees.delete(issue.number)
       this.syncRuntimeMetrics()
-      return true
+      return { status: 'completed' }
     }
 
     await transitionIssueState(
@@ -1221,7 +1732,10 @@ export class AgentDaemon {
     recordIssueProcessed('failed')
     this.activeWorktrees.delete(issue.number)
     this.syncRuntimeMetrics()
-    return false
+    return {
+      status: 'failed',
+      reason: reviewOutcome.review.reason,
+    }
   }
 
   private async markIssueFailed(issueNumber: number, reason?: string): Promise<void> {
@@ -1249,6 +1763,8 @@ export class AgentDaemon {
     this.logger.log(`[daemon] processing issue #${issueNumber}: "${issue.title}"`)
 
     const branch = `agent/${issueNumber}/${this.config.machineId}`
+    const worktreeId = `issue-${issueNumber}-${this.config.machineId}`
+    let leaseHandle: ManagedLeaseHandle | null = null
 
     try {
       // Update to working state
@@ -1265,8 +1781,20 @@ export class AgentDaemon {
       )
 
       // Create worktree
-      const worktreeStartTime = Date.now()
       const worktreePath = await createWorktree(issueNumber, this.config)
+      const acquiredLease = await this.acquireLeaseForScope({
+        targetNumber: issueNumber,
+        scope: 'issue-process',
+        branch,
+        worktreeId,
+        phase: 'planning',
+        issueNumber,
+      })
+      if (!acquiredLease) {
+        recordIssueProcessingDuration(Date.now() - processingStartTime)
+        return
+      }
+      leaseHandle = acquiredLease.handle
 
       const wt: WorktreeInfo = {
         path: worktreePath,
@@ -1280,6 +1808,7 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
 
       // Run planning agent + subtask loop
+      const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle)
       const result = await runSubtaskExecutor(
         worktreePath,
         issueNumber,
@@ -1287,11 +1816,44 @@ export class AgentDaemon {
         issue.body,
         this.config,
         this.logger,
+        monitor,
       )
 
       if (result.success) {
-        await this.finalizeIssueFromBranch(issue, worktreePath, branch)
+        const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch)
+        if (finalized.status === 'recoverable') {
+          await this.markIssueRecoverable(issueNumber, finalized.reason ?? 'recoverable issue handoff')
+          await this.completeManagedLease(
+            'issue-process',
+            issueNumber,
+            leaseHandle,
+            'recoverable',
+            finalized.reason,
+            'issue-process-recoverable',
+          )
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+        } else {
+          await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        }
       } else {
+        if (this.isRecoverableAgentFailureKind(result.failureKind)) {
+          recordWorkerIdleTimeout('issue-process')
+          await this.markIssueRecoverable(issueNumber, result.error ?? 'subtask executor hit idle timeout')
+          await this.completeManagedLease(
+            'issue-process',
+            issueNumber,
+            leaseHandle,
+            'recoverable',
+            result.error,
+            'issue-process-idle-timeout',
+          )
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+          return
+        }
+
         await transitionIssueState(
           issueNumber,
           ISSUE_LABELS.FAILED,
@@ -1309,6 +1871,7 @@ export class AgentDaemon {
         const doneCount = result.subtasks.filter(s => s.status === 'done').length
         this.logger.error(`[daemon] issue #${issueNumber} failed (${doneCount}/${result.subtasks.length} subtasks done): ${result.error}`)
         recordIssueProcessed('failed')
+        await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
         this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       }
@@ -1316,24 +1879,39 @@ export class AgentDaemon {
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
       this.logger.error(`[daemon] failed to process issue #${issueNumber}:`, err)
-      recordIssueProcessed('error')
-      this.syncRuntimeMetrics()
-
-      try {
-        await transitionIssueState(
+      if (leaseHandle && isRetryableDaemonLoopError(err)) {
+        await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
+        await this.completeManagedLease(
+          'issue-process',
           issueNumber,
-          ISSUE_LABELS.FAILED,
-          null,
-          {
-            event: 'failed',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: String(err),
-          },
-          this.config,
+          leaseHandle,
+          'recoverable',
+          formatDaemonError(err),
+          'issue-process-retryable-error',
         )
-      } catch {
-        // ignore
+      } else {
+        recordIssueProcessed('error')
+        this.syncRuntimeMetrics()
+
+        try {
+          await transitionIssueState(
+            issueNumber,
+            ISSUE_LABELS.FAILED,
+            null,
+            {
+              event: 'failed',
+              machine: this.config.machineId,
+              ts: new Date().toISOString(),
+              reason: String(err),
+            },
+            this.config,
+          )
+        } catch {
+          // ignore
+        }
+        if (leaseHandle) {
+          await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        }
       }
 
       this.activeWorktrees.delete(issueNumber)
@@ -1351,6 +1929,11 @@ export class AgentDaemon {
       startupRecoveryPending: this.startupRecoveryPending,
       failedIssueResumeAttemptCount: this.failedIssueResumeAttempts.size,
       failedIssueResumeCooldownCount: this.failedIssueResumeCooldownUntil.size,
+      activeLeaseCount: this.activeLeaseHeartbeatReaders.size,
+      oldestLeaseHeartbeatAgeSeconds: this.getOldestLeaseHeartbeatAgeSeconds(),
+      stalledWorkerCount: this.stalledWorkers.size,
+      lastRecoveryActionAt: this.lastRecoveryActionAt,
+      lastRecoveryActionKind: this.lastRecoveryActionKind,
     })
   }
 
@@ -1362,6 +1945,18 @@ export class AgentDaemon {
     setInFlightPrReviews(runtime.inFlightPrReview)
     setStartupRecoveryPending(runtime.startupRecoveryPending)
     setEffectiveActiveTasks(runtime.effectiveActiveTasks)
+    setActiveLeases(runtime.activeLeaseCount)
+    setLeaseHeartbeatAgeSeconds(runtime.oldestLeaseHeartbeatAgeSeconds)
+    setStalledWorkers(runtime.stalledWorkerCount)
+  }
+
+  private getOldestLeaseHeartbeatAgeSeconds(): number {
+    const ages = [...this.activeLeaseHeartbeatReaders.values()]
+      .map((readAge) => readAge())
+      .filter((age) => Number.isFinite(age))
+
+    if (ages.length === 0) return 0
+    return Math.max(...ages)
   }
 }
 
@@ -1392,6 +1987,11 @@ export function buildDaemonRuntimeStatus(input: {
   startupRecoveryPending: boolean
   failedIssueResumeAttemptCount: number
   failedIssueResumeCooldownCount: number
+  activeLeaseCount: number
+  oldestLeaseHeartbeatAgeSeconds: number
+  stalledWorkerCount: number
+  lastRecoveryActionAt: string | null
+  lastRecoveryActionKind: string | null
 }): DaemonStatus['runtime'] {
   return {
     activePrReviews: input.activePrReviewCount,
@@ -1406,6 +2006,11 @@ export function buildDaemonRuntimeStatus(input: {
     }),
     failedIssueResumeAttemptsTracked: input.failedIssueResumeAttemptCount,
     failedIssueResumeCooldownsTracked: input.failedIssueResumeCooldownCount,
+    activeLeaseCount: input.activeLeaseCount,
+    oldestLeaseHeartbeatAgeSeconds: input.oldestLeaseHeartbeatAgeSeconds,
+    stalledWorkerCount: input.stalledWorkerCount,
+    lastRecoveryActionAt: input.lastRecoveryActionAt,
+    lastRecoveryActionKind: input.lastRecoveryActionKind,
   }
 }
 
@@ -1559,6 +2164,33 @@ export function buildPrMergeRetryComment(
 Next step: daemon will update the approved branch and retry the merge.`
 }
 
+async function createWorktreeFromRemoteBranch(
+  worktreePath: string,
+  branch: string,
+  config: AgentConfig,
+  logger = console,
+): Promise<void> {
+  if (existsSync(worktreePath)) return
+
+  if (!existsSync(config.worktreesBase)) {
+    mkdirSync(config.worktreesBase, { recursive: true })
+  }
+
+  const fetchResult = await runGitInRepo(['fetch', 'origin', branch])
+  if (fetchResult.exitCode !== 0) {
+    throw new Error(fetchResult.stderr || fetchResult.stdout || `git fetch origin ${branch} failed`)
+  }
+
+  const addResult = await runGitInRepo(['worktree', 'add', worktreePath, '-B', branch, `origin/${branch}`])
+  if (addResult.exitCode !== 0) {
+    throw new Error(addResult.stderr || addResult.stdout || `git worktree add ${worktreePath} -B ${branch} origin/${branch} failed`)
+  }
+
+  await runGitInWorktree(worktreePath, ['config', 'user.name', config.git.authorName])
+  await runGitInWorktree(worktreePath, ['config', 'user.email', config.git.authorEmail])
+  logger.log(`[worktree] adopted remote branch ${branch} into ${worktreePath}`)
+}
+
 async function restoreManagedWorktreeState(
   worktreePath: string,
   logger = console,
@@ -1655,6 +2287,21 @@ async function runGitInWorktree(
   args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn(['git', '-C', worktreePath, ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  return { exitCode, stdout, stderr }
+}
+
+async function runGitInRepo(
+  args: string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(['git', ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
   })

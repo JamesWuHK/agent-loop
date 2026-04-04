@@ -6,7 +6,7 @@ import {
   findNextSubtask,
   buildSubtaskPrompt,
 } from '@agent/shared'
-import { runConfiguredAgent } from './cli-agent'
+import { runConfiguredAgent, type AgentFailureKind, type TaskExecutionMonitor } from './cli-agent'
 
 const PLANNING_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes for planning
 const SUBTASK_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes per subtask
@@ -16,6 +16,7 @@ export interface SubtaskExecutorResult {
   subtasks: Subtask[]
   exitCode: 0 | 1 | 2 | 3
   error?: string
+  failureKind?: AgentFailureKind
   durationMs: number
   prNumber?: number
   prUrl?: string
@@ -34,10 +35,12 @@ export async function runSubtaskExecutor(
   issueBody: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): Promise<SubtaskExecutorResult> {
   const startTime = Date.now()
 
   // ── Step 1: Planning ──────────────────────────────────────────────────────
+  monitor?.setPhase?.('planning')
   logger.log('[subtask] running planning agent...')
   const planningPrompt = buildPlanningPrompt(issueTitle, issueBody, config.project)
   const planningOutput = await runConfiguredAgent({
@@ -47,10 +50,22 @@ export async function runSubtaskExecutor(
     timeoutMs: PLANNING_TIMEOUT_MS,
     logger,
     allowWrites: false,
+    monitor: monitor?.agentMonitor,
   })
 
   let subtasks: Subtask[]
   if (!planningOutput.ok) {
+    if (planningOutput.failureKind === 'idle_timeout') {
+      return {
+        success: false,
+        subtasks: [],
+        exitCode: planningOutput.exitCode,
+        error: planningOutput.stderr || planningOutput.stdout || 'planning agent hit idle timeout',
+        failureKind: planningOutput.failureKind,
+        durationMs: Date.now() - startTime,
+      }
+    }
+
     logger.warn(`[subtask] planning failed (${planningOutput.exitCode}): ${planningOutput.stderr || planningOutput.stdout || 'unknown error'} — falling back to single subtask`)
     subtasks = [{
       id: 'subtask-1',
@@ -76,6 +91,7 @@ export async function runSubtaskExecutor(
     if (!subtask) break // all done or no pending work remains
 
     logger.log(`[subtask] executing #${subtask.order}: "${subtask.title}"`)
+    monitor?.setPhase?.(`subtask:${subtask.id}`)
 
     // Capture HEAD before agent runs
     const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
@@ -94,6 +110,7 @@ export async function runSubtaskExecutor(
       logger,
       config,
       allowWrites: true,
+      monitor: monitor?.agentMonitor,
     })
 
     const afterHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
@@ -148,6 +165,7 @@ export async function runSubtaskExecutor(
     success: allDone && subtasks.length > 0,
     subtasks,
     exitCode: allDone ? 0 : anyFailed ? 1 : 0,
+    failureKind: anyFailed ? 'nonzero_exit' : undefined,
     durationMs: Date.now() - startTime,
   }
 }
@@ -158,6 +176,7 @@ export interface ReviewAutoFixResult {
   outcome: 'committed' | 'salvaged' | 'agent_failed' | 'no_commit'
   error?: string
   commitSha?: string
+  failureKind?: AgentFailureKind
 }
 
 export interface IssueRecoveryResult {
@@ -166,6 +185,7 @@ export interface IssueRecoveryResult {
   error?: string
   commitSha?: string
   commitCreated: boolean
+  failureKind?: AgentFailureKind
 }
 
 export async function shouldTreatCleanNoCommitSubtaskAsSuccess(
@@ -218,6 +238,7 @@ export async function runIssueRecovery(
   logger = console,
   existingPr?: { number: number; url: string; branch: string } | null,
   recentBlockingReasons: string[] = [],
+  monitor?: TaskExecutionMonitor,
 ): Promise<IssueRecoveryResult> {
   const salvagedBeforeRun = await salvageDirtyWorktree(
     worktreePath,
@@ -244,6 +265,7 @@ export async function runIssueRecovery(
     recentBlockingReasons,
     config.project,
   )
+  monitor?.setPhase?.('issue-recovery')
   const result = await runConfiguredAgent({
     prompt,
     worktreePath,
@@ -251,6 +273,7 @@ export async function runIssueRecovery(
     timeoutMs: SUBTASK_TIMEOUT_MS,
     logger,
     allowWrites: true,
+    monitor: monitor?.agentMonitor,
   })
 
   const afterHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
@@ -288,6 +311,7 @@ export async function runIssueRecovery(
       exitCode: result.exitCode,
       error: result.stderr || result.stdout || `exit code ${result.exitCode}`,
       commitCreated: false,
+      failureKind: result.failureKind,
     }
   }
 
@@ -342,6 +366,7 @@ export async function runReviewAutoFix(
   reviewReason: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): Promise<ReviewAutoFixResult> {
   const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
   const prompt = buildReviewAutoFixPrompt(
@@ -351,6 +376,7 @@ export async function runReviewAutoFix(
     reviewReason,
     config.project,
   )
+  monitor?.setPhase?.('review-auto-fix')
   const result = await runConfiguredAgent({
     prompt,
     worktreePath,
@@ -358,6 +384,7 @@ export async function runReviewAutoFix(
     timeoutMs: SUBTASK_TIMEOUT_MS,
     logger,
     allowWrites: true,
+    monitor: monitor?.agentMonitor,
   })
 
   if (result.exitCode !== 0) {
@@ -382,6 +409,7 @@ export async function runReviewAutoFix(
       exitCode: result.exitCode,
       outcome: 'agent_failed',
       error: result.stderr || result.stdout || `exit code ${result.exitCode}`,
+      failureKind: result.failureKind,
     }
   }
 

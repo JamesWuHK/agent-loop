@@ -28,6 +28,12 @@ const TEST_CONFIG: AgentConfig = {
     concurrencyByRepo: {},
     concurrencyByProfile: {},
   },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+  },
   worktreesBase: '/tmp',
   project: {
     profile: 'desktop-vite',

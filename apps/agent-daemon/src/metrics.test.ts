@@ -7,12 +7,18 @@ import {
   recordPrReviewOutcome,
   recordReviewAutoFixOutcome,
   recordPrMergeRecoveryOutcome,
+  recordLeaseConflict,
+  recordRecoveryAction,
+  recordWorkerIdleTimeout,
   recordPrCreated,
   setActiveWorktrees,
   setActivePrReviews,
+  setActiveLeases,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
+  setLeaseHeartbeatAgeSeconds,
   setStartupRecoveryPending,
+  setStalledWorkers,
   setEffectiveActiveTasks,
   setProjectInfo,
   setConcurrencyLimit,
@@ -150,6 +156,21 @@ describe('metrics', () => {
       expect(metrics).toContain('outcome="refresh_push_failed"')
       expect(metrics).toContain('outcome="merged_after_refresh"')
     })
+
+    test('tracks lease conflicts, recovery actions, and worker idle timeouts', async () => {
+      recordLeaseConflict('issue-process')
+      recordRecoveryAction('issue-process-idle-timeout', 'recoverable')
+      recordWorkerIdleTimeout('pr-review')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_lease_conflicts_total')
+      expect(metrics).toContain('scope="issue-process"')
+      expect(metrics).toContain('agent_loop_recovery_actions_total')
+      expect(metrics).toContain('kind="issue-process-idle-timeout"')
+      expect(metrics).toContain('outcome="recoverable"')
+      expect(metrics).toContain('agent_loop_worker_idle_timeouts_total')
+      expect(metrics).toContain('scope="pr-review"')
+    })
   })
 
   describe('recordPrCreated', () => {
@@ -173,16 +194,22 @@ describe('metrics', () => {
 
     test('tracks active PR reviews and in-flight task gauges', async () => {
       setActivePrReviews(2)
+      setActiveLeases(3)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
+      setLeaseHeartbeatAgeSeconds(42)
+      setStalledWorkers(1)
       setEffectiveActiveTasks(3)
 
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_active_pr_reviews')
+      expect(metrics).toContain('agent_loop_active_leases')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')
+      expect(metrics).toContain('agent_loop_lease_heartbeat_age_seconds')
+      expect(metrics).toContain('agent_loop_stalled_workers')
       expect(metrics).toContain('agent_loop_effective_active_tasks')
     })
 

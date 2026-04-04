@@ -72,6 +72,14 @@ export function buildConfig(
   const homeDir = options.homeDir ?? homedir()
   const requestedConcurrency = args.concurrency ?? fileConfig.concurrency ?? 1
   const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
+  const heartbeatIntervalMs = normalizePositiveInteger(
+    fileConfig.recovery?.heartbeatIntervalMs,
+    30_000,
+  )
+  const leaseTtlMs = normalizePositiveInteger(
+    fileConfig.recovery?.leaseTtlMs,
+    heartbeatIntervalMs * 2,
+  )
   const scheduling = {
     concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
     concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
@@ -123,6 +131,18 @@ export function buildConfig(
     requestedConcurrency,
     concurrencyPolicy,
     scheduling,
+    recovery: {
+      heartbeatIntervalMs,
+      leaseTtlMs,
+      workerIdleTimeoutMs: normalizePositiveInteger(
+        fileConfig.recovery?.workerIdleTimeoutMs,
+        5 * 60 * 1000,
+      ),
+      leaseAdoptionBackoffMs: normalizePositiveInteger(
+        fileConfig.recovery?.leaseAdoptionBackoffMs,
+        5_000,
+      ),
+    },
     worktreesBase: resolve(homeDir, '.agent-worktrees', repo.replace('/', '-')),
     project: {
       profile: projectProfile,

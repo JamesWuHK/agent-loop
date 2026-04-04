@@ -17,6 +17,7 @@ const baseHealth: DaemonStatus & {
   version: '0.1.0',
   running: true,
   machineId: 'codex-dev',
+  daemonInstanceId: 'daemon-codex-dev-1',
   repo: 'JamesWuHK/digital-employee',
   pollIntervalMs: 60_000,
   concurrency: 2,
@@ -27,6 +28,12 @@ const baseHealth: DaemonStatus & {
     repoCap: 4,
     profileCap: 2,
     projectCap: 3,
+  },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
   },
   project: {
     profile: 'desktop-vite',
@@ -57,6 +64,11 @@ const baseHealth: DaemonStatus & {
     effectiveActiveTasks: 2,
     failedIssueResumeAttemptsTracked: 1,
     failedIssueResumeCooldownsTracked: 1,
+    activeLeaseCount: 2,
+    oldestLeaseHeartbeatAgeSeconds: 75,
+    stalledWorkerCount: 1,
+    lastRecoveryActionAt: '2026-04-05T08:08:30.000Z',
+    lastRecoveryActionKind: 'issue-process-idle-timeout',
   },
   activeWorktrees: [
     {
@@ -87,6 +99,12 @@ agent_loop_review_auto_fixes_total{outcome="committed"} 2
 agent_loop_review_auto_fixes_total{outcome="push_failed"} 1
 agent_loop_pr_merge_recovery_total{outcome="merged_initial"} 1
 agent_loop_pr_merge_recovery_total{outcome="refresh_push_failed"} 1
+agent_loop_recovery_actions_total{kind="issue-process-idle-timeout",outcome="recoverable"} 2
+agent_loop_worker_idle_timeouts_total{scope="issue-process"} 2
+agent_loop_active_leases 2
+agent_loop_lease_heartbeat_age_seconds 75
+agent_loop_stalled_workers 1
+agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
 
@@ -129,6 +147,18 @@ describe('status helpers', () => {
         merged_initial: 1,
         refresh_push_failed: 1,
       },
+      recoveryActions: {
+        'issue-process-idle-timeout': {
+          recoverable: 2,
+        },
+      },
+      workerIdleTimeouts: {
+        'issue-process': 2,
+      },
+      activeLeases: 2,
+      leaseHeartbeatAgeSeconds: 75,
+      stalledWorkers: 1,
+      leaseConflicts: 1,
       rateLimitHits: 0,
     })
   })
@@ -148,7 +178,9 @@ describe('status helpers', () => {
     })
 
     expect(report).toContain('repo: JamesWuHK/digital-employee')
+    expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
+    expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -170,9 +202,11 @@ describe('status helpers', () => {
 
     expect(report).toContain('Daemon Doctor')
     expect(report).toContain('project max concurrency: 3')
+    expect(report).toContain('daemon instance: daemon-codex-dev-1')
     expect(report).toContain('Active Worktrees')
     expect(report).toContain('#77 agent/77/codex-dev /tmp/issue-77-codex-dev')
     expect(report).toContain('merge-recovery: merged_initial=1')
+    expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('- review auto-fix push failures observed: 1')
   })
 })

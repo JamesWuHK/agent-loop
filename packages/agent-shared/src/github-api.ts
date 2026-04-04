@@ -1,6 +1,18 @@
 import { $ } from 'bun'
-import { writeFileSync } from 'node:fs'
-import type { AgentConfig, AgentIssue, ClaimEvent, GitHubIssue, ManagedPullRequest } from './types'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import type {
+  AgentConfig,
+  AgentIssue,
+  ClaimEvent,
+  GitHubIssue,
+  IssueComment,
+  ManagedLease,
+  ManagedLeaseComment,
+  ManagedLeaseScope,
+  ManagedPullRequest,
+} from './types'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from './types'
 import {
   inferState,
@@ -412,11 +424,6 @@ export interface MergePrResult {
   sha?: string
 }
 
-export interface IssueComment {
-  body: string
-  createdAt: string
-}
-
 interface RawPullRequestListItem {
   number: number
   title: string
@@ -427,8 +434,175 @@ interface RawPullRequestListItem {
 }
 
 interface RawIssueComment {
+  id?: number
   body?: string
   created_at?: string
+  updated_at?: string
+}
+
+const MANAGED_LEASE_COMMENT_PREFIX = '<!-- agent-loop:lease '
+
+function mapRawIssueComment(comment: RawIssueComment): IssueComment {
+  return {
+    commentId: typeof comment.id === 'number' ? comment.id : 0,
+    body: typeof comment.body === 'string' ? comment.body : '',
+    createdAt: typeof comment.created_at === 'string' ? comment.created_at : '',
+    updatedAt: typeof comment.updated_at === 'string'
+      ? comment.updated_at
+      : typeof comment.created_at === 'string'
+        ? comment.created_at
+        : '',
+  }
+}
+
+function withTempJsonFile<T>(
+  prefix: string,
+  payload: Record<string, unknown>,
+  run: (path: string) => Promise<T>,
+): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), `${prefix}-`))
+  const path = join(dir, 'payload.json')
+  writeFileSync(path, JSON.stringify(payload), 'utf-8')
+
+  return run(path).finally(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+}
+
+export function buildManagedLeaseComment(lease: ManagedLease): string {
+  return `${MANAGED_LEASE_COMMENT_PREFIX}${JSON.stringify(lease)} -->\n## Managed lease\n\n- Scope: ${lease.scope}\n- Status: ${lease.status}\n- Phase: ${lease.phase}\n- Machine: ${lease.machineId}\n- Daemon: ${lease.daemonInstanceId}\n- Lease: ${lease.leaseId}`
+}
+
+export function extractManagedLeaseComment(
+  body: string,
+): ManagedLease | null {
+  const match = body.match(/<!-- agent-loop:lease (\{.*\}) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as ManagedLease
+    if (!parsed || typeof parsed !== 'object') return null
+    if (typeof parsed.leaseId !== 'string' || typeof parsed.scope !== 'string') return null
+    if (typeof parsed.daemonInstanceId !== 'string' || typeof parsed.machineId !== 'string') return null
+    if (typeof parsed.phase !== 'string' || typeof parsed.status !== 'string') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+export function parseManagedLeaseComments(
+  comments: IssueComment[],
+  scope?: ManagedLeaseScope,
+): ManagedLeaseComment[] {
+  return comments
+    .map((comment) => {
+      const lease = extractManagedLeaseComment(comment.body)
+      if (!lease) return null
+      if (scope && lease.scope !== scope) return null
+      return {
+        ...comment,
+        lease,
+      } satisfies ManagedLeaseComment
+    })
+    .filter((comment): comment is ManagedLeaseComment => comment !== null)
+}
+
+export function isManagedLeaseExpired(
+  lease: ManagedLease,
+  now = Date.now(),
+): boolean {
+  const expiresAt = Date.parse(lease.expiresAt)
+  if (!Number.isFinite(expiresAt)) return true
+  return expiresAt <= now
+}
+
+export function getActiveManagedLease(
+  comments: IssueComment[],
+  scope: ManagedLeaseScope,
+  now = Date.now(),
+): ManagedLeaseComment | null {
+  const active = parseManagedLeaseComments(comments, scope)
+    .filter((comment) => comment.lease.status === 'active' && !isManagedLeaseExpired(comment.lease, now))
+    .sort((left, right) => {
+      const createdDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt)
+      if (Number.isFinite(createdDelta) && createdDelta !== 0) return createdDelta
+      return left.commentId - right.commentId
+    })
+
+  return active[0] ?? null
+}
+
+export function getLatestManagedLease(
+  comments: IssueComment[],
+  scope: ManagedLeaseScope,
+): ManagedLeaseComment | null {
+  const leases = parseManagedLeaseComments(comments, scope)
+    .sort((left, right) => {
+      const updatedDelta = Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+      if (Number.isFinite(updatedDelta) && updatedDelta !== 0) return updatedDelta
+      return right.commentId - left.commentId
+    })
+
+  return leases[0] ?? null
+}
+
+export function canDaemonAdoptManagedLease(
+  activeLease: ManagedLeaseComment | null,
+  daemonInstanceId: string,
+  now = Date.now(),
+): boolean {
+  if (!activeLease) return true
+  if (activeLease.lease.daemonInstanceId === daemonInstanceId) return true
+  return isManagedLeaseExpired(activeLease.lease, now)
+}
+
+export async function createManagedLeaseComment(
+  issueNumber: number,
+  lease: ManagedLease,
+  config: AgentConfig,
+): Promise<IssueComment> {
+  const response = await withTempJsonFile(
+    'agent-loop-lease-create',
+    { body: buildManagedLeaseComment(lease) },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/issues/${issueNumber}/comments`,
+      '-X',
+      'POST',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(`api issues/${issueNumber}/comments create lease`, response.exitCode, response.stderr)
+  }
+
+  return mapRawIssueComment(JSON.parse(response.stdout) as RawIssueComment)
+}
+
+export async function updateManagedLeaseComment(
+  commentId: number,
+  lease: ManagedLease,
+  config: AgentConfig,
+): Promise<IssueComment> {
+  const response = await withTempJsonFile(
+    'agent-loop-lease-update',
+    { body: buildManagedLeaseComment(lease) },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/issues/comments/${commentId}`,
+      '-X',
+      'PATCH',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(`api issues/comments/${commentId} update lease`, response.exitCode, response.stderr)
+  }
+
+  return mapRawIssueComment(JSON.parse(response.stdout) as RawIssueComment)
 }
 
 /**
@@ -499,10 +673,7 @@ export async function listIssueComments(
   }
 
   const data = JSON.parse(stdout) as RawIssueComment[]
-  return data.map((comment) => ({
-    body: typeof comment.body === 'string' ? comment.body : '',
-    createdAt: typeof comment.created_at === 'string' ? comment.created_at : '',
-  }))
+  return data.map(mapRawIssueComment)
 }
 
 /**
