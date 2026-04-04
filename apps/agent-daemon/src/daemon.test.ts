@@ -251,6 +251,17 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(true)
   })
 
+  test('resumes stale issues with a preserved local worktree after daemon restart', () => {
+    expect(shouldResumeManagedIssue(
+      { state: 'stale' },
+      true,
+      0,
+      0,
+      Date.now(),
+      2,
+    )).toBe(true)
+  })
+
   test('respects failed-issue retry cooldowns while still requiring a local worktree', () => {
     const now = Date.now()
 

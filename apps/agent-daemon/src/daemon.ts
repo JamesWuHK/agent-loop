@@ -2150,7 +2150,7 @@ export function shouldResumeManagedIssue(
 ): boolean {
   if (!hasLocalWorktree) return false
 
-  if (issue.state === 'working') {
+  if (issue.state === 'working' || issue.state === 'stale') {
     return true
   }
 
