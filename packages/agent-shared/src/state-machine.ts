@@ -7,7 +7,7 @@ const VALID_TRANSITIONS: Record<IssueState, IssueState[]> = {
   claimed: ['working', 'stale'],
   working: ['done', 'failed', 'stale'],
   done: [],       // terminal
-  failed: [],     // terminal (or can be re-queued manually)
+  failed: ['working'], // resumable when the daemon preserves local state
   stale: ['ready'],
   unknown: [],
 }
@@ -42,6 +42,60 @@ export function canTransition(from: IssueState, to: IssueState): boolean {
  */
 export function buildEventComment(event: ClaimEvent): string {
   return `<!-- ${JSON.stringify(event)} -->`
+}
+
+const CLAIM_EVENT_PATTERN = /<!--\s*({[\s\S]*})\s*-->/
+const CLAIM_RESET_EVENTS = new Set<ClaimEvent['event']>(['done', 'failed', 'stale', 'stale-requeue'])
+
+export function parseClaimEventComment(body: string): ClaimEvent | null {
+  const match = body.match(CLAIM_EVENT_PATTERN)
+  if (!match) return null
+
+  try {
+    const parsed = JSON.parse(match[1]!.trim()) as Partial<ClaimEvent>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (
+      parsed.event !== 'claimed'
+      && parsed.event !== 'done'
+      && parsed.event !== 'failed'
+      && parsed.event !== 'stale'
+      && parsed.event !== 'stale-requeue'
+    ) {
+      return null
+    }
+    if (typeof parsed.machine !== 'string' || parsed.machine.trim().length === 0) return null
+    if (typeof parsed.ts !== 'string' || parsed.ts.trim().length === 0) return null
+    return parsed as ClaimEvent
+  } catch {
+    return null
+  }
+}
+
+export function resolveActiveClaimMachine(
+  comments: Array<{ body: string; createdAt?: string }>,
+): string | null {
+  const orderedEvents = comments
+    .map((comment, index) => ({
+      index,
+      createdAt: comment.createdAt ?? '',
+      event: parseClaimEventComment(comment.body),
+    }))
+    .filter((entry): entry is { index: number; createdAt: string; event: ClaimEvent } => entry.event !== null)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.index - right.index)
+
+  let activeMachine: string | null = null
+  for (const entry of orderedEvents) {
+    if (CLAIM_RESET_EVENTS.has(entry.event.event)) {
+      activeMachine = null
+      continue
+    }
+
+    if (entry.event.event === 'claimed' && activeMachine === null) {
+      activeMachine = entry.event.machine
+    }
+  }
+
+  return activeMachine
 }
 
 /**

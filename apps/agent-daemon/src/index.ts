@@ -77,7 +77,7 @@ async function main() {
     await daemon.start()
 
     if (cliArgs.once) {
-      console.log('[agent-loop] --once mode: waiting for in-flight process...')
+      console.log('[agent-loop] --once mode: waiting for first issue to complete...')
       await daemon.waitForInFlightProcess()
       await daemon.stop()
       process.exit(0)

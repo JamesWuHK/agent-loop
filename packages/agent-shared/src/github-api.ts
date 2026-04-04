@@ -1,14 +1,51 @@
-/// <reference types="bun-types" />
 import { $ } from 'bun'
 import { writeFileSync } from 'node:fs'
-import type { AgentConfig, AgentIssue, ClaimEvent, GitHubIssue } from './types'
+import type { AgentConfig, AgentIssue, ClaimEvent, GitHubIssue, ManagedPullRequest } from './types'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from './types'
-import { inferState, buildEventComment, parseIssueDependencyMetadata } from './state-machine'
+import {
+  inferState,
+  buildEventComment,
+  parseIssueDependencyMetadata,
+  resolveActiveClaimMachine,
+} from './state-machine'
+import { parseIssueContract } from './issue-contract'
+import { validateIssueContract } from './issue-contract-validator'
 
 const TMP_COMMENT_FILE = '/tmp/agent-loop-comment.txt'
 const TMP_BODY_FILE = '/tmp/agent-loop-body.txt'
+const TMP_PATCH_FILE = '/tmp/agent-loop-patch.json'
+const MANAGED_ISSUE_LABELS = Object.values(ISSUE_LABELS) as string[]
+const CLAIM_OWNERSHIP_SETTLE_DELAY_MS = 350
+const CLAIM_OWNERSHIP_SETTLE_ATTEMPTS = 4
+const GH_PROXY_ENV_KEYS = [
+  'ALL_PROXY',
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'all_proxy',
+  'https_proxy',
+  'http_proxy',
+] as const
 
 // ─── gh CLI wrapper ───────────────────────────────────────────────────────────
+
+export function buildGhEnv(config: Pick<AgentConfig, 'pat'>): Record<string, string> {
+  const env: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value
+    }
+  }
+
+  for (const key of GH_PROXY_ENV_KEYS) {
+    delete env[key]
+  }
+
+  env.GH_TOKEN = config.pat
+  env.GITHUB_TOKEN = config.pat
+
+  return env
+}
 
 async function ghRaw(
   cmd: string,
@@ -16,7 +53,26 @@ async function ghRaw(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const fullCmd = `gh ${cmd} --repo ${config.repo}`
   const proc = Bun.spawn(['sh', '-c', fullCmd], {
-    env: { ...process.env, GH_TOKEN: config.pat },
+    env: buildGhEnv(config),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+
+  return { stdout, stderr, exitCode }
+}
+
+async function ghApiRaw(
+  args: string[],
+  config: AgentConfig,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = Bun.spawn(['gh', 'api', ...args], {
+    env: buildGhEnv(config),
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -45,33 +101,44 @@ interface RawGitHubIssueNode {
   number: number
   title: string
   body: string | null
-  state?: 'open' | 'closed'
+  state?: string
   updatedAt: string
   labels: { nodes: Array<{ name: string }> }
   assignees: { nodes: Array<{ login: string }> }
 }
 
+export function deriveIssueStateFromRaw(
+  labels: string[],
+  issueState?: string,
+): AgentIssue['state'] {
+  if (issueState?.toLowerCase() === 'closed') return 'done'
+  return inferState(labels)
+}
+
 function mapRawIssueNode(issue: RawGitHubIssueNode): AgentIssue {
   const labels = issue.labels.nodes.map((l) => l.name)
-  const state = labels.length === 0 && issue.state === 'closed'
-    ? 'done'
-    : inferState(labels)
+  const state = deriveIssueStateFromRaw(labels, issue.state)
   const assignee = issue.assignees.nodes[0]?.login ?? null
-  const dependencyMetadata = parseIssueDependencyMetadata(issue.body ?? '', issue.number)
+  const body = issue.body ?? ''
+  const dependencyMetadata = parseIssueDependencyMetadata(body, issue.number)
+  const contract = parseIssueContract(body)
+  const contractValidation = validateIssueContract(contract)
 
   return {
     number: issue.number,
     title: issue.title,
-    body: issue.body ?? '',
+    body,
     state,
     labels,
     assignee,
-    isClaimable: state === 'ready' && assignee === null,
+    isClaimable: state === 'ready' && assignee === null && contractValidation.valid,
     updatedAt: issue.updatedAt,
     dependencyIssueNumbers: dependencyMetadata.dependsOn,
     hasDependencyMetadata: dependencyMetadata.hasDependencyMetadata,
     dependencyParseError: dependencyMetadata.dependencyParseError,
     claimBlockedBy: [],
+    hasExecutableContract: contractValidation.valid,
+    contractValidationErrors: contractValidation.errors,
   }
 }
 
@@ -82,6 +149,14 @@ export function applyDependencyClaimability(
   const openIssueMap = new Map(issues.map(issue => [issue.number, issue]))
 
   return issues.map((issue) => {
+    if (!issue.hasExecutableContract) {
+      return {
+        ...issue,
+        isClaimable: false,
+        claimBlockedBy: issue.dependencyIssueNumbers,
+      }
+    }
+
     if (issue.dependencyParseError) {
       return {
         ...issue,
@@ -134,7 +209,7 @@ async function fetchIssuesByNumbers(
   ].join('\n')
 
   const result = await $`gh api graphql --raw-field query=${query}`
-    .env({ ...process.env, GH_TOKEN: config.pat })
+    .env(buildGhEnv(config))
     .quiet()
 
   const stdout = await new Response(result.stdout).text()
@@ -198,7 +273,7 @@ export async function listOpenAgentIssues(
   ].join('\n')
 
   const result = await $`gh api graphql --raw-field query=${query}`
-    .env({ ...process.env, GH_TOKEN: config.pat })
+    .env(buildGhEnv(config))
     .quiet()
 
   const stdout = await new Response(result.stdout).text()
@@ -231,7 +306,9 @@ export async function fetchClaimableIssues(
       `[claimability] #${issue.number} state=${issue.state} assignee=${issue.assignee ?? '-'} `
       + `deps=${issue.dependencyIssueNumbers.length ? issue.dependencyIssueNumbers.join(',') : '-'} `
       + `blockedBy=${issue.claimBlockedBy.length ? issue.claimBlockedBy.join(',') : '-'} `
-      + `parseError=${issue.dependencyParseError} claimable=${issue.isClaimable}`,
+      + `parseError=${issue.dependencyParseError} contract=${issue.hasExecutableContract} `
+      + `claimable=${issue.isClaimable}`
+      + `${issue.contractValidationErrors.length > 0 ? ` contractErrors=${issue.contractValidationErrors.join(';')}` : ''}`,
     )
   }
 
@@ -255,12 +332,14 @@ export async function claimIssue(
   config: AgentConfig,
   machineId: string,
 ): Promise<ClaimResult> {
-  const { stdout, stderr, exitCode } = await ghRaw(
-    `issue edit ${issueNumber} --add-label "${ISSUE_LABELS.CLAIMED}" --add-assignee "@me"`,
+  const { stderr, exitCode } = await ghRaw(
+    `issue edit ${issueNumber} --add-assignee "@me"`,
     config,
   )
 
   if (exitCode === 0) {
+    await setManagedIssueStateLabels(issueNumber, ISSUE_LABELS.CLAIMED, config)
+
     // Append claim event comment via temp file to avoid shell escaping issues
     const event: ClaimEvent = {
       event: 'claimed',
@@ -273,6 +352,12 @@ export async function claimIssue(
       `issue comment ${issueNumber} --body-file "${TMP_COMMENT_FILE}"`,
       config,
     )
+
+    const activeClaimMachine = await settleActiveClaimMachine(issueNumber, config)
+    if (activeClaimMachine && activeClaimMachine !== machineId) {
+      return { success: false, issueNumber, reason: 'already-claimed' }
+    }
+
     return { success: true, issueNumber, reason: 'claimed' }
   }
 
@@ -296,9 +381,7 @@ export async function transitionIssueState(
   event: ClaimEvent,
   config: AgentConfig,
 ): Promise<void> {
-  const editParts: string[] = [`issue edit ${issueNumber}`, `--add-label "${addLabel}"`]
-  if (removeLabel) editParts.push(`--remove-label "${removeLabel}"`)
-  await ghRaw(editParts.join(' '), config)
+  await setManagedIssueStateLabels(issueNumber, addLabel, config)
 
   // Add event comment via temp file (gh issue edit has no --comment-file)
   writeFileSync(TMP_COMMENT_FILE, buildEventComment(event), 'utf-8')
@@ -314,6 +397,31 @@ export interface PrCheckResult {
   prNumber: number | null
   prUrl: string | null
   prState: 'open' | 'merged' | 'closed' | null
+}
+
+export interface MergePrResult {
+  merged: boolean
+  message: string
+  sha?: string
+}
+
+export interface IssueComment {
+  body: string
+  createdAt: string
+}
+
+interface RawPullRequestListItem {
+  number: number
+  title: string
+  url: string
+  headRefName: string
+  isDraft?: boolean
+  labels?: Array<{ name: string }>
+}
+
+interface RawIssueComment {
+  body?: string
+  created_at?: string
 }
 
 /**
@@ -343,6 +451,51 @@ export async function checkPrExists(
     prUrl: pr.url,
     prState: pr.state.toLowerCase() as 'open' | 'merged' | 'closed',
   }
+}
+
+export async function listOpenAgentPullRequests(
+  config: AgentConfig,
+): Promise<ManagedPullRequest[]> {
+  const { stdout, exitCode, stderr } = await ghRaw(
+    'pr list --state open --json number,title,url,headRefName,isDraft,labels',
+    config,
+  )
+
+  if (exitCode !== 0) {
+    throw new GhError('pr list --state open', exitCode, stderr)
+  }
+
+  const data = JSON.parse(stdout) as RawPullRequestListItem[]
+  return data
+    .filter((pr) => typeof pr.headRefName === 'string' && pr.headRefName.startsWith('agent/'))
+    .map((pr) => ({
+      number: pr.number,
+      title: pr.title,
+      url: pr.url,
+      headRefName: pr.headRefName,
+      isDraft: pr.isDraft === true,
+      labels: (pr.labels ?? []).map((label) => label.name),
+    }))
+}
+
+export async function listIssueComments(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<IssueComment[]> {
+  const { stdout, exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/issues/${issueNumber}/comments`,
+    '--paginate',
+  ], config)
+
+  if (exitCode !== 0) {
+    throw new GhError(`api issues/${issueNumber}/comments`, exitCode, stderr)
+  }
+
+  const data = JSON.parse(stdout) as RawIssueComment[]
+  return data.map((comment) => ({
+    body: typeof comment.body === 'string' ? comment.body : '',
+    createdAt: typeof comment.created_at === 'string' ? comment.created_at : '',
+  }))
 }
 
 /**
@@ -399,16 +552,96 @@ export async function commentOnPr(
   }
 }
 
+export function parseGhApiErrorMessage(stdout: string, stderr: string): string {
+  const trimmedStdout = stdout.trim()
+  if (trimmedStdout) {
+    try {
+      const parsed = JSON.parse(trimmedStdout) as { message?: unknown }
+      if (typeof parsed.message === 'string' && parsed.message.trim().length > 0) {
+        return parsed.message.trim()
+      }
+    } catch {
+      return trimmedStdout
+    }
+  }
+
+  const trimmedStderr = stderr.trim()
+  if (trimmedStderr) return trimmedStderr
+  return 'GitHub API request failed'
+}
+
+export function parseMergePrResponse(stdout: string): MergePrResult {
+  const trimmed = stdout.trim()
+  if (!trimmed) {
+    return {
+      merged: false,
+      message: 'GitHub merge API returned an empty response',
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      merged?: unknown
+      message?: unknown
+      sha?: unknown
+    }
+
+    return {
+      merged: parsed.merged === true,
+      message: typeof parsed.message === 'string' && parsed.message.trim().length > 0
+        ? parsed.message.trim()
+        : parsed.merged === true
+          ? 'Pull request merged'
+          : 'Pull request was not merged',
+      sha: typeof parsed.sha === 'string' && parsed.sha.trim().length > 0
+        ? parsed.sha.trim()
+        : undefined,
+    }
+  } catch {
+    return {
+      merged: false,
+      message: trimmed,
+    }
+  }
+}
+
+export async function mergePullRequest(
+  prNumber: number,
+  config: AgentConfig,
+  method: 'merge' | 'squash' | 'rebase' = 'squash',
+): Promise<MergePrResult> {
+  const { stdout, stderr, exitCode } = await ghApiRaw([
+    `repos/${config.repo}/pulls/${prNumber}/merge`,
+    '-X',
+    'PUT',
+    '-f',
+    `merge_method=${method}`,
+  ], config)
+
+  if (exitCode !== 0) {
+    return {
+      merged: false,
+      message: parseGhApiErrorMessage(stdout, stderr),
+    }
+  }
+
+  return parseMergePrResponse(stdout)
+}
+
 export async function addPrLabels(
   prNumber: number,
   labels: string[],
   config: AgentConfig,
 ): Promise<void> {
   if (labels.length === 0) return
-  const args = labels.map(label => `--add-label ${shellQuote(label)}`).join(' ')
-  const { exitCode, stderr } = await ghRaw(`pr edit ${prNumber} ${args}`, config)
+  const { exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/issues/${prNumber}/labels`,
+    '-X',
+    'POST',
+    ...labels.flatMap(label => ['-f', `labels[]=${label}`]),
+  ], config)
   if (exitCode !== 0) {
-    throw new GhError(`pr edit ${prNumber} add labels`, exitCode, stderr)
+    throw new GhError(`api issues/${prNumber}/labels add`, exitCode, stderr)
   }
 }
 
@@ -418,10 +651,15 @@ export async function removePrLabels(
   config: AgentConfig,
 ): Promise<void> {
   if (labels.length === 0) return
-  const args = labels.map(label => `--remove-label ${shellQuote(label)}`).join(' ')
-  const { exitCode, stderr } = await ghRaw(`pr edit ${prNumber} ${args}`, config)
-  if (exitCode !== 0) {
-    throw new GhError(`pr edit ${prNumber} remove labels`, exitCode, stderr)
+  for (const label of labels) {
+    const { exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues/${prNumber}/labels/${encodeURIComponent(label)}`,
+      '-X',
+      'DELETE',
+    ], config)
+    if (exitCode !== 0 && !stderr.includes('Label does not exist')) {
+      throw new GhError(`api issues/${prNumber}/labels remove`, exitCode, stderr)
+    }
   }
 }
 
@@ -443,6 +681,103 @@ export async function setManagedPrReviewLabels(
   const toRemove = managed.filter(label => !desiredSet.has(label))
   await removePrLabels(prNumber, toRemove, config)
   await addPrLabels(prNumber, desired, config)
+}
+
+async function addIssueLabels(
+  issueNumber: number,
+  labels: string[],
+  config: AgentConfig,
+): Promise<void> {
+  if (labels.length === 0) return
+  const { exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/issues/${issueNumber}/labels`,
+    '-X',
+    'POST',
+    ...labels.flatMap(label => ['-f', `labels[]=${label}`]),
+  ], config)
+
+  if (exitCode !== 0) {
+    throw new GhError(`api issues/${issueNumber}/labels add`, exitCode, stderr)
+  }
+}
+
+async function removeIssueLabels(
+  issueNumber: number,
+  labels: string[],
+  config: AgentConfig,
+): Promise<void> {
+  if (labels.length === 0) return
+  for (const label of labels) {
+    const { exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+      '-X',
+      'DELETE',
+    ], config)
+
+    if (exitCode !== 0 && !stderr.includes('Label does not exist')) {
+      throw new GhError(`api issues/${issueNumber}/labels remove`, exitCode, stderr)
+    }
+  }
+}
+
+export function shouldClearIssueAssigneesForStateLabel(desiredLabel: string): boolean {
+  return desiredLabel === ISSUE_LABELS.READY
+}
+
+async function clearIssueAssignees(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<void> {
+  writeFileSync(TMP_PATCH_FILE, JSON.stringify({ assignees: [] }), 'utf-8')
+
+  const { exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/issues/${issueNumber}`,
+    '-X',
+    'PATCH',
+    '--input',
+    TMP_PATCH_FILE,
+  ], config)
+
+  if (exitCode !== 0) {
+    throw new GhError(`api issues/${issueNumber} clear assignees`, exitCode, stderr)
+  }
+}
+
+async function setManagedIssueStateLabels(
+  issueNumber: number,
+  desiredLabel: string,
+  config: AgentConfig,
+): Promise<void> {
+  const desired = new Set([desiredLabel])
+  const toRemove = MANAGED_ISSUE_LABELS.filter(label => !desired.has(label))
+  await removeIssueLabels(issueNumber, toRemove, config)
+  await addIssueLabels(issueNumber, [desiredLabel], config)
+  if (shouldClearIssueAssigneesForStateLabel(desiredLabel)) {
+    await clearIssueAssignees(issueNumber, config)
+  }
+}
+
+async function settleActiveClaimMachine(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<string | null> {
+  for (let attempt = 1; attempt <= CLAIM_OWNERSHIP_SETTLE_ATTEMPTS; attempt++) {
+    const comments = await listIssueComments(issueNumber, config)
+    const activeMachine = resolveActiveClaimMachine(comments)
+    if (activeMachine !== null) {
+      return activeMachine
+    }
+
+    if (attempt < CLAIM_OWNERSHIP_SETTLE_ATTEMPTS) {
+      await sleep(CLAIM_OWNERSHIP_SETTLE_DELAY_MS)
+    }
+  }
+
+  return null
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function shellQuote(value: string): string {

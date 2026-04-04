@@ -1,4 +1,5 @@
 import type { Subtask } from './types'
+import { renderIssueContractForPrompt } from './issue-contract'
 
 /**
  * Build the planning prompt that asks the agent to break down an issue into
@@ -20,8 +21,18 @@ export function buildPlanningPrompt(issueTitle: string, issueBody: string): stri
 **Description:**
 ${body}
 
+## Parsed Contract
+${renderIssueContractForPrompt(body)}
+
 ## Your Job
-Analyze the issue and break it down into a small number (1–5) of concrete, actionable subtasks. Each subtask should be a single logical unit of work that produces a verifiable code change.
+Analyze the issue and break it down into a small number (1–5) of concrete, actionable subtasks. Each subtask must be a single logical unit of work that produces a verifiable code change and can be committed independently.
+
+Do NOT include pure reading, inspection, investigation, or analysis-only subtasks.
+Do NOT include subtasks that only say to read docs or inspect files.
+If documentation or code reading is necessary, fold it into a code-producing subtask instead.
+Every subtask must be capable of producing a non-empty git commit.
+Respect explicit file scope, out-of-scope clauses, and must-preserve semantics from the parsed contract.
+When the issue is a desktop frontend task, prefer subtasks that use the existing Vitest/jsdom setup instead of introducing new manual DOM bootstrap or test harness rewrites.
 
 ## Output Format (STRICT — no exceptions)
 Return ONLY a plain numbered list. No headers. No explanations. No markdown.
@@ -48,8 +59,11 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
     const line = rawLine.trim()
     if (!line) continue
 
-    // Strip common prefixes: "1.", "1)", "- ", "* ", "• ", "1. ", etc.
-    const stripped = line.replace(/^[\d]+\)\s*/, '').replace(/^[-*•]\s*/, '').trim()
+    // Strip common prefixes: "1.", "1)", "- ", "* ", "• ", etc.
+    const stripped = line
+      .replace(/^[\d]+[.)]\s*/, '')
+      .replace(/^[-*•]\s*/, '')
+      .trim()
 
     // Skip lines that don't look like task descriptions
     if (stripped.length < 3) continue
@@ -81,43 +95,42 @@ export function parsePlanningOutput(output: string, startOrder = 1): Subtask[] {
 
 /**
  * Find the next subtask to execute.
- * Prefers pending tasks, but will retry the last failed one before giving up.
- * @param skipId  Subtask ID to skip (used to avoid re-running the same failed subtask repeatedly)
+ * Only pending subtasks are eligible for execution.
  */
-export function findNextSubtask(
-  subtasks: Subtask[],
-  skipId?: string | null,
-): Subtask | null {
-  if (skipId) {
-    // Skip the explicitly skipped ID; find another pending or the LAST failed (not skipId)
-    const pending = subtasks.find(s => s.status === 'pending' && s.id !== skipId)
-    if (pending) return pending
-    const failed = subtasks.filter(s => s.status === 'failed' && s.id !== skipId)
-    return failed[failed.length - 1] ?? null
-  }
-  return subtasks.find(s => s.status === 'pending')
-    ?? subtasks.find(s => s.status === 'failed')
-    ?? null
+export function findNextSubtask(subtasks: Subtask[]): Subtask | null {
+  return subtasks.find(s => s.status === 'pending') ?? null
 }
 
 /**
  * Build the prompt for executing a single subtask.
  * Includes git verification steps to detect empty commits.
  */
-export function buildSubtaskPrompt(subtask: Subtask, issueNumber: number): string {
+export function buildSubtaskPrompt(
+  subtask: Subtask,
+  issueNumber: number,
+  issueTitle: string,
+  issueBody: string,
+): string {
   return `# Subtask: ${subtask.title}
 
 ## Context
 You are working on issue #${issueNumber}.
+Issue title: ${issueTitle}
 Your specific task is: **${subtask.title}**
+
+## Parsed Contract
+${renderIssueContractForPrompt(issueBody)}
 
 ## Instructions
 1. Read the codebase to understand the current state.
 2. Make the necessary code changes to complete this subtask.
-3. If this subtask involves React/UI tests in apps/desktop, use the Vitest runner configured by the app (for example: \`bun run --cwd apps/desktop test -- src/pages/LoginPage.test.tsx\`). Do NOT use plain \`bun test\` for jsdom/Vitest tests.
-4. Run: \`git status --short\` — if empty, first verify whether the requested behavior is already implemented and covered by the current HEAD. If it is already satisfied, exit 0 without making changes.
-5. If code changes were required, commit with message: \`fix #${subtask.id}: ${subtask.title}\`
-6. Push to origin only if a new commit was created.
-7. If a new commit was created, run: \`git log main..HEAD --oneline\` — verify at least one commit appears. If empty, run: \`echo "COMMIT_FAILED" && exit 1\`
+3. Treat explicit AllowedFiles, ForbiddenFiles, MustPreserve, OutOfScope, and RequiredSemantics as a hard contract.
+4. Do not expand scope to satisfy speculative improvements or unrelated follow-up work.
+5. For desktop frontend tests, use the existing Vitest/jsdom setup from \`apps/desktop/vite.config.ts\` and \`apps/desktop/src/test/setup.ts\`. Do not add manual \`JSDOM\` bootstrap, duplicate DOM globals, or new test harness files unless the issue explicitly requires it.
+6. Before committing, run \`git diff --stat origin/main...HEAD\` and verify the touched files still match the issue scope.
+7. Run: \`git status --short\` — if empty, the file is already correct. In that case, run: \`echo "NO_CHANGES" && exit 1\`
+8. Commit with message: \`fix #${subtask.id}: ${subtask.title}\`
+9. Push to origin
+10. Run: \`git log origin/main..HEAD --oneline\` — verify at least one commit appears. If empty, the commit failed. Run: \`echo "COMMIT_FAILED" && exit 1\`
 `
 }

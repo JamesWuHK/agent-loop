@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Distributed agent loop daemon — GitHub Issues as task queue",
+  "description": "Distributed agent loop daemon — consumes GitHub Issues as a task queue",
   "bin": {
     "agent-loop": "./src/index.ts"
   },

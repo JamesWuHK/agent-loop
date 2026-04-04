@@ -71,10 +71,16 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
     concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,
     worktreesBase: resolve(homedir(), '.agent-worktrees', repo.replace('/', '-')),
     agent: {
-      primary: fileConfig.agent?.primary ?? 'claude',
-      fallback: fileConfig.agent?.fallback ?? 'codex',
+      primary: fileConfig.agent?.primary ?? 'codex',
+      fallback: fileConfig.agent?.fallback ?? 'claude',
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
+      codexBaseUrl:
+        process.env.OPENAI_BASE_URL ??
+        process.env.OPENAI_API_BASE ??
+        process.env.OPENAI_API_URL ??
+        process.env.OPENAI_BASE ??
+        fileConfig.agent?.codexBaseUrl,
       timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000, // 30 min default
     },
     git: {

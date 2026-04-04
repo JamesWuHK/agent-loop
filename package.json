@@ -8,6 +8,8 @@
     "packages/*"
   ],
   "scripts": {
+    "agent:issues:audit": "bun apps/agent-daemon/src/audit-issue-contracts.ts",
+    "agent:issues:enforce-ready": "bun apps/agent-daemon/src/ready-gate.ts",
     "start": "bun run apps/agent-daemon/src/index.ts",
     "dev": "bun --watch run apps/agent-daemon/src/index.ts",
     "typecheck": "tsc --noEmit",
