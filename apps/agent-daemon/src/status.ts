@@ -55,6 +55,7 @@ export interface DaemonObservabilitySnapshot {
   healthUrl: string
   metricsUrl: string | null
   error: string | null
+  diagnosticRepo: string | null
   health: DaemonHealthPayload | null
   metrics: DaemonMetricSummary | null
   metricsError: string | null
@@ -67,6 +68,9 @@ export interface StatusCommandOptions {
   healthPort?: number
   metricsPort?: number
   includeGitHubAudit?: boolean
+  fallbackRepo?: string
+  fallbackDaemonInstanceId?: string
+  ghRunner?: GhJsonRunner
 }
 
 interface MetricSample {
@@ -141,6 +145,14 @@ interface GitHubPrListItem extends GitHubIssueListItem {
   headRefName?: unknown
 }
 
+interface GitHubAuditInput {
+  repo: string
+  daemonInstanceId: string
+  runtime: {
+    activeLeaseDetails: DaemonHealthPayload['runtime']['activeLeaseDetails']
+  }
+}
+
 export async function collectDaemonObservability(
   options: StatusCommandOptions = {},
 ): Promise<DaemonObservabilitySnapshot> {
@@ -152,31 +164,19 @@ export async function collectDaemonObservability(
   try {
     const response = await requestLocalEndpoint(healthUrl)
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      return {
-        ok: false,
+      return buildUnreachableSnapshot(
         healthUrl,
-        metricsUrl: null,
-        error: `GET ${healthUrl} returned ${response.statusCode} ${response.statusText}`.trim(),
-        health: null,
-        metrics: null,
-        metricsError: null,
-        githubAudit: null,
-        warnings: [`daemon health endpoint is not reachable at ${healthUrl}`],
-      }
+        `GET ${healthUrl} returned ${response.statusCode} ${response.statusText}`.trim(),
+        options,
+      )
     }
     health = JSON.parse(response.body) as DaemonHealthPayload
   } catch (error) {
-    return {
-      ok: false,
+    return buildUnreachableSnapshot(
       healthUrl,
-      metricsUrl: null,
-      error: `GET ${healthUrl} failed: ${formatError(error)}`,
-      health: null,
-      metrics: null,
-      metricsError: null,
-      githubAudit: null,
-      warnings: [`daemon health endpoint is not reachable at ${healthUrl}`],
-    }
+      `GET ${healthUrl} failed: ${formatError(error)}`,
+      options,
+    )
   }
 
   const metricsHost = health.endpoints?.metrics.host ?? DEFAULT_HEALTH_SERVER_HOST
@@ -202,6 +202,7 @@ export async function collectDaemonObservability(
     healthUrl,
     metricsUrl,
     error: null,
+    diagnosticRepo: health.repo,
     health,
     metrics,
     metricsError,
@@ -209,16 +210,50 @@ export async function collectDaemonObservability(
     warnings: [],
   }
   if (options.includeGitHubAudit) {
-    snapshot.githubAudit = await collectGitHubLeaseAudit(health)
+    snapshot.githubAudit = await collectGitHubLeaseAudit(health, options.ghRunner)
   }
   snapshot.warnings = buildDoctorWarnings(snapshot)
   return snapshot
+}
+
+async function buildUnreachableSnapshot(
+  healthUrl: string,
+  error: string,
+  options: StatusCommandOptions,
+): Promise<DaemonObservabilitySnapshot> {
+  let githubAudit: GitHubLeaseAudit | null = null
+  if (options.includeGitHubAudit && options.fallbackRepo) {
+    githubAudit = await collectGitHubLeaseAudit({
+      repo: options.fallbackRepo,
+      daemonInstanceId: options.fallbackDaemonInstanceId ?? '',
+      runtime: {
+        activeLeaseDetails: [],
+      },
+    }, options.ghRunner)
+  }
+
+  return {
+    ok: false,
+    healthUrl,
+    metricsUrl: null,
+    error,
+    diagnosticRepo: options.fallbackRepo ?? null,
+    health: null,
+    metrics: null,
+    metricsError: null,
+    githubAudit,
+    warnings: [
+      `daemon health endpoint is not reachable at ${healthUrl}`,
+      ...(githubAudit?.warnings ?? []),
+    ],
+  }
 }
 
 export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): string {
   if (!snapshot.ok || !snapshot.health) {
     return [
       'daemon: unreachable',
+      ...(snapshot.diagnosticRepo ? [`repo: ${snapshot.diagnosticRepo}`] : []),
       `health: ${snapshot.healthUrl}`,
       `error: ${snapshot.error ?? 'unknown error'}`,
       'hint: start the daemon or pass the correct --health-host/--health-port.',
@@ -268,11 +303,26 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
 
 export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): string {
   if (!snapshot.ok || !snapshot.health) {
+    const gitHubAuditLines = snapshot.githubAudit === null
+      ? ['not available']
+      : !snapshot.githubAudit.ok
+        ? [`unavailable: ${snapshot.githubAudit.error ?? 'unknown error'}`]
+        : snapshot.githubAudit.checks.length === 0
+          ? ['none']
+          : snapshot.githubAudit.checks.map((check) => formatGitHubAuditLine(check))
+
     return [
       'Daemon Doctor',
       '',
       `health: unreachable (${snapshot.healthUrl})`,
       `error: ${snapshot.error ?? 'unknown error'}`,
+      ...(snapshot.diagnosticRepo ? ['', 'Config', `repo: ${snapshot.diagnosticRepo}`] : []),
+      '',
+      'GitHub Audit',
+      ...gitHubAuditLines,
+      '',
+      'Warnings',
+      ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
       '',
       'Next checks',
       '- confirm the daemon process is running',
@@ -534,7 +584,7 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
 }
 
 export async function collectGitHubLeaseAudit(
-  health: Pick<DaemonHealthPayload, 'repo' | 'runtime' | 'daemonInstanceId'>,
+  health: GitHubAuditInput,
   runner: GhJsonRunner = runGhJsonCommand,
 ): Promise<GitHubLeaseAudit> {
   const localChecks = await Promise.all(health.runtime.activeLeaseDetails.map(async (lease) => {
@@ -852,7 +902,7 @@ function evaluateGitHubLeaseAuditWarning(
 }
 
 async function collectRemoteGitHubLeaseChecks(
-  health: Pick<DaemonHealthPayload, 'repo' | 'runtime' | 'daemonInstanceId'>,
+  health: GitHubAuditInput,
   knownKeys: Set<string>,
   runner: GhJsonRunner,
 ): Promise<{ checks: GitHubLeaseAuditCheck[]; error: string | null }> {

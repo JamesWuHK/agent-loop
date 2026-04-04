@@ -45,11 +45,23 @@ async function main() {
   }
 
   if (args.status || args.doctor) {
+    let fallbackRepo: string | undefined
+    try {
+      fallbackRepo = loadConfig({
+        repo: args.repo as string | undefined,
+        pat: args.pat as string | undefined,
+        machineId: args['machine-id'] as string | undefined,
+      }).repo
+    } catch {
+      fallbackRepo = args.repo as string | undefined
+    }
+
     const snapshot = await collectDaemonObservability({
       healthHost: (args['health-host'] as string | undefined) ?? DEFAULT_HEALTH_SERVER_HOST,
       healthPort: args['health-port'] ? parseInt(args['health-port'] as string) : DEFAULT_HEALTH_SERVER_PORT,
       metricsPort,
       includeGitHubAudit: Boolean(args.doctor),
+      fallbackRepo,
     })
     console.log(args.doctor ? formatDoctorReport(snapshot) : formatStatusReport(snapshot))
     process.exit(snapshot.ok ? 0 : 1)

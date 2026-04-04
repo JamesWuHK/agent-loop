@@ -259,6 +259,7 @@ describe('status helpers', () => {
       healthUrl: 'http://127.0.0.1:9310/health',
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
+      diagnosticRepo: baseHealth.repo,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -284,6 +285,7 @@ describe('status helpers', () => {
       healthUrl: 'http://127.0.0.1:9310/health',
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
+      diagnosticRepo: baseHealth.repo,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -377,7 +379,6 @@ describe('status helpers', () => {
       daemonInstanceId: baseHealth.daemonInstanceId,
       repo: 'JamesWuHK/digital-employee',
       runtime: {
-        ...baseHealth.runtime,
         activeLeaseDetails: [
           baseHealth.runtime.activeLeaseDetails[0]!,
           {
@@ -420,9 +421,6 @@ describe('status helpers', () => {
       daemonInstanceId: baseHealth.daemonInstanceId,
       repo: 'JamesWuHK/digital-employee',
       runtime: {
-        ...baseHealth.runtime,
-        activeLeaseCount: 0,
-        oldestLeaseHeartbeatAgeSeconds: 0,
         activeLeaseDetails: [],
       },
     }, async (args) => {
@@ -531,6 +529,7 @@ describe('status helpers', () => {
       healthUrl: 'http://127.0.0.1:9310/health',
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
+      diagnosticRepo: baseHealth.repo,
       health: {
         ...baseHealth,
         runtime: {
@@ -548,6 +547,76 @@ describe('status helpers', () => {
 
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201 | daemon=daemon-remote-1')
     expect(report).toContain('pr-merge#120 | state=open | labels=agent:review-approved | ok | source=remote | comment=202 | daemon=daemon-remote-1')
+  })
+
+  test('collects remote GitHub lease diagnostics even when the local health endpoint is unreachable', async () => {
+    const snapshot = await collectDaemonObservability({
+      healthHost: '127.0.0.1',
+      healthPort: 1,
+      includeGitHubAudit: true,
+      fallbackRepo: 'JamesWuHK/digital-employee',
+      ghRunner: async (args) => {
+        if (args[0] === 'issue' && args[1] === 'list') {
+          return {
+            ok: true,
+            data: [
+              {
+                number: 91,
+                state: 'OPEN',
+                labels: [{ name: 'agent:working' }],
+              },
+            ],
+            error: null,
+          }
+        }
+
+        if (args[0] === 'pr' && args[1] === 'list') {
+          return {
+            ok: true,
+            data: [],
+            error: null,
+          }
+        }
+
+        if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/91/comments') {
+          return {
+            ok: true,
+            data: [
+              {
+                id: 201,
+                body: buildManagedLeaseComment(buildRemoteLease()),
+                created_at: '2099-04-05T08:00:00.000Z',
+                updated_at: '2099-04-05T08:00:30.000Z',
+              },
+            ],
+            error: null,
+          }
+        }
+
+        return {
+          ok: false,
+          data: null,
+          error: `unexpected gh invocation: ${args.join(' ')}`,
+        }
+      },
+    })
+
+    expect(snapshot.ok).toBe(false)
+    expect(snapshot.health).toBeNull()
+    expect(snapshot.diagnosticRepo).toBe('JamesWuHK/digital-employee')
+    expect(snapshot.githubAudit?.checks).toContainEqual(expect.objectContaining({
+      scope: 'issue-process',
+      targetNumber: 91,
+      source: 'remote',
+      commentId: 201,
+    }))
+    expect(snapshot.warnings).toContain('daemon health endpoint is not reachable at http://127.0.0.1:1/health')
+
+    const report = formatDoctorReport(snapshot)
+    expect(report).toContain('health: unreachable (http://127.0.0.1:1/health)')
+    expect(report).toContain('repo: JamesWuHK/digital-employee')
+    expect(report).toContain('GitHub Audit')
+    expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {
