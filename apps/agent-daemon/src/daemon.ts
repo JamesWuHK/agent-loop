@@ -293,7 +293,12 @@ export class AgentDaemon {
     setDaemonUptime((Date.now() - this.startedAt) / 1000)
 
     // Check concurrency limit
-    const activeTaskCount = this.activeWorktrees.size + this.activePrReviews.size
+    const activeTaskCount = getEffectiveActiveTaskCount({
+      activeWorktreeCount: this.activeWorktrees.size,
+      hasInFlightProcess: this._inFlightProcess !== null,
+      activePrReviewCount: this.activePrReviews.size,
+      hasInFlightPrReview: this._inFlightPrReview !== null,
+    })
     if (activeTaskCount >= this.config.concurrency) {
       this.logger.log(`[daemon] at concurrency limit (${activeTaskCount}/${this.config.concurrency}), skipping`)
       recordPoll('skipped_concurrency')
@@ -1177,6 +1182,18 @@ function shouldReviewManagedPr(pr: ManagedPullRequest): boolean {
   if (labels.has(PR_REVIEW_LABELS.APPROVED)) return false
   if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) return false
   return true
+}
+
+export function getEffectiveActiveTaskCount(input: {
+  activeWorktreeCount: number
+  hasInFlightProcess: boolean
+  activePrReviewCount: number
+  hasInFlightPrReview: boolean
+}): number {
+  const issueTaskCount = Math.max(input.activeWorktreeCount, input.hasInFlightProcess ? 1 : 0)
+  const prTaskCount = Math.max(input.activePrReviewCount, input.hasInFlightPrReview ? 1 : 0)
+
+  return issueTaskCount + prTaskCount
 }
 
 export function shouldResumeManagedIssue(

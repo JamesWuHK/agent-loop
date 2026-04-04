@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
   isMergeabilityFailure,
   rebaseManagedBranchOntoDefault,
@@ -11,6 +12,24 @@ import {
 } from './daemon'
 
 describe('daemon merge recovery helpers', () => {
+  test('counts in-flight issue work before a worktree is registered', () => {
+    expect(getEffectiveActiveTaskCount({
+      activeWorktreeCount: 0,
+      hasInFlightProcess: true,
+      activePrReviewCount: 0,
+      hasInFlightPrReview: false,
+    })).toBe(1)
+  })
+
+  test('does not double-count work that already has an active slot', () => {
+    expect(getEffectiveActiveTaskCount({
+      activeWorktreeCount: 1,
+      hasInFlightProcess: true,
+      activePrReviewCount: 1,
+      hasInFlightPrReview: true,
+    })).toBe(2)
+  })
+
   test('resumes working issues with a local worktree after daemon restart', () => {
     expect(shouldResumeManagedIssue(
       { state: 'working' },
