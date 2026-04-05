@@ -64,6 +64,7 @@ export function buildConfig(
     env?: NodeJS.ProcessEnv
     repoGuess?: string | null
     homeDir?: string
+    ghAuthToken?: string | null
   } = {},
 ): AgentConfig {
   const fileConfig = options.fileConfig ?? {}
@@ -96,16 +97,16 @@ export function buildConfig(
     options.repoGuess ??
     guessRepoFromGit()
 
-  const pat =
-    args.pat ??
-    env.GITHUB_TOKEN ??
-    env.GH_TOKEN ??
-    fileConfig.pat ??
-    ''
+  const pat = resolveGitHubToken({
+    cliPat: args.pat,
+    env,
+    filePat: fileConfig.pat,
+    ghAuthToken: options.ghAuthToken,
+  })
 
   if (!pat) {
     throw new ConfigError(
-      'No GitHub PAT found. Set GITHUB_TOKEN env var or configure pat in ~/.agent-loop/config.json',
+      'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
     )
   }
 
@@ -240,6 +241,44 @@ function loadJsonFile<T extends object>(path: string): T | {} {
   }
 }
 
+function resolveGitHubToken(input: {
+  cliPat?: string
+  env: NodeJS.ProcessEnv
+  filePat?: string
+  ghAuthToken?: string | null
+}): string {
+  const explicitGhAuthToken = input.ghAuthToken === undefined
+    ? readGhAuthToken()
+    : input.ghAuthToken
+
+  const candidates = [
+    input.cliPat,
+    input.env.GITHUB_TOKEN,
+    input.env.GH_TOKEN,
+    input.filePat,
+    explicitGhAuthToken,
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = normalizeNonEmptyString(candidate)
+    if (normalized) return normalized
+  }
+
+  return ''
+}
+
+function readGhAuthToken(): string | null {
+  try {
+    const token = execFileSync('gh', ['auth', 'token'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return normalizeNonEmptyString(token)
+  } catch {
+    return null
+  }
+}
+
 function mergePromptGuidance(
   globalGuidance?: ProjectPromptGuidanceOverrides,
   repoGuidance?: ProjectPromptGuidanceOverrides,
@@ -305,6 +344,12 @@ function normalizeOptionalPositiveInteger(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   const integer = Math.trunc(value)
   return integer >= 1 ? integer : null
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
 }
 
 export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }

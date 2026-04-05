@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentConfig } from '@agent/shared'
-import { buildConfig } from './config'
+import { buildConfig, ConfigError } from './config'
 
 const baseFileConfig: Partial<AgentConfig> = {
   machineId: 'machine-from-home',
@@ -231,5 +231,41 @@ describe('buildConfig', () => {
       workerIdleTimeoutMs: 90_000,
       leaseAdoptionBackoffMs: 12_000,
     })
+  })
+
+  test('falls back to gh auth token when no PAT is configured elsewhere', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          pat: undefined,
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+        ghAuthToken: 'gho-from-gh-cli',
+      },
+    )
+
+    expect(config.pat).toBe('gho-from-gh-cli')
+  })
+
+  test('raises a config error when no PAT or gh auth token is available', () => {
+    expect(() => buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          pat: undefined,
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+        ghAuthToken: null,
+      },
+    )).toThrow(new ConfigError(
+      'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
+    ))
   })
 })

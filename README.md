@@ -35,6 +35,7 @@ bun install
 
 # Configure — daemon 将消费本仓库的 Issues
 agent-loop --repo JamesWuHK/agent-loop --pat ghp_xxx --machine-id my-dev-machine
+# 或先 gh auth login，daemon 会自动复用 gh auth token
 
 # Run (持续轮询)
 agent-loop
@@ -62,7 +63,7 @@ cd apps/agent-daemon
 bun run issues:audit -- --repo JamesWuHK/agent-loop
 ```
 
-这条命令会复用 daemon 的同一套认证配置，所以也需要你已经配置好 `~/.agent-loop/config.json`，或者先提供 `GH_TOKEN` / `GITHUB_TOKEN`。它只读取当前 open managed issues，输出 `state`、`claimable`、`blockedBy`、`errors` 等信息，帮助你判断是依赖未满足、contract 不完整，还是 ready 池本身为空。它不会自动修改 issue label、assignee 或 comment。
+这条命令会复用 daemon 的同一套认证配置，所以也需要你已经配置好 `~/.agent-loop/config.json`、提供 `GH_TOKEN` / `GITHUB_TOKEN`，或先执行过 `gh auth login`。它只读取当前 open managed issues，输出 `state`、`claimable`、`blockedBy`、`errors` 等信息，帮助你判断是依赖未满足、contract 不完整，还是 ready 池本身为空。它不会自动修改 issue label、assignee 或 comment。
 
 ```
 JamesWuHK/agent-loop
@@ -132,6 +133,8 @@ agent-loop/
 }
 ```
 
+如果这里没有配置 `pat`，daemon 也会尝试复用本机 `gh auth login` 的登录态，相当于回退到 `gh auth token`。
+
 当前 git 仓库也可以提交一份项目级配置：`./.agent-loop/project.json`。它适合存放“这个产品本身应该如何被 agent-loop 理解”的默认值，例如项目 profile、仓库级 prompt guidance、默认分支和推荐 agent。机器相关或带密钥的信息仍然只放在 `~/.agent-loop/config.json`。
 
 ```json
@@ -181,7 +184,7 @@ agent-loop/
 | Flag | Description |
 |------|-------------|
 | `--repo` | GitHub repo (owner/repo) |
-| `--pat` | GitHub PAT (or set `GITHUB_TOKEN`) |
+| `--pat` | GitHub PAT；也可设置 `GITHUB_TOKEN` / `GH_TOKEN`，或复用 `gh auth login` |
 | `--concurrency N` | Max concurrent agent tasks |
 | `--poll-interval MS` | Poll interval (default: 60000ms) |
 | `--machine-id` | Override machine ID |
