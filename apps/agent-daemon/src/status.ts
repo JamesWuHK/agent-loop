@@ -10,11 +10,13 @@ import {
   DEFAULT_HEALTH_SERVER_HOST,
   DEFAULT_HEALTH_SERVER_PORT,
   HEALTH_PATH,
+  getFailedIssueResumeBlock,
 } from './daemon'
 import {
   METRICS_PATH,
   METRICS_PORT_DEFAULT,
 } from './metrics'
+import { canResumeAutomatedPrReview } from './pr-reviewer'
 
 const REVIEW_OUTCOME_ORDER = ['approved', 'rejected', 'invalid_output', 'execution_failed'] as const
 const REVIEW_STAGE_ORDER = ['initial', 'post_fix', 'merge_refresh'] as const
@@ -29,6 +31,7 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
   'retry_merge_failed',
 ] as const
 const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
+const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
 
 export interface DaemonHealthPayload extends DaemonStatus {
   status: 'running' | 'stopped'
@@ -1000,6 +1003,7 @@ async function collectRemoteGitHubLeaseChecks(
   }
 
   const checks: GitHubLeaseAuditCheck[] = []
+  const prCommentsByNumber = new Map<number, IssueComment[]>()
   const openIssues = normalizeGitHubIssueList(issueListResult.data)
     .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
   const openPrs = normalizeGitHubPrList(prListResult.data)
@@ -1040,6 +1044,7 @@ async function collectRemoteGitHubLeaseChecks(
     }
     if (!commentResult.comments) continue
 
+    prCommentsByNumber.set(pr.number, commentResult.comments)
     for (const scope of ['pr-review', 'pr-merge'] as const) {
       const key = buildLeaseAuditKey(scope, pr.number)
       if (knownKeys.has(key)) continue
@@ -1054,6 +1059,8 @@ async function collectRemoteGitHubLeaseChecks(
       ))
     }
   }
+
+  checks.push(...collectRemoteBlockedIssueResumeChecks(openIssues, openPrs, prCommentsByNumber))
 
   return {
     checks,
@@ -1206,6 +1213,75 @@ function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): s
       .map((label) => typeof label?.name === 'string' ? label.name : null)
       .filter((label): label is string => label !== null)
     : []
+}
+
+function collectRemoteBlockedIssueResumeChecks(
+  issues: Array<{ number: number; state: string; labels: string[] }>,
+  prs: Array<{ number: number; state: string; labels: string[]; headRefName: string }>,
+  prCommentsByNumber: Map<number, IssueComment[]>,
+): GitHubLeaseAuditCheck[] {
+  const checks: GitHubLeaseAuditCheck[] = []
+  const prsByIssueNumber = new Map<number, Array<{ number: number; state: string; labels: string[]; headRefName: string }>>()
+
+  for (const pr of prs) {
+    const issueNumber = parseIssueNumberFromManagedBranch(pr.headRefName)
+    if (issueNumber === null) continue
+    prsByIssueNumber.set(issueNumber, [...(prsByIssueNumber.get(issueNumber) ?? []), pr])
+  }
+
+  for (const issue of issues) {
+    if (inferIssueStateFromLabels(issue.labels) !== 'failed') continue
+    const linkedPrs = prsByIssueNumber.get(issue.number) ?? []
+    if (linkedPrs.length === 0) continue
+
+    let firstBlocked: { prNumber: number; reason: string } | null = null
+    let hasResumableLinkedPr = false
+
+    for (const pr of linkedPrs) {
+      const canResumeHumanNeededReview = new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+        ? canResumeAutomatedPrReview(
+            prCommentsByNumber.get(pr.number) ?? [],
+            GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          )
+        : false
+      const blocked = getFailedIssueResumeBlock({
+        number: pr.number,
+        labels: pr.labels,
+      }, canResumeHumanNeededReview)
+
+      if (blocked === null) {
+        hasResumableLinkedPr = true
+        break
+      }
+
+      if (firstBlocked === null) {
+        firstBlocked = {
+          prNumber: pr.number,
+          reason: blocked.reason,
+        }
+      }
+    }
+
+    if (hasResumableLinkedPr || firstBlocked === null) continue
+
+    checks.push({
+      scope: 'issue-process',
+      targetNumber: issue.number,
+      state: issue.state,
+      labels: issue.labels,
+      warning: `issue-process#${issue.number} is blocked by linked PR #${firstBlocked.prNumber}: ${firstBlocked.reason}`,
+      source: 'remote',
+    })
+  }
+
+  return checks
+}
+
+function parseIssueNumberFromManagedBranch(headRefName: string): number | null {
+  const match = headRefName.match(/^agent\/(\d+)(?:\/|$)/)
+  if (!match) return null
+  const parsed = Number.parseInt(match[1] ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function mapIssueComments(data: unknown): IssueComment[] {

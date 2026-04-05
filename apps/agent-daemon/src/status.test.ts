@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { buildManagedLeaseComment, type DaemonStatus, type ManagedLease } from '@agent/shared'
+import { buildPrReviewComment } from './pr-reviewer'
 import {
   collectDaemonObservability,
   collectGitHubLeaseAudit,
@@ -567,6 +568,102 @@ describe('status helpers', () => {
     expect(report).toContain('pr-merge#120 | state=open | labels=agent:review-approved | ok | source=remote | comment=202 | daemon=daemon-remote-1')
   })
 
+  test('detects failed issues blocked by terminal human-needed linked PRs from GitHub state alone', async () => {
+    const blockedComment = buildPrReviewComment(110, {
+      approved: false,
+      canMerge: false,
+      reason: 'Selection state still breaks the issue contract.',
+      findings: [
+        {
+          severity: 'high',
+          file: 'apps/desktop/src/pages/MainPage.tsx',
+          summary: 'selection mode regressed the required session list behavior',
+          mustFix: ['restore the issue-scoped session list semantics'],
+          mustNotDo: ['do not expand scope beyond issue #91'],
+          validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+          scopeRationale: 'issue #91 only covers existing session summary and switching',
+        },
+      ],
+    }, 3, 'human-needed')
+
+    const audit = await collectGitHubLeaseAudit({
+      daemonInstanceId: baseHealth.daemonInstanceId,
+      repo: 'JamesWuHK/digital-employee',
+      runtime: {
+        activeLeaseDetails: [],
+      },
+    }, async (args) => {
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 91,
+              state: 'OPEN',
+              labels: [{ name: 'agent:failed' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 110,
+              state: 'OPEN',
+              headRefName: 'agent/91/codex-dev',
+              labels: [{ name: 'agent:review-failed' }, { name: 'agent:human-needed' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/91/comments') {
+        return {
+          ok: true,
+          data: [],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/110/comments') {
+        return {
+          ok: true,
+          data: [
+            {
+              id: 301,
+              body: blockedComment,
+              created_at: '2099-04-05T08:02:00.000Z',
+              updated_at: '2099-04-05T08:02:30.000Z',
+            },
+          ],
+          error: null,
+        }
+      }
+
+      return {
+        ok: false,
+        data: null,
+        error: `unexpected gh invocation: ${args.join(' ')}`,
+      }
+    })
+
+    expect(audit.ok).toBe(true)
+    expect(audit.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(audit.checks).toContainEqual(expect.objectContaining({
+      scope: 'issue-process',
+      targetNumber: 91,
+      state: 'open',
+      labels: ['agent:failed'],
+      source: 'remote',
+      warning: 'issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+    }))
+  })
+
   test('collects remote GitHub lease diagnostics even when the local health endpoint is unreachable', async () => {
     const snapshot = await collectDaemonObservability({
       healthHost: '127.0.0.1',
@@ -635,6 +732,100 @@ describe('status helpers', () => {
     expect(report).toContain('repo: JamesWuHK/digital-employee')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
+  })
+
+  test('offline doctor surfaces blocked failed issue resumes from GitHub state', async () => {
+    const blockedComment = buildPrReviewComment(110, {
+      approved: false,
+      canMerge: false,
+      reason: 'Selection state still breaks the issue contract.',
+      findings: [
+        {
+          severity: 'high',
+          file: 'apps/desktop/src/pages/MainPage.tsx',
+          summary: 'selection mode regressed the required session list behavior',
+          mustFix: ['restore the issue-scoped session list semantics'],
+          mustNotDo: ['do not expand scope beyond issue #91'],
+          validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+          scopeRationale: 'issue #91 only covers existing session summary and switching',
+        },
+      ],
+    }, 3, 'human-needed')
+
+    const snapshot = await collectDaemonObservability({
+      healthHost: '127.0.0.1',
+      healthPort: 1,
+      includeGitHubAudit: true,
+      fallbackRepo: 'JamesWuHK/digital-employee',
+      ghRunner: async (args) => {
+        if (args[0] === 'issue' && args[1] === 'list') {
+          return {
+            ok: true,
+            data: [
+              {
+                number: 91,
+                state: 'OPEN',
+                labels: [{ name: 'agent:failed' }],
+              },
+            ],
+            error: null,
+          }
+        }
+
+        if (args[0] === 'pr' && args[1] === 'list') {
+          return {
+            ok: true,
+            data: [
+              {
+                number: 110,
+                state: 'OPEN',
+                headRefName: 'agent/91/codex-dev',
+                labels: [{ name: 'agent:review-failed' }, { name: 'agent:human-needed' }],
+              },
+            ],
+            error: null,
+          }
+        }
+
+        if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/91/comments') {
+          return {
+            ok: true,
+            data: [],
+            error: null,
+          }
+        }
+
+        if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/110/comments') {
+          return {
+            ok: true,
+            data: [
+              {
+                id: 301,
+                body: blockedComment,
+                created_at: '2099-04-05T08:02:00.000Z',
+                updated_at: '2099-04-05T08:02:30.000Z',
+              },
+            ],
+            error: null,
+          }
+        }
+
+        return {
+          ok: false,
+          data: null,
+          error: `unexpected gh invocation: ${args.join(' ')}`,
+        }
+      },
+    })
+
+    expect(snapshot.ok).toBe(false)
+    expect(snapshot.githubAudit?.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(snapshot.warnings).toContain('daemon health endpoint is not reachable at http://127.0.0.1:1/health')
+    expect(snapshot.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+
+    const report = formatDoctorReport(snapshot)
+    expect(report).toContain('issue-process#91 | state=open | labels=agent:failed | warning=issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path | source=remote')
+    expect(report).toContain('- issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {
