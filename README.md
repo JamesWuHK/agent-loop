@@ -46,6 +46,9 @@ agent-loop --daemonize --health-port 9311 --metrics-port 9091
 # Re-open a fresh Codex/terminal session and rediscover local daemons
 agent-loop --runtimes
 
+# Install a macOS launchd service so the daemon comes back after login/reboot
+agent-loop --launchd-install --health-port 9311 --metrics-port 9091
+
 # 或一次性验证模式
 agent-loop --once
 ```
@@ -203,6 +206,23 @@ agent-loop --stop
 agent-loop --stop --health-port 9311
 ```
 
+如果希望 daemon 在机器重启、用户重新登录之后也能自动恢复，macOS 上可以安装 `launchd` 服务：
+
+```bash
+cd /path/to/product-repo
+
+# 安装并立即启动 launchd service
+agent-loop --launchd-install --health-port 9311 --metrics-port 9091
+
+# 查看 launchd service
+agent-loop --launchd-status --health-port 9311
+
+# 卸载 launchd service
+agent-loop --launchd-uninstall --health-port 9311
+```
+
+`launchd` 模式会把 plist 写到 `~/Library/LaunchAgents/`，并继续复用 `~/.agent-loop/runtime/` 下的 runtime record 和日志，所以新打开的 Codex/终端仍可以用 `agent-loop --runtimes`、`--status`、`--doctor` 接回控制面。
+
 ## CLI Options
 
 | Flag | Description |
@@ -215,6 +235,9 @@ agent-loop --stop --health-port 9311
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
 | `--daemonize` | Start the daemon detached from the current terminal |
 | `--runtimes` | List local background daemon runtime records found on this machine |
+| `--launchd-install` | Install and start a macOS launchd service for this daemon |
+| `--launchd-uninstall` | Remove the macOS launchd service matching repo/machine-id/health-port |
+| `--launchd-status` | Inspect the macOS launchd service matching repo/machine-id/health-port |
 | `--stop` | Stop the detached daemon matching repo/machine-id/health-port |
 | `--status` | Query the local daemon health + metrics summary and exit |
 | `--doctor` | Query the local daemon and print a detailed diagnostic report |
@@ -285,6 +308,7 @@ agent-loop --doctor
 - `~/.agent-loop/runtime/*.log`：daemon 标准输出与错误日志
 - 从目标 repo 根目录执行 `agent-loop --status` / `agent-loop --doctor` / `agent-loop --stop` 时，如果本机只有一个匹配的 runtime record，CLI 会自动发现对应 health/metrics 端口，不必手动再记一次端口号
 - `agent-loop --runtimes` 可以让新打开的 Codex/终端会话快速找回当前机器上正在运行的 daemon 实例
+- `launchd` service 会把 plist 写到 `~/Library/LaunchAgents/`，并沿用同一套 runtime record/log 路径，方便和 detached 模式统一排障
 
 ## Key Design Decisions
 

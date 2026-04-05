@@ -1,9 +1,20 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 
 const RUNTIME_DIR_NAME = '.agent-loop/runtime'
+const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
+  '--daemonize',
+  '--runtimes',
+  '--stop',
+  '--status',
+  '--doctor',
+  '--once',
+  '--launchd-install',
+  '--launchd-uninstall',
+  '--launchd-status',
+])
 
 export interface BackgroundRuntimeIdentity {
   repo: string
@@ -54,7 +65,7 @@ export function sanitizeDaemonBackgroundArgs(argv: string[]): string[] {
   const sanitized: string[] = []
 
   for (const arg of argv) {
-    if (arg === '--daemonize' || arg === '--stop') continue
+    if (MANAGED_DAEMON_CONTROL_FLAGS.has(arg)) continue
     sanitized.push(arg)
   }
 
@@ -133,6 +144,32 @@ export function removeBackgroundRuntimeRecord(path: string): void {
   rmSync(path, { force: true })
 }
 
+export function writeBackgroundRuntimeRecord(
+  path: string,
+  record: BackgroundRuntimeRecord,
+): void {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(record, null, 2))
+}
+
+export function buildCurrentProcessRuntimeRecord(input: {
+  identity: BackgroundRuntimeIdentity
+  metricsPort: number
+  cwd: string
+  logPath: string
+  command?: string[]
+}): BackgroundRuntimeRecord {
+  return {
+    ...input.identity,
+    pid: process.pid,
+    metricsPort: input.metricsPort,
+    cwd: input.cwd,
+    startedAt: new Date().toISOString(),
+    command: input.command ?? [process.execPath, ...process.argv.slice(1)],
+    logPath: input.logPath,
+  }
+}
+
 export function stopBackgroundRuntime(recordPath: string): {
   stopped: boolean
   message: string
@@ -198,15 +235,16 @@ export function launchBackgroundRuntime(input: {
   child.unref()
 
   const record: BackgroundRuntimeRecord = {
-    ...input.identity,
+    ...buildCurrentProcessRuntimeRecord({
+      identity: input.identity,
+      metricsPort: input.metricsPort,
+      cwd: input.cwd,
+      logPath: paths.logPath,
+      command,
+    }),
     pid: child.pid!,
-    metricsPort: input.metricsPort,
-    cwd: input.cwd,
-    startedAt: new Date().toISOString(),
-    command,
-    logPath: paths.logPath,
   }
-  writeFileSync(paths.recordPath, JSON.stringify(record, null, 2))
+  writeBackgroundRuntimeRecord(paths.recordPath, record)
   return record
 }
 
