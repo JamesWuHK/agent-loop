@@ -718,8 +718,8 @@ describe('status helpers', () => {
             {
               id: 301,
               body: blockedComment,
-              created_at: '2099-04-05T08:02:00.000Z',
-              updated_at: '2099-04-05T08:02:30.000Z',
+              created_at: '2000-04-05T08:02:00.000Z',
+              updated_at: '2000-04-05T08:02:30.000Z',
             },
           ],
           error: null,
@@ -735,6 +735,7 @@ describe('status helpers', () => {
 
     expect(audit.ok).toBe(true)
     expect(audit.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(audit.warnings).toContain('issue-process#91 has been blocked on GitHub for over 300s')
     expect(audit.checks).toContainEqual(expect.objectContaining({
       scope: 'issue-process',
       targetNumber: 91,
@@ -743,6 +744,8 @@ describe('status helpers', () => {
       source: 'remote',
       warning: 'issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
     }))
+    const blockedCheck = audit.checks.find((check) => check.scope === 'issue-process' && check.targetNumber === 91)
+    expect(blockedCheck?.blockedAgeSeconds).toBeGreaterThan(300)
   })
 
   test('collects remote GitHub lease diagnostics even when the local health endpoint is unreachable', async () => {
@@ -883,8 +886,8 @@ describe('status helpers', () => {
               {
                 id: 301,
                 body: blockedComment,
-                created_at: '2099-04-05T08:02:00.000Z',
-                updated_at: '2099-04-05T08:02:30.000Z',
+                created_at: '2000-04-05T08:02:00.000Z',
+                updated_at: '2000-04-05T08:02:30.000Z',
               },
             ],
             error: null,
@@ -901,12 +904,15 @@ describe('status helpers', () => {
 
     expect(snapshot.ok).toBe(false)
     expect(snapshot.githubAudit?.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(snapshot.githubAudit?.warnings).toContain('issue-process#91 has been blocked on GitHub for over 300s')
     expect(snapshot.warnings).toContain('daemon health endpoint is not reachable at http://127.0.0.1:1/health')
     expect(snapshot.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(snapshot.warnings).toContain('issue-process#91 has been blocked on GitHub for over 300s')
 
     const report = formatDoctorReport(snapshot)
-    expect(report).toContain('issue-process#91 | state=open | labels=agent:failed | warning=issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path | source=remote')
+    expect(report).toContain('issue-process#91 | state=open | labels=agent:failed | warning=issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path | blocked_age=')
     expect(report).toContain('- issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+    expect(report).toContain('- issue-process#91 has been blocked on GitHub for over 300s')
   })
 
   test('collects local observability without being hijacked by proxy env vars', async () => {

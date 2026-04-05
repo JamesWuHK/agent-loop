@@ -97,6 +97,7 @@ export interface GitHubLeaseAuditCheck {
   state: string
   labels: string[]
   warning: string | null
+  blockedAgeSeconds?: number | null
   source?: 'local' | 'remote'
   commentId?: number | null
   daemonInstanceId?: string | null
@@ -697,6 +698,13 @@ export async function collectGitHubLeaseAudit(
     checks,
     warnings: [
       ...checks.flatMap((check) => check.warning ? [check.warning] : []),
+      ...checks.flatMap((check) => {
+        if (check.blockedAgeSeconds === null || check.blockedAgeSeconds === undefined) return []
+        if (check.blockedAgeSeconds < BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS) return []
+        return [
+          `${formatLeaseIdentity(check.scope, check.targetNumber)} has been blocked on GitHub for over ${formatNullableSeconds(BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS)}`,
+        ]
+      }),
       ...(remote.error ? [`GitHub audit unavailable: ${remote.error}`] : []),
     ],
   }
@@ -852,6 +860,9 @@ function formatGitHubAuditLine(check: GitHubLeaseAuditCheck): string {
   const status = check.warning ? `warning=${check.warning}` : 'ok'
   const labels = check.labels.length > 0 ? check.labels.join(',') : 'none'
   const extras = [
+    check.blockedAgeSeconds !== null && check.blockedAgeSeconds !== undefined
+      ? `blocked_age=${formatNullableSeconds(check.blockedAgeSeconds)}`
+      : null,
     check.source ? `source=${check.source}` : null,
     check.commentId !== null && check.commentId !== undefined ? `comment=${check.commentId}` : null,
     check.daemonInstanceId ? `daemon=${check.daemonInstanceId}` : null,
@@ -1280,13 +1291,14 @@ function collectRemoteBlockedIssueResumeChecks(
     const linkedPrs = prsByIssueNumber.get(issue.number) ?? []
     if (linkedPrs.length === 0) continue
 
-    let firstBlocked: { prNumber: number; reason: string } | null = null
+    let firstBlocked: { prNumber: number; reason: string; blockedAgeSeconds: number | null } | null = null
     let hasResumableLinkedPr = false
 
     for (const pr of linkedPrs) {
+      const prComments = prCommentsByNumber.get(pr.number) ?? []
       const canResumeHumanNeededReview = new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
         ? canResumeAutomatedPrReview(
-            prCommentsByNumber.get(pr.number) ?? [],
+            prComments,
             GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
           )
         : false
@@ -1300,10 +1312,15 @@ function collectRemoteBlockedIssueResumeChecks(
         break
       }
 
-      if (firstBlocked === null) {
+      const blockedAgeSeconds = getLatestAutomatedPrReviewCommentAgeSeconds(prComments)
+      if (
+        firstBlocked === null
+        || (blockedAgeSeconds !== null && (firstBlocked.blockedAgeSeconds === null || blockedAgeSeconds > firstBlocked.blockedAgeSeconds))
+      ) {
         firstBlocked = {
           prNumber: pr.number,
           reason: blocked.reason,
+          blockedAgeSeconds,
         }
       }
     }
@@ -1316,11 +1333,22 @@ function collectRemoteBlockedIssueResumeChecks(
       state: issue.state,
       labels: issue.labels,
       warning: `issue-process#${issue.number} is blocked by linked PR #${firstBlocked.prNumber}: ${firstBlocked.reason}`,
+      blockedAgeSeconds: firstBlocked.blockedAgeSeconds,
       source: 'remote',
     })
   }
 
   return checks
+}
+
+function getLatestAutomatedPrReviewCommentAgeSeconds(comments: IssueComment[]): number | null {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const comment = comments[index]
+    if (!comment || !comment.body.includes('<!-- agent-loop:pr-review ')) continue
+    return parseAgeSeconds(comment.updatedAt || comment.createdAt)
+  }
+
+  return null
 }
 
 function parseIssueNumberFromManagedBranch(headRefName: string): number | null {
