@@ -1,8 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import {
   applyDependencyClaimability,
+  buildManagedLeaseComment,
   buildGhEnv,
+  canDaemonAdoptManagedLease,
   deriveIssueStateFromRaw,
+  extractManagedLeaseComment,
+  getActiveManagedLease,
+  getLatestManagedLease,
+  isManagedLeaseExpired,
+  parseManagedLeaseComments,
   parseGhApiErrorMessage,
   parseMergePrResponse,
   shouldClearIssueAssigneesForStateLabel,
@@ -129,5 +136,91 @@ describe('applyDependencyClaimability', () => {
 
     expect(issue?.isClaimable).toBe(true)
     expect(issue?.claimBlockedBy).toEqual([])
+  })
+})
+
+describe('managed lease helpers', () => {
+  const activeLease = {
+    leaseId: 'lease-1',
+    scope: 'issue-process' as const,
+    issueNumber: 77,
+    machineId: 'machine-a',
+    daemonInstanceId: 'daemon-a',
+    branch: 'agent/77/machine-a',
+    worktreeId: 'issue-77-machine-a',
+    phase: 'planning',
+    startedAt: '2026-04-05T08:00:00.000Z',
+    lastHeartbeatAt: '2026-04-05T08:00:30.000Z',
+    expiresAt: '2026-04-05T08:01:00.000Z',
+    attempt: 1,
+    lastProgressAt: '2026-04-05T08:00:30.000Z',
+    lastProgressKind: 'phase' as const,
+    status: 'active' as const,
+  }
+
+  test('round-trips managed lease comments', () => {
+    const body = buildManagedLeaseComment(activeLease)
+
+    expect(extractManagedLeaseComment(body)).toEqual(activeLease)
+  })
+
+  test('parses scoped lease comments and ignores invalid comments', () => {
+    const comments = parseManagedLeaseComments([
+      {
+        commentId: 10,
+        body: buildManagedLeaseComment(activeLease),
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:00:30.000Z',
+      },
+      {
+        commentId: 11,
+        body: 'not a lease',
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:00:00.000Z',
+      },
+    ], 'issue-process')
+
+    expect(comments).toHaveLength(1)
+    expect(comments[0]?.lease.leaseId).toBe('lease-1')
+  })
+
+  test('picks the earliest unexpired active lease as canonical', () => {
+    const comments = [
+      {
+        commentId: 12,
+        body: buildManagedLeaseComment({
+          ...activeLease,
+          leaseId: 'lease-2',
+          daemonInstanceId: 'daemon-b',
+          startedAt: '2026-04-05T08:00:05.000Z',
+        }),
+        createdAt: '2026-04-05T08:00:05.000Z',
+        updatedAt: '2026-04-05T08:00:05.000Z',
+      },
+      {
+        commentId: 11,
+        body: buildManagedLeaseComment(activeLease),
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:00:30.000Z',
+      },
+    ]
+
+    expect(getActiveManagedLease(comments, 'issue-process', Date.parse('2026-04-05T08:00:45.000Z'))?.commentId).toBe(11)
+    expect(getLatestManagedLease(comments, 'issue-process')?.commentId).toBe(11)
+  })
+
+  test('treats expired leases as adoptable by other daemons', () => {
+    const expired = {
+      commentId: 11,
+      body: buildManagedLeaseComment(activeLease),
+      createdAt: '2026-04-05T08:00:00.000Z',
+      updatedAt: '2026-04-05T08:00:30.000Z',
+      lease: activeLease,
+    }
+
+    expect(isManagedLeaseExpired(activeLease, Date.parse('2026-04-05T08:01:01.000Z'))).toBe(true)
+    expect(canDaemonAdoptManagedLease(expired, 'daemon-b', Date.parse('2026-04-05T08:01:01.000Z'))).toBe(true)
+    expect(canDaemonAdoptManagedLease(expired, 'daemon-b', Date.parse('2026-04-05T08:00:45.000Z'))).toBe(false)
+    expect(canDaemonAdoptManagedLease(expired, 'daemon-a', Date.parse('2026-04-05T08:00:45.000Z'))).toBe(true)
   })
 })

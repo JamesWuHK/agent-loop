@@ -4,15 +4,39 @@ import {
   recordClaim,
   recordIssueProcessed,
   recordAgentExecution,
+  recordPrReviewOutcome,
+  recordReviewAutoFixOutcome,
+  recordPrMergeRecoveryOutcome,
+  recordLeaseConflict,
+  recordRecoveryAction,
+  recordTransientLoopError,
+  recordWorkerIdleTimeout,
   recordPrCreated,
   setActiveWorktrees,
+  setActivePrReviews,
+  setActiveLeases,
+  setBlockedIssueResumes,
+  setBlockedIssueResumeAgeSeconds,
+  setBlockedIssueResumeEscalations,
+  setBlockedIssueResumeEscalationAgeSeconds,
+  setLastTransientLoopErrorAgeSeconds,
+  setNextPollDelaySeconds,
+  setInFlightIssueProcesses,
+  setInFlightPrReviews,
+  setLeaseHeartbeatAgeSeconds,
+  setStartupRecoveryPending,
+  setStalledWorkers,
+  setEffectiveActiveTasks,
+  setProjectInfo,
   setConcurrencyLimit,
+  setConcurrencyPolicy,
   setDaemonUptime,
   recordPollDuration,
   recordIssueProcessingDuration,
   getMetrics,
   getContentType,
   registry,
+  startMetricsServer,
 } from './metrics'
 
 describe('metrics', () => {
@@ -101,6 +125,65 @@ describe('metrics', () => {
     })
   })
 
+  describe('review and merge metrics', () => {
+    test('increments pr_reviews_total counter with stage and outcome labels', async () => {
+      recordPrReviewOutcome('initial', 'approved')
+      recordPrReviewOutcome('post_fix', 'rejected')
+      recordPrReviewOutcome('merge_refresh', 'invalid_output')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_pr_reviews_total')
+      expect(metrics).toContain('stage="initial"')
+      expect(metrics).toContain('stage="post_fix"')
+      expect(metrics).toContain('stage="merge_refresh"')
+      expect(metrics).toContain('outcome="approved"')
+      expect(metrics).toContain('outcome="rejected"')
+      expect(metrics).toContain('outcome="invalid_output"')
+    })
+
+    test('increments review_auto_fixes_total counter with outcome labels', async () => {
+      recordReviewAutoFixOutcome('committed')
+      recordReviewAutoFixOutcome('salvaged')
+      recordReviewAutoFixOutcome('push_failed')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_review_auto_fixes_total')
+      expect(metrics).toContain('outcome="committed"')
+      expect(metrics).toContain('outcome="salvaged"')
+      expect(metrics).toContain('outcome="push_failed"')
+    })
+
+    test('increments pr_merge_recovery_total counter with outcome labels', async () => {
+      recordPrMergeRecoveryOutcome('merged_initial')
+      recordPrMergeRecoveryOutcome('refresh_push_failed')
+      recordPrMergeRecoveryOutcome('merged_after_refresh')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_pr_merge_recovery_total')
+      expect(metrics).toContain('outcome="merged_initial"')
+      expect(metrics).toContain('outcome="refresh_push_failed"')
+      expect(metrics).toContain('outcome="merged_after_refresh"')
+    })
+
+    test('tracks lease conflicts, recovery actions, and worker idle timeouts', async () => {
+      recordLeaseConflict('issue-process')
+      recordRecoveryAction('issue-process-idle-timeout', 'recoverable')
+      recordTransientLoopError('startup-recovery')
+      recordWorkerIdleTimeout('pr-review')
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_lease_conflicts_total')
+      expect(metrics).toContain('scope="issue-process"')
+      expect(metrics).toContain('agent_loop_recovery_actions_total')
+      expect(metrics).toContain('kind="issue-process-idle-timeout"')
+      expect(metrics).toContain('outcome="recoverable"')
+      expect(metrics).toContain('agent_loop_transient_loop_errors_total')
+      expect(metrics).toContain('kind="startup-recovery"')
+      expect(metrics).toContain('agent_loop_worker_idle_timeouts_total')
+      expect(metrics).toContain('scope="pr-review"')
+    })
+  })
+
   describe('recordPrCreated', () => {
     test('increments prs_created_total counter', async () => {
       recordPrCreated()
@@ -120,6 +203,39 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_active_worktrees')
     })
 
+    test('tracks active PR reviews and in-flight task gauges', async () => {
+      setActivePrReviews(2)
+      setActiveLeases(3)
+      setBlockedIssueResumes(1)
+      setBlockedIssueResumeAgeSeconds(45)
+      setBlockedIssueResumeEscalations(1)
+      setBlockedIssueResumeEscalationAgeSeconds(15)
+      setLastTransientLoopErrorAgeSeconds(12)
+      setNextPollDelaySeconds(5)
+      setInFlightIssueProcesses(true)
+      setInFlightPrReviews(false)
+      setStartupRecoveryPending(true)
+      setLeaseHeartbeatAgeSeconds(42)
+      setStalledWorkers(1)
+      setEffectiveActiveTasks(3)
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_active_pr_reviews')
+      expect(metrics).toContain('agent_loop_active_leases')
+      expect(metrics).toContain('agent_loop_blocked_issue_resumes')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_age_seconds')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_escalations')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_escalation_age_seconds')
+      expect(metrics).toContain('agent_loop_last_transient_loop_error_age_seconds')
+      expect(metrics).toContain('agent_loop_next_poll_delay_seconds')
+      expect(metrics).toContain('agent_loop_inflight_issue_processes')
+      expect(metrics).toContain('agent_loop_inflight_pr_reviews')
+      expect(metrics).toContain('agent_loop_startup_recovery_pending')
+      expect(metrics).toContain('agent_loop_lease_heartbeat_age_seconds')
+      expect(metrics).toContain('agent_loop_stalled_workers')
+      expect(metrics).toContain('agent_loop_effective_active_tasks')
+    })
+
     test('setConcurrencyLimit sets the concurrency limit gauge', async () => {
       setConcurrencyLimit(4)
 
@@ -127,11 +243,49 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_concurrency_limit')
     })
 
+    test('setConcurrencyPolicy publishes requested, effective, and cap values', async () => {
+      setConcurrencyPolicy({
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      })
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_concurrency_policy')
+      expect(metrics).toContain('kind="requested"')
+      expect(metrics).toContain('kind="effective"')
+      expect(metrics).toContain('kind="repo_cap"')
+      expect(metrics).toContain('kind="profile_cap"')
+      expect(metrics).toContain('kind="project_cap"')
+    })
+
     test('setDaemonUptime sets the uptime gauge', async () => {
       setDaemonUptime(3600)
 
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_uptime_seconds')
+    })
+
+    test('publishes project info labels for project profile and agent selection', async () => {
+      setProjectInfo({
+        repo: 'JamesWuHK/digital-employee',
+        profile: 'desktop-vite',
+        primaryAgent: 'codex',
+        fallbackAgent: 'claude',
+        defaultBranch: 'main',
+        machineId: 'codex-verify',
+      })
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_project_info')
+      expect(metrics).toContain('repo="JamesWuHK/digital-employee"')
+      expect(metrics).toContain('profile="desktop-vite"')
+      expect(metrics).toContain('primary_agent="codex"')
+      expect(metrics).toContain('fallback_agent="claude"')
+      expect(metrics).toContain('default_branch="main"')
+      expect(metrics).toContain('machine_id="codex-verify"')
     })
   })
 
@@ -168,6 +322,25 @@ describe('metrics', () => {
     test('returns correct content type for Prometheus', () => {
       const contentType = getContentType()
       expect(contentType).toContain('text/plain')
+    })
+  })
+
+  describe('startMetricsServer', () => {
+    test('refreshes gauges before serving metrics', async () => {
+      let refreshed = false
+      const server = await startMetricsServer(0, console, () => {
+        refreshed = true
+        setBlockedIssueResumeAgeSeconds(21)
+      })
+
+      try {
+        const body = await Bun.$`curl --noproxy '*' -s http://127.0.0.1:${server.port}/metrics`.quiet().text()
+
+        expect(refreshed).toBe(true)
+        expect(body).toContain('agent_loop_blocked_issue_resume_age_seconds 21')
+      } finally {
+        server.stop()
+      }
     })
   })
 

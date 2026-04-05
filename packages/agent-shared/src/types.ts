@@ -106,6 +106,110 @@ export interface ProjectPromptGuidanceOverrides {
 export interface ProjectProfileConfig {
   profile: ProjectProfileName
   promptGuidance?: ProjectPromptGuidanceOverrides
+  maxConcurrency?: number
+}
+
+export interface AgentSchedulingConfig {
+  concurrencyByRepo: Record<string, number>
+  concurrencyByProfile: Partial<Record<ProjectProfileName, number>>
+}
+
+export interface ConcurrencyPolicy {
+  requested: number
+  effective: number
+  repoCap: number | null
+  profileCap: number | null
+  projectCap: number | null
+}
+
+export interface RecoveryConfig {
+  heartbeatIntervalMs: number
+  leaseTtlMs: number
+  workerIdleTimeoutMs: number
+  leaseAdoptionBackoffMs: number
+}
+
+export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'
+export type ManagedLeaseStatus = 'active' | 'completed' | 'recoverable' | 'released'
+export type ManagedLeaseProgressKind = 'stdout' | 'stderr' | 'git-state' | 'phase'
+
+export interface ManagedLease {
+  leaseId: string
+  scope: ManagedLeaseScope
+  issueNumber?: number
+  prNumber?: number
+  machineId: string
+  daemonInstanceId: string
+  branch?: string
+  worktreeId?: string
+  phase: string
+  startedAt: string
+  lastHeartbeatAt: string
+  expiresAt: string
+  attempt: number
+  lastProgressAt: string
+  lastProgressKind?: ManagedLeaseProgressKind
+  status: ManagedLeaseStatus
+  recoveryReason?: string
+}
+
+export interface IssueComment {
+  commentId: number
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ManagedLeaseComment extends IssueComment {
+  lease: ManagedLease
+}
+
+export interface ActiveLeaseRuntimeDetail {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  commentId: number
+  issueNumber: number | null
+  prNumber: number | null
+  machineId: string
+  daemonInstanceId: string
+  branch: string | null
+  worktreeId: string | null
+  phase: string
+  attempt: number
+  status: ManagedLeaseStatus
+  lastProgressKind: ManagedLeaseProgressKind | null
+  heartbeatAgeSeconds: number
+  progressAgeSeconds: number
+  expiresInSeconds: number
+  adoptable: boolean
+}
+
+export interface StalledWorkerRuntimeDetail {
+  scope: ManagedLeaseScope
+  targetNumber: number
+  since: string
+  durationSeconds: number
+  reason: string
+}
+
+export interface BlockedIssueResumeRuntimeDetail {
+  issueNumber: number
+  prNumber: number | null
+  since: string
+  durationSeconds: number
+  reason: string
+  escalationCount: number
+  lastEscalatedAt: string | null
+  lastEscalationAgeSeconds: number | null
+}
+
+export interface RecoveryActionRuntimeDetail {
+  at: string
+  kind: string
+  outcome: 'recoverable' | 'completed' | 'blocked' | 'failed'
+  scope: ManagedLeaseScope | null
+  targetNumber: number | null
+  reason: string | null
 }
 
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
@@ -129,6 +233,10 @@ export interface AgentConfig {
   pat: string
   pollIntervalMs: number
   concurrency: number
+  requestedConcurrency: number
+  concurrencyPolicy: ConcurrencyPolicy
+  scheduling: AgentSchedulingConfig
+  recovery: RecoveryConfig
   worktreesBase: string
   project: ProjectProfileConfig
   agent: {
@@ -183,15 +291,77 @@ export interface Subtask {
 
 // ─── Daemon Status ──────────────────────────────────────────────────────────
 
+export type DaemonRuntimeSupervisor = 'direct' | 'detached' | 'launchd'
+
 export interface DaemonStatus {
   running: boolean
   machineId: string
+  daemonInstanceId: string
   repo: string
   pollIntervalMs: number
   concurrency: number
+  requestedConcurrency: number
+  concurrencyPolicy: ConcurrencyPolicy
+  recovery: RecoveryConfig
+  project: {
+    profile: ProjectProfileName
+    defaultBranch: string
+    maxConcurrency: number | null
+  }
+  agent: {
+    primary: AgentConfig['agent']['primary']
+    fallback: AgentConfig['agent']['fallback']
+  }
+  endpoints: {
+    health: {
+      host: string
+      port: number
+      path: string
+    }
+    metrics: {
+      host: string
+      port: number
+      path: string
+    }
+  }
+  runtime: {
+    supervisor: DaemonRuntimeSupervisor
+    workingDirectory: string
+    runtimeRecordPath: string | null
+    logPath: string | null
+    activePrReviews: number
+    inFlightIssueProcess: boolean
+    inFlightPrReview: boolean
+    startupRecoveryPending: boolean
+    effectiveActiveTasks: number
+    transientLoopErrorCount: number
+    startupRecoveryDeferredCount: number
+    lastTransientLoopErrorAt: string | null
+    lastTransientLoopErrorKind: string | null
+    lastTransientLoopErrorMessage: string | null
+    lastTransientLoopErrorAgeSeconds: number | null
+    failedIssueResumeAttemptsTracked: number
+    failedIssueResumeCooldownsTracked: number
+    oldestBlockedIssueResumeAgeSeconds: number
+    activeLeaseCount: number
+    oldestLeaseHeartbeatAgeSeconds: number
+    activeLeaseDetails: ActiveLeaseRuntimeDetail[]
+    stalledWorkerCount: number
+    stalledWorkerDetails: StalledWorkerRuntimeDetail[]
+    blockedIssueResumeCount: number
+    blockedIssueResumeEscalationCount: number
+    blockedIssueResumeDetails: BlockedIssueResumeRuntimeDetail[]
+    lastRecoveryActionAt: string | null
+    lastRecoveryActionKind: string | null
+    recentRecoveryActions: RecoveryActionRuntimeDetail[]
+    oldestBlockedIssueResumeEscalationAgeSeconds: number
+  }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null
   lastClaimedAt: string | null
   uptimeMs: number
   pid: number
+  nextPollAt: string | null
+  nextPollReason: string | null
+  nextPollDelayMs: number | null
 }

@@ -12,6 +12,18 @@ export interface CliAgentRunOptions {
   config: AgentConfig
   logger?: typeof console
   allowWrites?: boolean
+  monitor?: AgentRunMonitor
+}
+
+export interface AgentRunMonitor {
+  heartbeatIntervalMs?: number
+  idleTimeoutMs?: number
+  onActivity?: (kind: 'stdout' | 'stderr' | 'git-state') => void | Promise<void>
+}
+
+export interface TaskExecutionMonitor {
+  setPhase?: (phase: string) => void
+  agentMonitor?: AgentRunMonitor
 }
 
 export interface CliAgentRunResult {
@@ -22,7 +34,10 @@ export interface CliAgentRunResult {
   responseText: string
   usedAgent: AgentKind
   usedFallback: boolean
+  failureKind?: 'binary_missing' | 'process_timeout' | 'idle_timeout' | 'execution_error' | 'nonzero_exit'
 }
+
+export type AgentFailureKind = NonNullable<CliAgentRunResult['failureKind']>
 
 interface SpawnResult {
   exitCode: number
@@ -167,6 +182,7 @@ async function runSingleAgent(
       responseText: '',
       usedAgent: agent,
       usedFallback,
+      failureKind: 'binary_missing',
     }
   }
 
@@ -182,6 +198,12 @@ async function runSingleAgent(
   let proc: ReturnType<typeof Bun.spawn> | null = null
   let result: SpawnResult
   let timedOut = false
+  let idleTimedOut = false
+  let activityMonitorTimer: ReturnType<typeof setInterval> | null = null
+  let processTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let lastActivityAt = Date.now()
+  let lastWorktreeSignature: string | null = null
+  let monitorInFlight = false
 
   try {
     const env = buildRuntimeEnv(agent, options.config, tempDir)
@@ -205,14 +227,50 @@ async function runSingleAgent(
       throw new Error('Agent process stdio pipes were not created')
     }
 
+    if (options.monitor) {
+      lastWorktreeSignature = await captureWorktreeSignature(options.worktreePath)
+      activityMonitorTimer = setInterval(() => {
+        if (monitorInFlight) return
+        monitorInFlight = true
+        void pollMonitorProgress(
+          options,
+          () => lastWorktreeSignature,
+          (signature) => {
+            lastWorktreeSignature = signature
+          },
+          () => {
+            lastActivityAt = Date.now()
+            notifyActivity(options.monitor, 'git-state')
+          },
+          () => lastActivityAt,
+          () => {
+            idleTimedOut = true
+            try {
+              proc?.kill('SIGKILL')
+            } catch {
+              // ignore kill errors
+            }
+          },
+        ).finally(() => {
+          monitorInFlight = false
+        })
+      }, options.monitor.heartbeatIntervalMs ?? options.config.recovery.heartbeatIntervalMs)
+    }
+
     stdin.write(options.prompt)
     stdin.end()
 
     result = await Promise.race([
       (async () => {
         const [stdoutBuffer, stderrBuffer] = await Promise.all([
-          new Response(stdout).arrayBuffer(),
-          new Response(stderr).arrayBuffer(),
+          readProcessStream(stdout, () => {
+            lastActivityAt = Date.now()
+            notifyActivity(options.monitor, 'stdout')
+          }),
+          readProcessStream(stderr, () => {
+            lastActivityAt = Date.now()
+            notifyActivity(options.monitor, 'stderr')
+          }),
         ])
         const exitCode = await proc!.exited
         return {
@@ -222,7 +280,7 @@ async function runSingleAgent(
         }
       })(),
       new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        processTimeoutId = setTimeout(() => {
           timedOut = true
           try {
             proc?.kill('SIGKILL')
@@ -234,7 +292,26 @@ async function runSingleAgent(
       }),
     ])
   } catch (err) {
+    if (activityMonitorTimer) {
+      clearInterval(activityMonitorTimer)
+    }
+    if (processTimeoutId) {
+      clearTimeout(processTimeoutId)
+    }
     rmSync(tempDir, { recursive: true, force: true })
+
+    if (idleTimedOut) {
+      return {
+        ok: false,
+        exitCode: 3,
+        stdout: '',
+        stderr: `Idle timeout after ${options.monitor?.idleTimeoutMs ?? options.config.recovery.workerIdleTimeoutMs}ms`,
+        responseText: '',
+        usedAgent: agent,
+        usedFallback,
+        failureKind: 'idle_timeout',
+      }
+    }
 
     if (timedOut || (err instanceof Error && err.message.includes('Timeout'))) {
       return {
@@ -245,6 +322,7 @@ async function runSingleAgent(
         responseText: '',
         usedAgent: agent,
         usedFallback,
+        failureKind: 'process_timeout',
       }
     }
 
@@ -256,6 +334,42 @@ async function runSingleAgent(
       responseText: '',
       usedAgent: agent,
       usedFallback,
+      failureKind: 'execution_error',
+    }
+  }
+
+  if (activityMonitorTimer) {
+    clearInterval(activityMonitorTimer)
+  }
+  if (processTimeoutId) {
+    clearTimeout(processTimeoutId)
+  }
+
+  if (idleTimedOut) {
+    rmSync(tempDir, { recursive: true, force: true })
+    return {
+      ok: false,
+      exitCode: 3,
+      stdout: '',
+      stderr: `Idle timeout after ${options.monitor?.idleTimeoutMs ?? options.config.recovery.workerIdleTimeoutMs}ms`,
+      responseText: '',
+      usedAgent: agent,
+      usedFallback,
+      failureKind: 'idle_timeout',
+    }
+  }
+
+  if (timedOut) {
+    rmSync(tempDir, { recursive: true, force: true })
+    return {
+      ok: false,
+      exitCode: 3,
+      stdout: '',
+      stderr: `Timeout after ${options.timeoutMs}ms`,
+      responseText: '',
+      usedAgent: agent,
+      usedFallback,
+      failureKind: 'process_timeout',
     }
   }
 
@@ -273,7 +387,88 @@ async function runSingleAgent(
     responseText,
     usedAgent: agent,
     usedFallback,
+    ...(result.exitCode === 0 ? {} : { failureKind: 'nonzero_exit' as const }),
   }
+}
+
+async function readProcessStream(
+  stream: ReadableStream<Uint8Array>,
+  onChunk: () => void,
+): Promise<Uint8Array> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    onChunk()
+  }
+
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+  const combined = new Uint8Array(totalLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    combined.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return combined
+}
+
+async function pollMonitorProgress(
+  options: CliAgentRunOptions,
+  getSignature: () => string | null,
+  setSignature: (signature: string) => void,
+  onGitProgress: () => void,
+  getLastActivityAt: () => number,
+  onIdleTimeout: () => void,
+): Promise<void> {
+  if (!options.monitor) return
+
+  const signature = await captureWorktreeSignature(options.worktreePath)
+  if (signature !== getSignature()) {
+    setSignature(signature)
+    onGitProgress()
+  }
+
+  const idleTimeoutMs = options.monitor.idleTimeoutMs ?? options.config.recovery.workerIdleTimeoutMs
+  if (Date.now() - getLastActivityAt() > idleTimeoutMs) {
+    onIdleTimeout()
+  }
+}
+
+function notifyActivity(
+  monitor: AgentRunMonitor | undefined,
+  kind: 'stdout' | 'stderr' | 'git-state',
+): void {
+  if (!monitor?.onActivity) return
+  void Promise.resolve(monitor.onActivity(kind)).catch(() => {
+    // activity callbacks are best-effort and should never fail the agent run
+  })
+}
+
+async function captureWorktreeSignature(worktreePath: string): Promise<string> {
+  const [head, status] = await Promise.all([
+    runGitRead(worktreePath, ['rev-parse', 'HEAD']),
+    runGitRead(worktreePath, ['status', '--short']),
+  ])
+
+  return `${head.trim()}|${status.trim()}`
+}
+
+async function runGitRead(
+  worktreePath: string,
+  args: string[],
+): Promise<string> {
+  const proc = Bun.spawn(['git', '-C', worktreePath, ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const stdout = await new Response(proc.stdout).text()
+  await proc.exited
+  return stdout
 }
 
 function readResponseText(

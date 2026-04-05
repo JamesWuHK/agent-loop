@@ -1,11 +1,38 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
-import { execSync } from 'node:child_process'
-import type { AgentConfig } from '@agent/shared'
+import { execFileSync } from 'node:child_process'
+import type {
+  AgentConfig,
+  ProjectProfileName,
+  ProjectPromptContext,
+  ProjectPromptGuidanceOverrides,
+} from '@agent/shared'
 
 const CONFIG_DIR = resolve(homedir(), '.agent-loop')
 const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
+const REPO_CONFIG_DIR = '.agent-loop'
+const REPO_CONFIG_FILE = 'project.json'
+
+export interface RepoLocalConfig {
+  project?: {
+    profile?: ProjectProfileName
+    promptGuidance?: ProjectPromptGuidanceOverrides
+    maxConcurrency?: number
+  }
+  agent?: {
+    primary?: AgentConfig['agent']['primary']
+    fallback?: AgentConfig['agent']['fallback']
+  }
+  git?: {
+    defaultBranch?: string
+  }
+}
+
+export interface LocalDaemonIdentity {
+  repo: string
+  machineId: string
+}
 
 export interface CliArgs {
   repo?: string
@@ -25,36 +52,32 @@ export interface CliArgs {
 export function loadConfig(args: CliArgs = {}): AgentConfig {
   ensureConfigDir()
 
-  let fileConfig: Partial<AgentConfig> = {}
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      fileConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
-    } catch (err) {
-      console.error(`[config] failed to parse ${CONFIG_PATH}:`, err)
-    }
-  }
+  const fileConfig = readConfigFile()
+  const repoConfig = loadRepoLocalConfig()
 
-  const machineId =
-    args.machineId ??
-    fileConfig.machineId ??
-    generateMachineId()
+  return buildConfig(args, {
+    fileConfig,
+    repoConfig,
+  })
+}
 
-  const repo =
-    args.repo ??
-    fileConfig.repo ??
-    guessRepoFromGit()
+export function resolveLocalDaemonIdentity(
+  args: Pick<CliArgs, 'repo' | 'machineId'> = {},
+  options: {
+    fileConfig?: Partial<AgentConfig>
+    repoGuess?: string | null
+    persistGeneratedMachineId?: boolean
+  } = {},
+): LocalDaemonIdentity {
+  ensureConfigDir()
 
-  const pat =
-    args.pat ??
-    process.env.GITHUB_TOKEN ??
-    process.env.GH_TOKEN ??
-    fileConfig.pat ??
-    ''
+  const fileConfig: Partial<AgentConfig> =
+    options.fileConfig ?? readConfigFile()
+  const machineId = args.machineId ?? fileConfig.machineId ?? generateMachineId()
+  const repo = args.repo ?? fileConfig.repo ?? options.repoGuess ?? guessRepoFromGit()
 
-  if (!pat) {
-    throw new ConfigError(
-      'No GitHub PAT found. Set GITHUB_TOKEN env var or configure pat in ~/.agent-loop/config.json',
-    )
+  if (!fileConfig.machineId && options.persistGeneratedMachineId !== false) {
+    saveConfigPartial({ machineId })
   }
 
   if (!repo) {
@@ -63,32 +86,118 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
     )
   }
 
+  return {
+    repo,
+    machineId,
+  }
+}
+
+export function buildConfig(
+  args: CliArgs = {},
+  options: {
+    fileConfig?: Partial<AgentConfig>
+    repoConfig?: RepoLocalConfig
+    env?: NodeJS.ProcessEnv
+    repoGuess?: string | null
+    homeDir?: string
+    ghAuthToken?: string | null
+  } = {},
+): AgentConfig {
+  const fileConfig = options.fileConfig ?? {}
+  const repoConfig = options.repoConfig ?? {}
+  const env = options.env ?? process.env
+  const homeDir = options.homeDir ?? homedir()
+  const requestedConcurrency = args.concurrency ?? fileConfig.concurrency ?? 1
+  const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
+  const heartbeatIntervalMs = normalizePositiveInteger(
+    fileConfig.recovery?.heartbeatIntervalMs,
+    30_000,
+  )
+  const leaseTtlMs = normalizePositiveInteger(
+    fileConfig.recovery?.leaseTtlMs,
+    heartbeatIntervalMs * 2,
+  )
+  const scheduling = {
+    concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
+    concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
+  }
+  const identity = resolveLocalDaemonIdentity(
+    {
+      repo: args.repo,
+      machineId: args.machineId,
+    },
+    {
+      fileConfig,
+      repoGuess: options.repoGuess,
+    },
+  )
+  const { machineId, repo } = identity
+
+  const pat = resolveGitHubToken({
+    cliPat: args.pat,
+    env,
+    filePat: fileConfig.pat,
+    ghAuthToken: options.ghAuthToken,
+  })
+
+  if (!pat) {
+    throw new ConfigError(
+      'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
+    )
+  }
+
+  const concurrencyPolicy = resolveConcurrencyPolicy({
+    requested: requestedConcurrency,
+    repoCap: scheduling.concurrencyByRepo[repo] ?? null,
+    profileCap: scheduling.concurrencyByProfile[projectProfile] ?? null,
+    projectCap: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency ?? null,
+  })
+
   const config: AgentConfig = {
     machineId,
     repo,
     pat,
     pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
-    concurrency: args.concurrency ?? fileConfig.concurrency ?? 1,
-    worktreesBase: resolve(homedir(), '.agent-worktrees', repo.replace('/', '-')),
+    concurrency: concurrencyPolicy.effective,
+    requestedConcurrency,
+    concurrencyPolicy,
+    scheduling,
+    recovery: {
+      heartbeatIntervalMs,
+      leaseTtlMs,
+      workerIdleTimeoutMs: normalizePositiveInteger(
+        fileConfig.recovery?.workerIdleTimeoutMs,
+        5 * 60 * 1000,
+      ),
+      leaseAdoptionBackoffMs: normalizePositiveInteger(
+        fileConfig.recovery?.leaseAdoptionBackoffMs,
+        5_000,
+      ),
+    },
+    worktreesBase: resolve(homeDir, '.agent-worktrees', repo.replace('/', '-')),
     project: {
-      profile: fileConfig.project?.profile ?? 'generic',
-      promptGuidance: fileConfig.project?.promptGuidance,
+      profile: projectProfile,
+      promptGuidance: mergePromptGuidance(
+        fileConfig.project?.promptGuidance,
+        repoConfig.project?.promptGuidance,
+      ),
+      maxConcurrency: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency,
     },
     agent: {
-      primary: fileConfig.agent?.primary ?? 'codex',
-      fallback: fileConfig.agent?.fallback ?? 'claude',
+      primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
+      fallback: repoConfig.agent?.fallback ?? fileConfig.agent?.fallback ?? 'claude',
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
       codexBaseUrl:
-        process.env.OPENAI_BASE_URL ??
-        process.env.OPENAI_API_BASE ??
-        process.env.OPENAI_API_URL ??
-        process.env.OPENAI_BASE ??
+        env.OPENAI_BASE_URL ??
+        env.OPENAI_API_BASE ??
+        env.OPENAI_API_URL ??
+        env.OPENAI_BASE ??
         fileConfig.agent?.codexBaseUrl,
       timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000, // 30 min default
     },
     git: {
-      defaultBranch: fileConfig.git?.defaultBranch ?? 'main',
+      defaultBranch: repoConfig.git?.defaultBranch ?? fileConfig.git?.defaultBranch ?? 'main',
       authorName: fileConfig.git?.authorName ?? 'agent-loop',
       authorEmail: fileConfig.git?.authorEmail ?? 'agent-loop@local',
     },
@@ -113,7 +222,7 @@ function generateMachineId(): string {
 
 function guessRepoFromGit(): string | null {
   try {
-    const stdout = execSync('git remote get-url origin', { encoding: 'utf-8' }).trim()
+    const stdout = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf-8' }).trim()
     // git@github.com:owner/repo.git or https://github.com/owner/repo.git
     const match =
       stdout.match(/github\.com[/:]([\w-]+\/[\w.-]+?)(\.git)?$/) ??
@@ -130,16 +239,154 @@ function ensureConfigDir(): void {
   }
 }
 
+function findRepoRoot(startDir = process.cwd()): string | null {
+  try {
+    return execFileSync('git', ['-C', startDir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf-8',
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+export function loadRepoLocalConfig(startDir = process.cwd()): RepoLocalConfig {
+  const repoRoot = findRepoRoot(startDir)
+  if (!repoRoot) return {}
+
+  return loadJsonFile<RepoLocalConfig>(
+    resolve(repoRoot, REPO_CONFIG_DIR, REPO_CONFIG_FILE),
+  )
+}
+
+export function readConfigFile(path = CONFIG_PATH): Partial<AgentConfig> {
+  return loadJsonFile<Partial<AgentConfig>>(path) as Partial<AgentConfig>
+}
+
+function loadJsonFile<T extends object>(path: string): T | {} {
+  if (!existsSync(path)) {
+    return {}
+  }
+
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as T
+  } catch (err) {
+    console.error(`[config] failed to parse ${path}:`, err)
+    return {}
+  }
+}
+
+function resolveGitHubToken(input: {
+  cliPat?: string
+  env: NodeJS.ProcessEnv
+  filePat?: string
+  ghAuthToken?: string | null
+}): string {
+  const explicitGhAuthToken = input.ghAuthToken === undefined
+    ? readGhAuthToken()
+    : input.ghAuthToken
+
+  const candidates = [
+    input.cliPat,
+    input.env.GITHUB_TOKEN,
+    input.env.GH_TOKEN,
+    input.filePat,
+    explicitGhAuthToken,
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = normalizeNonEmptyString(candidate)
+    if (normalized) return normalized
+  }
+
+  return ''
+}
+
+function readGhAuthToken(): string | null {
+  try {
+    const token = execFileSync('gh', ['auth', 'token'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return normalizeNonEmptyString(token)
+  } catch {
+    return null
+  }
+}
+
+function mergePromptGuidance(
+  globalGuidance?: ProjectPromptGuidanceOverrides,
+  repoGuidance?: ProjectPromptGuidanceOverrides,
+): ProjectPromptGuidanceOverrides | undefined {
+  const merged: ProjectPromptGuidanceOverrides = {}
+  const contexts: ProjectPromptContext[] = ['planning', 'implementation', 'reviewFix', 'recovery']
+
+  for (const context of contexts) {
+    const lines = [
+      ...(globalGuidance?.[context] ?? []),
+      ...(repoGuidance?.[context] ?? []),
+    ]
+
+    if (lines.length > 0) {
+      merged[context] = lines
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
+export function writeConfigFile(config: Record<string, unknown>, path = CONFIG_PATH): void {
+  ensureConfigDir()
+  writeFileSync(path, JSON.stringify(config, null, 2))
+}
+
 function saveConfigPartial(partial: Record<string, unknown>): void {
-  const existing: Record<string, unknown> = existsSync(CONFIG_PATH)
-    ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
-    : {}
+  const existing = readConfigFile() as Record<string, unknown>
   const merged = { ...existing, ...partial }
-  writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2))
+  writeConfigFile(merged)
 }
 
 export class ConfigError extends Error {
   name = 'ConfigError'
 }
 
-export { CONFIG_DIR, CONFIG_PATH }
+function resolveConcurrencyPolicy(input: {
+  requested: number
+  repoCap: number | null
+  profileCap: number | null
+  projectCap: number | null
+}) {
+  const requested = normalizePositiveInteger(input.requested, 1)
+  const repoCap = normalizeOptionalPositiveInteger(input.repoCap)
+  const profileCap = normalizeOptionalPositiveInteger(input.profileCap)
+  const projectCap = normalizeOptionalPositiveInteger(input.projectCap)
+  const caps = [requested, repoCap, profileCap, projectCap].filter(
+    (value): value is number => value !== null,
+  )
+
+  return {
+    requested,
+    effective: Math.max(1, Math.min(...caps)),
+    repoCap,
+    profileCap,
+    projectCap,
+  }
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const normalized = normalizeOptionalPositiveInteger(value)
+  return normalized ?? fallback
+}
+
+function normalizeOptionalPositiveInteger(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const integer = Math.trunc(value)
+  return integer >= 1 ? integer : null
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }

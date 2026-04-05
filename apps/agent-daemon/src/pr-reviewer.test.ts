@@ -4,17 +4,67 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
   buildPrReviewComment,
+  buildReviewRepairPrompt,
   buildReviewPrompt,
+  canResumeAutomatedPrReview,
+  classifyPrReviewOutcome,
   buildReviewFeedback,
   collectDependencyDirectories,
+  extractLatestAutomatedPrReviewState,
   extractIssueNumberFromPrBody,
   extractIssueNumberFromPrTitle,
   extractAutomatedReviewReasons,
+  getNextAutomatedPrReviewAttempt,
+  getReusableAutomatedPrReviewFeedback,
   hydrateDetachedReviewWorktree,
   normalizeWorktreePath,
   parsePrReviewResponse,
+  reviewPrAgainstContext,
   validateRejectedReviewFindings,
 } from './pr-reviewer'
+import type { AgentConfig } from '@agent/shared'
+
+const TEST_CONFIG: AgentConfig = {
+  machineId: 'test-machine',
+  repo: 'JamesWuHK/digital-employee',
+  pat: 'test-token',
+  pollIntervalMs: 60_000,
+  concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+  },
+  worktreesBase: '/tmp',
+  project: {
+    profile: 'generic',
+  },
+  agent: {
+    primary: 'codex',
+    fallback: null,
+    claudePath: 'claude',
+    codexPath: 'codex',
+    timeoutMs: 60_000,
+  },
+  git: {
+    defaultBranch: 'main',
+    authorName: 'agent-loop',
+    authorEmail: 'agent-loop@local',
+  },
+}
 
 describe('pr-reviewer', () => {
   test('parses reason directly from JSON response', () => {
@@ -53,6 +103,34 @@ describe('pr-reviewer', () => {
         },
       ],
     })
+  })
+
+  test('classifies approved, rejected, invalid-output, and execution-failed review outcomes', () => {
+    expect(classifyPrReviewOutcome({
+      approved: true,
+      canMerge: true,
+      reason: 'ready',
+    })).toBe('approved')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'contract mismatch',
+    })).toBe('rejected')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'Review output failed validation: missing mustFix',
+      reviewFailed: true,
+    })).toBe('invalid_output')
+
+    expect(classifyPrReviewOutcome({
+      approved: false,
+      canMerge: false,
+      reason: 'Review failed: Agent exited with code 1',
+      reviewFailed: true,
+    })).toBe('execution_failed')
   })
 
   test('builds detailed review feedback from findings', () => {
@@ -102,6 +180,36 @@ describe('pr-reviewer', () => {
     expect(comment).toContain('## Automated review still failing')
   })
 
+  test('includes headRefOid metadata when provided in PR review comments', () => {
+    const comment = buildPrReviewComment(61, {
+      approved: true,
+      canMerge: true,
+      reason: 'ready',
+      findings: [],
+    }, 2, 'approved', 'abc123def456')
+
+    expect(comment).toContain('"headRefOid":"abc123def456"')
+  })
+
+  test('does not embed structured review feedback when the reviewer output itself failed validation', () => {
+    const comment = buildPrReviewComment(61, {
+      approved: false,
+      canMerge: false,
+      reason: 'Review output failed validation: missing mustFix',
+      reviewFailed: true,
+      findings: [
+        {
+          severity: 'high',
+          file: 'apps/desktop/src/App.tsx',
+          summary: 'missing contract fields',
+        },
+      ],
+    }, 1, 'human-needed')
+
+    expect(comment).not.toContain('<!-- agent-loop:review-feedback ')
+    expect(comment).toContain('## Automated review still failing')
+  })
+
   test('extracts issue number from generated PR titles', () => {
     expect(extractIssueNumberFromPrTitle('Fix #45: [US1-1] App 路由守卫最小骨架')).toBe(45)
     expect(extractIssueNumberFromPrTitle('[US1-1] App 路由守卫最小骨架')).toBeNull()
@@ -143,6 +251,21 @@ describe('pr-reviewer', () => {
     expect(prompt).toContain('Every rejection finding is mandatory contract data')
   })
 
+  test('builds a repair prompt that feeds validation failures back into the reviewer before commenting', () => {
+    const prompt = buildReviewRepairPrompt(
+      'Base review prompt',
+      '{"approved":false,"canMerge":false,"findings":[{"summary":"missing fields"}]}',
+      'Review output failed validation: missing mustFix',
+      2,
+    )
+
+    expect(prompt).toContain('Base review prompt')
+    expect(prompt).toContain('Repair attempt: 2')
+    expect(prompt).toContain('Review output failed validation: missing mustFix')
+    expect(prompt).toContain('Previous response:')
+    expect(prompt).toContain('Return corrected JSON only.')
+  })
+
   test('extracts the latest automated review reasons from PR comments', () => {
     expect(extractAutomatedReviewReasons([
       {
@@ -172,6 +295,97 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     ])).toEqual([
       'First blocker',
     ])
+  })
+
+  test('extracts the latest automated PR review attempt metadata', () => {
+    expect(extractLatestAutomatedPrReviewState([
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"First blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
+## Automated review found blocking issues — starting one auto-fix retry`,
+      },
+    ])).toEqual({
+      metadata: {
+        pr: 84,
+        attempt: 1,
+        approved: false,
+        canMerge: false,
+        headRefOid: 'abc123',
+      },
+      feedback: {
+        approved: false,
+        canMerge: false,
+        reason: 'First blocker',
+        findings: [
+          {
+            severity: 'high',
+            file: 'apps/desktop/src/pages/MainPage.tsx',
+            summary: 'retry success regressed',
+            mustFix: ['restore success-list semantics'],
+            mustNotDo: ['do not add selection state'],
+            validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+            scopeRationale: 'issue #76 requires preserving success semantics',
+          },
+        ],
+      },
+    })
+  })
+
+  test('allows standalone review to resume from a valid structured human-needed comment', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"First blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
+## Automated review found blocking issues — starting one auto-fix retry`,
+      },
+    ]
+
+    expect(canResumeAutomatedPrReview(comments, 3)).toBe(true)
+    expect(getNextAutomatedPrReviewAttempt(comments)).toBe(2)
+  })
+
+  test('does not resume standalone review when the latest automated comment lacks valid structured feedback', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Bad blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"missing repair contract"}]} -->
+## Automated review still failing — human intervention required`,
+      },
+    ]
+
+    expect(canResumeAutomatedPrReview(comments, 3)).toBe(false)
+    expect(getNextAutomatedPrReviewAttempt(comments)).toBe(3)
+  })
+
+  test('reuses the latest structured review feedback when the PR head sha is unchanged', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Second blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
+## Automated review still failing — human intervention required`,
+      },
+    ]
+
+    expect(getReusableAutomatedPrReviewFeedback(comments, 'abc123', 3)).toEqual({
+      attempt: 2,
+      feedback: {
+        approved: false,
+        canMerge: false,
+        reason: 'Second blocker',
+        findings: [
+          {
+            severity: 'high',
+            file: 'apps/desktop/src/pages/MainPage.tsx',
+            summary: 'retry success regressed',
+            mustFix: ['restore success-list semantics'],
+            mustNotDo: ['do not add selection state'],
+            validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+            scopeRationale: 'issue #76 requires preserving success semantics',
+          },
+        ],
+      },
+    })
+    expect(getReusableAutomatedPrReviewFeedback(comments, 'def456', 3)).toBeNull()
   })
 
   test('parses structured review findings with repair constraints', () => {
@@ -262,6 +476,99 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
 - Reason: Bad blocker`,
       },
     ])).toEqual([])
+  })
+
+  test('retries invalid reviewer output internally before returning a result', async () => {
+    const prompts: string[] = []
+    let calls = 0
+
+    const result = await reviewPrAgainstContext(
+      61,
+      'https://example.com/pr/61',
+      '/tmp/review-worktree',
+      'JamesWuHK/digital-employee',
+      {
+        title: 'Fix #46: [US1-2] AppContext 增加最小 auth/navigation 接口',
+        body: 'Fixes #46',
+        headRefName: 'agent/46/codex-20260403',
+        files: [
+          {
+            path: 'apps/desktop/src/context/AppContext.tsx',
+            additions: 10,
+            deletions: 0,
+          },
+        ],
+        diff: 'diff --git a/apps/desktop/src/context/AppContext.tsx b/apps/desktop/src/context/AppContext.tsx',
+        linkedIssue: {
+          number: 46,
+          title: '[US1-2] AppContext 增加最小 auth/navigation 接口',
+          body: `## Constraints
+- 只补最小接口
+- 不接 API，不做 token 持久化`,
+        },
+      },
+      TEST_CONFIG,
+      console,
+      async (prompt) => {
+        prompts.push(prompt)
+        calls += 1
+
+        if (calls === 1) {
+          return {
+            responseText: `{
+              "approved": false,
+              "canMerge": false,
+              "reason": "routing contract broken",
+              "findings": [
+                {
+                  "severity": "high",
+                  "file": "apps/desktop/src/context/AppContext.tsx",
+                  "summary": "navigate no longer preserves currentPath"
+                }
+              ]
+            }`,
+          }
+        }
+
+        return {
+          responseText: `{
+            "approved": false,
+            "canMerge": false,
+            "reason": "routing contract broken",
+            "findings": [
+              {
+                "severity": "high",
+                "file": "apps/desktop/src/context/AppContext.tsx",
+                "summary": "navigate no longer preserves currentPath",
+                "mustFix": ["restore currentPath updates"],
+                "mustNotDo": ["do not add login persistence"],
+                "validation": ["cd apps/desktop && bun run --bun test src/App.test.tsx"],
+                "scopeRationale": "the linked issue explicitly requires currentPath + navigate semantics"
+              }
+            ]
+          }`,
+        }
+      },
+    )
+
+    expect(calls).toBe(2)
+    expect(prompts[1]).toContain('Repair attempt: 2')
+    expect(result).toEqual({
+      approved: false,
+      canMerge: false,
+      reason: 'routing contract broken',
+      findings: [
+        {
+          severity: 'high',
+          file: 'apps/desktop/src/context/AppContext.tsx',
+          summary: 'navigate no longer preserves currentPath',
+          mustFix: ['restore currentPath updates'],
+          mustNotDo: ['do not add login persistence'],
+          validation: ['cd apps/desktop && bun run --bun test src/App.test.tsx'],
+          scopeRationale: 'the linked issue explicitly requires currentPath + navigate semantics',
+        },
+      ],
+    })
   })
 
   test('normalizes detached review worktree paths to their real path', () => {

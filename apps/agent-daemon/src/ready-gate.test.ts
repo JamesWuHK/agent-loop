@@ -32,6 +32,7 @@ describe('ready-gate', () => {
         'missing ## 实现步骤 / Implementation Steps',
         'missing ## 验收 / Acceptance',
         'missing ## RED 测试 / RED Tests',
+        'missing ### Validation / Validation Commands',
         'missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)',
       ],
     })
@@ -54,6 +55,8 @@ describe('ready-gate', () => {
         '- apps/desktop/src/pages/LoginPage.tsx',
         '### RequiredSemantics',
         '- 合法提交时调用登录接口',
+        '### Validation',
+        '- bun --cwd apps/desktop test src/pages/LoginPage.test.tsx',
         '',
         '## RED 测试',
         '```tsx',

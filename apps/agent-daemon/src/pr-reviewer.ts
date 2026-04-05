@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { buildGhEnv, renderIssueContractForPrompt, type AgentConfig } from '@agent/shared'
-import { runConfiguredAgent, type CliAgentRunOptions } from './cli-agent'
+import { runConfiguredAgent, type AgentFailureKind, type CliAgentRunOptions, type TaskExecutionMonitor } from './cli-agent'
 
 export interface PrReviewFinding {
   severity: string
@@ -21,6 +21,7 @@ export interface PrReviewResult {
   canMerge: boolean
   findings?: PrReviewFinding[]
   reviewFailed?: boolean
+  failureKind?: AgentFailureKind
 }
 
 interface ReviewFindingContractViolation {
@@ -52,8 +53,44 @@ interface StructuredReviewFeedbackPayload {
   findings: PrReviewFinding[]
 }
 
+interface AutomatedPrReviewMetadata {
+  pr: number
+  attempt: number
+  approved: boolean
+  canMerge: boolean
+  headRefOid?: string
+}
+
+export interface LatestAutomatedPrReviewState {
+  metadata: AutomatedPrReviewMetadata
+  feedback: StructuredReviewFeedbackPayload | null
+}
+
+export interface ReviewAgentResponse {
+  responseText: string
+}
+
+export type ReviewAgentRunner = (
+  prompt: string,
+  worktreePath: string,
+  config: AgentConfig,
+  logger?: typeof console,
+  monitor?: TaskExecutionMonitor,
+) => Promise<ReviewAgentResponse>
+
+class ReviewAgentExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly failureKind?: AgentFailureKind,
+  ) {
+    super(message)
+    this.name = 'ReviewAgentExecutionError'
+  }
+}
+
 const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
+const MAX_REVIEW_OUTPUT_ATTEMPTS = 2
 
 /**
  * Review a PR using the configured CLI agent to determine if it can be merged.
@@ -64,13 +101,23 @@ export async function reviewPr(
   worktreePath: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): Promise<PrReviewResult> {
   logger.log(`[pr-review] starting review for PR #${prNumber}`)
 
   try {
     const context = await fetchPrReviewContext(prNumber, config)
-    const prompt = buildReviewPrompt(prNumber, prUrl, config.repo, context)
-    const result = await runReviewSubagent(prompt, worktreePath, config, logger)
+    const result = await reviewPrAgainstContext(
+      prNumber,
+      prUrl,
+      worktreePath,
+      config.repo,
+      context,
+      config,
+      logger,
+      runReviewSubagentResponse,
+      monitor,
+    )
     logger.log(`[pr-review] PR #${prNumber} review complete: ${result.approved ? 'APPROVED' : 'REJECTED'}`)
     return result
   } catch (err) {
@@ -80,8 +127,68 @@ export async function reviewPr(
       reason: `Review failed: ${String(err)}`,
       canMerge: false,
       reviewFailed: true,
+      failureKind: err instanceof ReviewAgentExecutionError ? err.failureKind : undefined,
     }
   }
+}
+
+export async function reviewPrAgainstContext(
+  prNumber: number,
+  prUrl: string,
+  worktreePath: string,
+  repo: string,
+  context: PrReviewContext,
+  config: AgentConfig,
+  logger = console,
+  runAgent: ReviewAgentRunner = runReviewSubagentResponse,
+  monitor?: TaskExecutionMonitor,
+): Promise<PrReviewResult> {
+  const basePrompt = buildReviewPrompt(prNumber, prUrl, repo, context)
+
+  let prompt = basePrompt
+  let lastParsedReview: PrReviewResult | null = null
+  let lastFailureMessage = ''
+
+  for (let attempt = 1; attempt <= MAX_REVIEW_OUTPUT_ATTEMPTS; attempt++) {
+    monitor?.setPhase?.(attempt === 1 ? 'pr-review' : `pr-review-repair:${attempt}`)
+    const response = await runAgent(prompt, worktreePath, config, logger, monitor)
+
+    try {
+      const parsed = parsePrReviewResponse(response.responseText)
+      if (!parsed.reviewFailed) {
+        return parsed
+      }
+
+      lastParsedReview = parsed
+      lastFailureMessage = parsed.reason
+    } catch {
+      lastFailureMessage = `Failed to parse review response: ${response.responseText}`
+    }
+
+    if (attempt >= MAX_REVIEW_OUTPUT_ATTEMPTS) {
+      if (lastParsedReview) {
+        return lastParsedReview
+      }
+
+      throw new Error(lastFailureMessage)
+    }
+
+    logger.warn(
+      `[pr-review] output contract invalid on attempt ${attempt}; retrying reviewer before commenting`,
+    )
+    prompt = buildReviewRepairPrompt(
+      basePrompt,
+      response.responseText,
+      lastFailureMessage,
+      attempt + 1,
+    )
+  }
+
+  if (lastParsedReview) {
+    return lastParsedReview
+  }
+
+  throw new Error(lastFailureMessage || 'Review failed without producing a usable result')
 }
 
 async function fetchPrReviewContext(prNumber: number, config: AgentConfig): Promise<PrReviewContext> {
@@ -251,11 +358,39 @@ Respond with JSON only:
 }`
 }
 
+export function buildReviewRepairPrompt(
+  basePrompt: string,
+  invalidResponseText: string,
+  failureReason: string,
+  attempt: number,
+): string {
+  return `${basePrompt}
+
+Your previous review output failed agent-loop validation before any PR comment was posted.
+Repair attempt: ${attempt}
+
+Validation failure:
+${failureReason}
+
+Previous response:
+\`\`\`
+${invalidResponseText.trim() || '(empty response)'}
+\`\`\`
+
+Return corrected JSON only.
+Requirements:
+- Keep the same review target: this PR, its checked-out branch, and the linked issue contract.
+- If you reject, every finding must include \`mustFix\`, \`mustNotDo\`, \`validation\`, and \`scopeRationale\`.
+- Do not output prose before or after the JSON.
+- Do not use markdown fences around the corrected JSON.`
+}
+
 export function buildPrReviewComment(
   prNumber: number,
   review: PrReviewResult,
   attempt: number,
   action: 'approved' | 'retrying' | 'human-needed',
+  headRefOid?: string,
 ): string {
   const title = action === 'approved'
     ? 'Automated review approved'
@@ -272,10 +407,19 @@ export function buildPrReviewComment(
   const findingsBlock = review.findings && review.findings.length > 0
     ? `\n- Findings:\n${review.findings.slice(0, 5).map((finding) => `  - ${formatReviewFinding(finding)}`).join('\n')}\n`
     : ''
-  const feedbackPayload = buildStructuredReviewFeedbackPayload(review)
-  const structuredFeedbackBlock = `<!-- agent-loop:review-feedback ${JSON.stringify(feedbackPayload)} -->`
+  const structuredFeedbackBlock = shouldEmbedStructuredReviewFeedback(review)
+    ? `\n<!-- agent-loop:review-feedback ${JSON.stringify(buildStructuredReviewFeedbackPayload(review))} -->`
+    : ''
 
-  return `<!-- agent-loop:pr-review {"pr":${prNumber},"attempt":${attempt},"approved":${review.approved},"canMerge":${review.canMerge}} -->
+  const metadata: AutomatedPrReviewMetadata = {
+    pr: prNumber,
+    attempt,
+    approved: review.approved,
+    canMerge: review.canMerge,
+    ...(headRefOid ? { headRefOid } : {}),
+  }
+
+  return `<!-- agent-loop:pr-review ${JSON.stringify(metadata)} -->
 ${structuredFeedbackBlock}
 ## ${title}
 
@@ -288,6 +432,10 @@ ${nextStep}`
 }
 
 export function buildReviewFeedback(review: PrReviewResult): string {
+  if (review.reviewFailed) {
+    return review.reason
+  }
+
   return serializeStructuredReviewFeedback(buildStructuredReviewFeedbackPayload(review))
 }
 
@@ -330,11 +478,68 @@ export function extractAutomatedReviewReasons(
   return reasons
 }
 
+export function extractLatestAutomatedPrReviewState(
+  comments: Array<{ body: string }>,
+): LatestAutomatedPrReviewState | null {
+  for (let index = comments.length - 1; index >= 0; index--) {
+    const metadata = extractAutomatedPrReviewMetadata(comments[index]?.body ?? '')
+    if (!metadata) continue
+
+    return {
+      metadata,
+      feedback: extractStructuredReviewFeedback(comments[index]?.body ?? ''),
+    }
+  }
+
+  return null
+}
+
+export function getNextAutomatedPrReviewAttempt(
+  comments: Array<{ body: string }>,
+): number {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  return latest ? latest.metadata.attempt + 1 : 1
+}
+
+export function canResumeAutomatedPrReview(
+  comments: Array<{ body: string }>,
+  maxAttempt: number,
+): boolean {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return false
+
+  return (
+    latest.metadata.approved === false
+    && latest.metadata.canMerge === false
+    && latest.feedback !== null
+    && latest.metadata.attempt < maxAttempt
+  )
+}
+
+export function getReusableAutomatedPrReviewFeedback(
+  comments: Array<{ body: string }>,
+  currentHeadRefOid: string,
+  maxAttempt: number,
+): { attempt: number; feedback: StructuredReviewFeedbackPayload } | null {
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return null
+  if (latest.feedback === null) return null
+  if (latest.metadata.approved || latest.metadata.canMerge) return null
+  if (latest.metadata.attempt >= maxAttempt) return null
+  if (!latest.metadata.headRefOid || latest.metadata.headRefOid !== currentHeadRefOid) return null
+
+  return {
+    attempt: latest.metadata.attempt,
+    feedback: latest.feedback,
+  }
+}
+
 export function buildReviewRunOptions(
   prompt: string,
   worktreePath: string,
   config: AgentConfig,
   logger = console,
+  monitor?: TaskExecutionMonitor,
 ): CliAgentRunOptions {
   return {
     prompt,
@@ -343,6 +548,7 @@ export function buildReviewRunOptions(
     config,
     logger,
     allowWrites: false,
+    monitor: monitor?.agentMonitor,
   }
 }
 
@@ -407,6 +613,24 @@ export function parsePrReviewResponse(responseText: string): PrReviewResult {
   return review
 }
 
+export function classifyPrReviewOutcome(
+  review: Pick<PrReviewResult, 'approved' | 'canMerge' | 'reviewFailed' | 'reason'>,
+): 'approved' | 'rejected' | 'invalid_output' | 'execution_failed' {
+  if (review.approved && review.canMerge) {
+    return 'approved'
+  }
+
+  if (!review.reviewFailed) {
+    return 'rejected'
+  }
+
+  if (review.reason.startsWith('Review output failed validation:')) {
+    return 'invalid_output'
+  }
+
+  return 'execution_failed'
+}
+
 export function normalizeWorktreePath(path: string): string {
   try {
     return realpathSync(path)
@@ -421,28 +645,31 @@ function isMissingGitWorktreeError(error: unknown): boolean {
   return message.includes('is not a working tree')
 }
 
-async function runReviewSubagent(
+async function runReviewSubagentResponse(
   prompt: string,
   worktreePath: string,
   config: AgentConfig,
   logger = console,
-): Promise<PrReviewResult> {
+  monitor?: TaskExecutionMonitor,
+): Promise<ReviewAgentResponse> {
   logger.log(`[pr-review] launching review subagent in ${worktreePath}`)
   const result = await runConfiguredAgent(buildReviewRunOptions(
     prompt,
     worktreePath,
     config,
     logger,
+    monitor,
   ))
 
   if (!result.ok) {
-    throw new Error(`Agent exited with code ${result.exitCode}: ${result.stderr || result.stdout}`)
+    throw new ReviewAgentExecutionError(
+      `Agent exited with code ${result.exitCode}: ${result.stderr || result.stdout}`,
+      result.failureKind,
+    )
   }
 
-  try {
-    return parsePrReviewResponse(result.responseText)
-  } catch {
-    throw new Error(`Failed to parse review response: ${result.responseText}`)
+  return {
+    responseText: result.responseText,
   }
 }
 
@@ -466,6 +693,36 @@ function buildStructuredReviewFeedbackPayload(review: PrReviewResult): Structure
     canMerge: review.canMerge,
     reason: review.reason,
     findings: review.findings ?? [],
+  }
+}
+
+function shouldEmbedStructuredReviewFeedback(review: PrReviewResult): boolean {
+  return !review.reviewFailed
+}
+
+function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetadata | null {
+  const match = body.match(/<!-- agent-loop:pr-review ([\s\S]*?) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<AutomatedPrReviewMetadata>
+    const pr = Number(parsed.pr)
+    const attempt = Number(parsed.attempt)
+    if (!Number.isFinite(pr) || !Number.isFinite(attempt)) {
+      return null
+    }
+
+    return {
+      pr,
+      attempt,
+      approved: parsed.approved === true,
+      canMerge: parsed.canMerge === true,
+      headRefOid: typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
+        ? parsed.headRefOid.trim()
+        : undefined,
+    }
+  } catch {
+    return null
   }
 }
 

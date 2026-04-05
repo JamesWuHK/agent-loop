@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
@@ -7,6 +7,7 @@ import {
   buildAgentCommand,
   buildIsolatedCodexConfig,
   createIsolatedCodexHome,
+  runConfiguredAgent,
   resolveAgentBinary,
   resolveCodexAuthJson,
 } from './cli-agent'
@@ -17,6 +18,24 @@ const baseConfig: AgentConfig = {
   pat: 'ghp_test',
   pollIntervalMs: 60_000,
   concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+  },
   worktreesBase: '/tmp/worktrees',
   project: {
     profile: 'generic',
@@ -132,6 +151,48 @@ describe('cli-agent', () => {
       expect(readFileSync(join(homeDir, '.zshenv'), 'utf-8')).toBe(
         `. "${join(homeDir, '.agent-loop-shell-env')}"\n`,
       )
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('marks hung agent runs as idle_timeout when no output or git progress occurs', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-hung-test-'))
+    const scriptPath = join(tempDir, 'fake-claude.sh')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      writeFileSync(
+        scriptPath,
+        '#!/bin/sh\ncat >/dev/null\nwhile :; do :; done\n',
+        'utf-8',
+      )
+      chmodSync(scriptPath, 0o755)
+      mkdirSync(worktreePath, { recursive: true })
+
+      const result = await runConfiguredAgent({
+        prompt: 'noop',
+        worktreePath,
+        timeoutMs: 5_000,
+        config: {
+          ...baseConfig,
+          agent: {
+            ...baseConfig.agent,
+            primary: 'claude',
+            fallback: null,
+            claudePath: scriptPath,
+          },
+        },
+        monitor: {
+          heartbeatIntervalMs: 50,
+          idleTimeoutMs: 200,
+        },
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.failureKind).toBe('idle_timeout')
+      expect(result.stderr).toContain('Idle timeout')
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

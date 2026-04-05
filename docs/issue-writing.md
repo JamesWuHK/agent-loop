@@ -128,6 +128,7 @@
 - `OutOfScope` 要写 reviewer 容易误判成“应该一起做”的内容
 - `RequiredSemantics` 要写成可判定的行为
 - `Validation` 至少给一个自动化命令和一个 scope/行为自检动作
+- `Validation` 里的自动化命令必须像真实 shell 命令，且至少包含一条可执行的 `test` / `build` / `check` / `lint` / `verify` 类验证命令；纯说明文字会被 ready gate 拒绝
 
 ## Happy Path First
 

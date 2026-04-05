@@ -2,18 +2,457 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { AgentConfig } from '@agent/shared'
 import {
+  AgentDaemon,
+  buildBlockedIssueResumeEscalationComment,
+  buildDaemonRuntimeStatus,
+  getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  extractBlockedIssueResumeEscalationComment,
+  getResumableIssueLinkedPrHandoff,
+  getFailedIssueResumeBlock,
+  listBlockedIssueResumeEscalationComments,
+  shouldClearFailedIssueResumeTrackingAfterFinalize,
+  shouldEscalateBlockedIssueResume,
+  shouldResumeFailedIssueWithLinkedPr,
+  getStandaloneIssueTransitionForReviewLabels,
+  isRetryableDaemonLoopError,
   isMergeabilityFailure,
   rebaseManagedBranchOntoDefault,
+  shouldApplyStandaloneIssueTransition,
+  shouldResetLinkedPrToRetryOnIssueResume,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
 } from './daemon'
+import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 
 describe('daemon merge recovery helpers', () => {
+  test('includes effective concurrency policy and local endpoints in status snapshots', () => {
+    const config: AgentConfig = {
+      machineId: 'codex-dev',
+      repo: 'JamesWuHK/digital-employee',
+      pat: 'test-token',
+      pollIntervalMs: 60_000,
+      concurrency: 2,
+      requestedConcurrency: 5,
+      concurrencyPolicy: {
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      },
+      scheduling: {
+        concurrencyByRepo: {
+          'JamesWuHK/digital-employee': 4,
+        },
+        concurrencyByProfile: {
+          'desktop-vite': 2,
+        },
+      },
+      recovery: {
+        heartbeatIntervalMs: 30_000,
+        leaseTtlMs: 60_000,
+        workerIdleTimeoutMs: 300_000,
+        leaseAdoptionBackoffMs: 5_000,
+      },
+      worktreesBase: '/tmp/worktrees',
+      project: {
+        profile: 'desktop-vite',
+        maxConcurrency: 3,
+      },
+      agent: {
+        primary: 'codex',
+        fallback: 'claude',
+        claudePath: 'claude',
+        codexPath: 'codex',
+        timeoutMs: 60_000,
+      },
+      git: {
+        defaultBranch: 'main',
+        authorName: 'agent-loop',
+        authorEmail: 'agent-loop@local',
+      },
+    }
+
+    const daemon = new AgentDaemon(
+      config,
+      console,
+      { host: '127.0.0.1', port: 9311 },
+      9091,
+    )
+
+    expect(daemon.getStatus()).toMatchObject({
+      repo: 'JamesWuHK/digital-employee',
+      concurrency: 2,
+      requestedConcurrency: 5,
+      concurrencyPolicy: {
+        requested: 5,
+        effective: 2,
+        repoCap: 4,
+        profileCap: 2,
+        projectCap: 3,
+      },
+      project: {
+        profile: 'desktop-vite',
+        defaultBranch: 'main',
+        maxConcurrency: 3,
+      },
+      endpoints: {
+        health: {
+          host: '127.0.0.1',
+          port: 9311,
+          path: '/health',
+        },
+        metrics: {
+          host: '127.0.0.1',
+          port: 9091,
+          path: '/metrics',
+        },
+      },
+      runtime: {
+        supervisor: 'direct',
+        workingDirectory: process.cwd(),
+        runtimeRecordPath: null,
+        logPath: null,
+      },
+    })
+  })
+
+  test('counts in-flight issue work before a worktree is registered', () => {
+    expect(getEffectiveActiveTaskCount({
+      activeWorktreeCount: 0,
+      hasInFlightProcess: true,
+      activePrReviewCount: 0,
+      hasInFlightPrReview: false,
+    })).toBe(1)
+  })
+
+  test('does not double-count work that already has an active slot', () => {
+    expect(getEffectiveActiveTaskCount({
+      activeWorktreeCount: 1,
+      hasInFlightProcess: true,
+      activePrReviewCount: 1,
+      hasInFlightPrReview: true,
+    })).toBe(2)
+  })
+
+  test('builds runtime status snapshots for health and metrics surfaces', () => {
+    expect(buildDaemonRuntimeStatus({
+      supervisor: 'launchd',
+      workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
+      runtimeRecordPath: '/Users/wujames/.agent-loop/runtime/runtime.json',
+      logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
+      activeWorktreeCount: 1,
+      activePrReviewCount: 2,
+      hasInFlightProcess: true,
+      hasInFlightPrReview: true,
+      startupRecoveryPending: true,
+      transientLoopErrorCount: 2,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorAt: '2026-04-05T08:10:50.000Z',
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+      lastTransientLoopErrorAgeSeconds: 10,
+      failedIssueResumeAttemptCount: 3,
+      failedIssueResumeCooldownCount: 2,
+      oldestBlockedIssueResumeAgeSeconds: 12,
+      activeLeaseCount: 2,
+      oldestLeaseHeartbeatAgeSeconds: 47,
+      activeLeaseDetails: [
+        {
+          scope: 'issue-process',
+          targetNumber: 77,
+          commentId: 11,
+          issueNumber: 77,
+          prNumber: null,
+          machineId: 'codex-dev',
+          daemonInstanceId: 'daemon-codex-dev-1',
+          branch: 'agent/77/codex-dev',
+          worktreeId: 'issue-77-codex-dev',
+          phase: 'implementation',
+          attempt: 2,
+          status: 'active',
+          lastProgressKind: 'stdout',
+          heartbeatAgeSeconds: 47,
+          progressAgeSeconds: 19,
+          expiresInSeconds: 13,
+          adoptable: false,
+        },
+      ],
+      stalledWorkerCount: 1,
+      stalledWorkerDetails: [
+        {
+          scope: 'issue-process',
+          targetNumber: 77,
+          since: '2026-04-05T08:10:30.000Z',
+          durationSeconds: 30,
+          reason: 'idle timeout',
+        },
+      ],
+      blockedIssueResumeCount: 1,
+      blockedIssueResumeEscalationCount: 1,
+      blockedIssueResumeDetails: [
+        {
+          issueNumber: 91,
+          prNumber: 110,
+          since: '2026-04-05T08:09:45.000Z',
+          durationSeconds: 12,
+          reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          escalationCount: 1,
+          lastEscalatedAt: '2026-04-05T08:10:45.000Z',
+          lastEscalationAgeSeconds: 6,
+        },
+      ],
+      lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
+      lastRecoveryActionKind: 'issue-process-idle-timeout',
+      recentRecoveryActions: [
+        {
+          at: '2026-04-05T08:11:00.000Z',
+          kind: 'issue-process-idle-timeout',
+          outcome: 'recoverable',
+          scope: 'issue-process',
+          targetNumber: 77,
+          reason: 'idle timeout',
+        },
+      ],
+      oldestBlockedIssueResumeEscalationAgeSeconds: 6,
+    })).toEqual({
+      supervisor: 'launchd',
+      workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
+      runtimeRecordPath: '/Users/wujames/.agent-loop/runtime/runtime.json',
+      logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
+      activePrReviews: 2,
+      inFlightIssueProcess: true,
+      inFlightPrReview: true,
+      startupRecoveryPending: true,
+      transientLoopErrorCount: 2,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorAt: '2026-04-05T08:10:50.000Z',
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+      lastTransientLoopErrorAgeSeconds: 10,
+      effectiveActiveTasks: 3,
+      failedIssueResumeAttemptsTracked: 3,
+      failedIssueResumeCooldownsTracked: 2,
+      oldestBlockedIssueResumeAgeSeconds: 12,
+      activeLeaseCount: 2,
+      oldestLeaseHeartbeatAgeSeconds: 47,
+      activeLeaseDetails: [
+        {
+          scope: 'issue-process',
+          targetNumber: 77,
+          commentId: 11,
+          issueNumber: 77,
+          prNumber: null,
+          machineId: 'codex-dev',
+          daemonInstanceId: 'daemon-codex-dev-1',
+          branch: 'agent/77/codex-dev',
+          worktreeId: 'issue-77-codex-dev',
+          phase: 'implementation',
+          attempt: 2,
+          status: 'active',
+          lastProgressKind: 'stdout',
+          heartbeatAgeSeconds: 47,
+          progressAgeSeconds: 19,
+          expiresInSeconds: 13,
+          adoptable: false,
+        },
+      ],
+      stalledWorkerCount: 1,
+      stalledWorkerDetails: [
+        {
+          scope: 'issue-process',
+          targetNumber: 77,
+          since: '2026-04-05T08:10:30.000Z',
+          durationSeconds: 30,
+          reason: 'idle timeout',
+        },
+      ],
+      blockedIssueResumeCount: 1,
+      blockedIssueResumeEscalationCount: 1,
+      blockedIssueResumeDetails: [
+        {
+          issueNumber: 91,
+          prNumber: 110,
+          since: '2026-04-05T08:09:45.000Z',
+          durationSeconds: 12,
+          reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          escalationCount: 1,
+          lastEscalatedAt: '2026-04-05T08:10:45.000Z',
+          lastEscalationAgeSeconds: 6,
+        },
+      ],
+      lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
+      lastRecoveryActionKind: 'issue-process-idle-timeout',
+      recentRecoveryActions: [
+        {
+          at: '2026-04-05T08:11:00.000Z',
+          kind: 'issue-process-idle-timeout',
+          outcome: 'recoverable',
+          scope: 'issue-process',
+          targetNumber: 77,
+          reason: 'idle timeout',
+        },
+      ],
+      oldestBlockedIssueResumeEscalationAgeSeconds: 6,
+    })
+  })
+
+  test('round-trips blocked issue resume escalation comments', () => {
+    const comment = buildBlockedIssueResumeEscalationComment({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+
+    expect(extractBlockedIssueResumeEscalationComment(comment)).toEqual({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+  })
+
+  test('finds blocked issue resume escalations for the same issue and linked PR', () => {
+    const body = buildBlockedIssueResumeEscalationComment({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'blocked',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+
+    const matches = listBlockedIssueResumeEscalationComments([
+      {
+        commentId: 1,
+        body,
+        createdAt: '2026-04-05T08:10:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
+      },
+      {
+        commentId: 2,
+        body: body.replace('"prNumber":110', '"prNumber":111'),
+        createdAt: '2026-04-05T08:11:00.000Z',
+        updatedAt: '2026-04-05T08:11:00.000Z',
+      },
+    ], 91, 110)
+
+    expect(matches).toHaveLength(1)
+    expect(matches[0]?.commentId).toBe(1)
+  })
+
+  test('only escalates blocked issue resumes after threshold and outside cooldown', () => {
+    const now = Date.parse('2026-04-05T08:10:00.000Z')
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:09:10.000Z',
+      lastEscalatedAt: null,
+      now,
+    })).toBe(false)
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      lastEscalatedAt: '2026-04-05T08:05:00.000Z',
+      now,
+    })).toBe(false)
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      lastEscalatedAt: '2026-04-05T07:30:00.000Z',
+      now,
+    })).toBe(true)
+  })
+
+  test('tracks transient loop errors in daemon runtime status', () => {
+    const config: AgentConfig = {
+      machineId: 'codex-dev',
+      repo: 'JamesWuHK/digital-employee',
+      pat: 'test-token',
+      pollIntervalMs: 60_000,
+      concurrency: 1,
+      requestedConcurrency: 1,
+      concurrencyPolicy: {
+        requested: 1,
+        effective: 1,
+        repoCap: null,
+        profileCap: null,
+        projectCap: null,
+      },
+      scheduling: {
+        concurrencyByRepo: {},
+        concurrencyByProfile: {},
+      },
+      recovery: {
+        heartbeatIntervalMs: 30_000,
+        leaseTtlMs: 60_000,
+        workerIdleTimeoutMs: 300_000,
+        leaseAdoptionBackoffMs: 5_000,
+      },
+      worktreesBase: '/tmp/worktrees',
+      project: {
+        profile: 'desktop-vite',
+      },
+      agent: {
+        primary: 'codex',
+        fallback: 'claude',
+        claudePath: 'claude',
+        codexPath: 'codex',
+        timeoutMs: 60_000,
+      },
+      git: {
+        defaultBranch: 'main',
+        authorName: 'agent-loop',
+        authorEmail: 'agent-loop@local',
+      },
+    }
+
+    const daemon = new AgentDaemon(config, console)
+    ;(daemon as any).noteTransientLoopError('startup-recovery', new Error('Could not resolve host: api.github.com'))
+
+    expect(daemon.getStatus().runtime).toMatchObject({
+      transientLoopErrorCount: 1,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+    })
+    expect(daemon.getStatus().runtime.lastTransientLoopErrorAgeSeconds).toBeTypeOf('number')
+  })
+
+  test('treats transient network-style daemon errors as retryable', () => {
+    expect(isRetryableDaemonLoopError(new Error('gh api failed: dial tcp: i/o timeout'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('Could not resolve host: api.github.com'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('Connection refused'))).toBe(true)
+    expect(isRetryableDaemonLoopError(new Error('malformed issue contract'))).toBe(false)
+  })
+
   test('resumes working issues with a local worktree after daemon restart', () => {
     expect(shouldResumeManagedIssue(
       { state: 'working' },
+      true,
+      0,
+      0,
+      Date.now(),
+      2,
+    )).toBe(true)
+  })
+
+  test('resumes stale issues with a preserved local worktree after daemon restart', () => {
+    expect(shouldResumeManagedIssue(
+      { state: 'stale' },
       true,
       0,
       0,
@@ -115,6 +554,147 @@ describe('daemon merge recovery helpers', () => {
       now,
       5 * 60_000,
     )).toBe(false)
+  })
+
+  test('clears resumable failure cooldown tracking only for terminal finalize failures', () => {
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(true)
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
+  })
+
+  test('resets linked PR labels back to retry when issue recovery resumes', () => {
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.RETRY])).toBe(false)
+    expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.APPROVED])).toBe(false)
+  })
+
+  test('prefers standalone PR handoff for resumable issues when the branch is already synced', () => {
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+    }, false, true)).toEqual({
+      kind: 'pr-review',
+    })
+
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true, true)).toEqual({
+      kind: 'pr-review',
+    })
+
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.APPROVED],
+    }, false, true)).toEqual({
+      kind: 'pr-merge',
+    })
+  })
+
+  test('keeps resumable issues on issue recovery when the branch is not synced to the PR head', () => {
+    expect(getResumableIssueLinkedPrHandoff({
+      labels: [PR_REVIEW_LABELS.RETRY],
+    }, false, false)).toBeNull()
+  })
+
+  test('does not resume failed issues behind terminal human-needed PRs', () => {
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+    }, false)).toBe(false)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+    }, false)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.APPROVED],
+    }, false)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr(null, false)).toBe(true)
+  })
+
+  test('describes blocked failed-issue resumes for terminal human-needed PRs', () => {
+    expect(getFailedIssueResumeBlock({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+    }, false)).toEqual({
+      prNumber: 110,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+    })
+
+    expect(getFailedIssueResumeBlock({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true)).toBeNull()
+  })
+
+  test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.DONE,
+    )).toBe(true)
+
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.FAILED,
+    )).toBe(false)
+
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'done' },
+      ISSUE_LABELS.WORKING,
+    )).toBe(false)
+  })
+
+  test('reconciles human-needed PR labels back to agent:failed on startup', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED],
+      { state: 'working' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.FAILED,
+      reasonSuffix: 'is in human-needed state on startup',
+    })
+  })
+
+  test('reconciles retry and approved PR labels back to agent:working on startup', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+      { state: 'failed' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.WORKING,
+      reasonSuffix: 'is retrying review on startup',
+    })
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'failed' },
+    )).toEqual({
+      nextLabel: ISSUE_LABELS.WORKING,
+      reasonSuffix: 'is approved and awaiting merge on startup',
+    })
+  })
+
+  test('does not emit redundant startup issue transitions when PR and issue already agree', () => {
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'working' },
+    )).toBeNull()
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED],
+      { state: 'failed' },
+    )).toBeNull()
+
+    expect(getStandaloneIssueTransitionForReviewLabels(
+      [PR_REVIEW_LABELS.APPROVED],
+      { state: 'done' },
+    )).toBeNull()
   })
 
   test('detects mergeability failures from GitHub merge API messages', () => {

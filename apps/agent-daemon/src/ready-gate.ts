@@ -1,4 +1,4 @@
-import { parseIssueContract, validateIssueContract, ISSUE_LABELS, buildGhEnv, type AgentConfig } from '@agent/shared'
+import { parseIssueContract, validateIssueContract, ISSUE_LABELS, buildGhEnv, commentOnIssue, type AgentConfig } from '@agent/shared'
 import { loadConfig, type CliArgs } from './config'
 
 interface ReadyGateIssueSnapshot {
@@ -96,33 +96,6 @@ export async function fetchIssueSnapshot(
     labels: (parsed.labels ?? [])
       .map((label) => typeof label.name === 'string' ? label.name : '')
       .filter(Boolean),
-  }
-}
-
-async function commentOnIssue(
-  issueNumber: number,
-  body: string,
-  config: AgentConfig,
-): Promise<void> {
-  const proc = Bun.spawn([
-    'gh',
-    'issue',
-    'comment',
-    String(issueNumber),
-    '--repo',
-    config.repo,
-    '--body',
-    body,
-  ], {
-    env: buildGhEnv(config),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-
-  const stderr = await new Response(proc.stderr).text()
-  const exitCode = await proc.exited
-  if (exitCode !== 0) {
-    throw new Error(`gh issue comment failed: ${stderr}`)
   }
 }
 

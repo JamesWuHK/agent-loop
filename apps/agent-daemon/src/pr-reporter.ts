@@ -1,30 +1,70 @@
 import type { AgentConfig } from '@agent/shared'
 import { checkPrExists, createPr } from '@agent/shared'
 
+interface GitCommandResult {
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+interface PushBranchDependencies {
+  runGit: (
+    worktreePath: string,
+    args: string[],
+  ) => Promise<GitCommandResult>
+  beforePushAttempt?: (input: {
+    worktreePath: string
+    branch: string
+    attempt: number
+    pushArgs: string[]
+  }) => Promise<void> | void
+}
+
+const MAX_PUSH_ATTEMPTS = 3
+
 export async function pushBranch(
   worktreePath: string,
   branch: string,
   logger = console,
+  dependencies: PushBranchDependencies = { runGit },
 ): Promise<void> {
-  const pushArgs = await syncBranchWithRemote(worktreePath, branch, logger)
-  const push = await runGit(worktreePath, pushArgs)
-  if (push.exitCode !== 0) {
-    throw new Error(push.stderr || push.stdout || `Failed to push ${branch}`)
+  let lastError = `Failed to push ${branch}`
+
+  for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
+    const pushArgs = await syncBranchWithRemote(worktreePath, branch, logger, dependencies.runGit)
+    await dependencies.beforePushAttempt?.({ worktreePath, branch, attempt, pushArgs })
+
+    const push = await dependencies.runGit(worktreePath, pushArgs)
+    if (push.exitCode === 0) {
+      logger.log(`[pr] pushed branch ${branch}`)
+      return
+    }
+
+    lastError = push.stderr || push.stdout || `Failed to push ${branch}`
+    if (attempt >= MAX_PUSH_ATTEMPTS || !isRetryableManagedBranchPushFailure(lastError)) {
+      throw new Error(lastError)
+    }
+
+    logger.warn(
+      `[pr] push of ${branch} hit a managed-branch race on attempt ${attempt}; refetching and retrying`,
+    )
   }
-  logger.log(`[pr] pushed branch ${branch}`)
+
+  throw new Error(lastError)
 }
 
 async function syncBranchWithRemote(
   worktreePath: string,
   branch: string,
   logger = console,
+  gitRunner: PushBranchDependencies['runGit'] = runGit,
 ): Promise<string[]> {
-  await runGit(worktreePath, ['fetch', 'origin', branch])
+  await gitRunner(worktreePath, ['fetch', 'origin', branch])
 
-  const remoteExists = await runGit(worktreePath, ['rev-parse', '--verify', `origin/${branch}`])
+  const remoteExists = await gitRunner(worktreePath, ['rev-parse', '--verify', `origin/${branch}`])
   if (remoteExists.exitCode !== 0) return ['push', '-u', 'origin', branch]
 
-  const counts = await runGit(worktreePath, ['rev-list', '--left-right', '--count', `origin/${branch}...HEAD`])
+  const counts = await gitRunner(worktreePath, ['rev-list', '--left-right', '--count', `origin/${branch}...HEAD`])
   if (counts.exitCode !== 0) {
     throw new Error(counts.stderr || counts.stdout || `Failed to compare ${branch} with origin/${branch}`)
   }
@@ -39,7 +79,7 @@ async function syncBranchWithRemote(
 
   if (behind > 0 && ahead === 0) {
     logger.log(`[pr] fast-forwarding ${branch} to origin/${branch} before push`)
-    const ff = await runGit(worktreePath, ['merge', '--ff-only', `origin/${branch}`])
+    const ff = await gitRunner(worktreePath, ['merge', '--ff-only', `origin/${branch}`])
     if (ff.exitCode !== 0) {
       throw new Error(ff.stderr || ff.stdout || `Failed to fast-forward ${branch} to origin/${branch}`)
     }
@@ -54,10 +94,18 @@ async function syncBranchWithRemote(
   return ['push', '-u', 'origin', branch]
 }
 
+export function isRetryableManagedBranchPushFailure(output: string): boolean {
+  const normalized = output.toLowerCase()
+  return normalized.includes('non-fast-forward')
+    || normalized.includes('fetch first')
+    || normalized.includes('stale info')
+    || (normalized.includes('[rejected]') && normalized.includes('failed to push some refs'))
+}
+
 async function runGit(
   worktreePath: string,
   args: string[],
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<GitCommandResult> {
   const proc = Bun.spawn(['git', '-C', worktreePath, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',

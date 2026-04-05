@@ -85,6 +85,7 @@
 - `OutOfScope` 要写 reviewer 容易误判成“应该一起做”的内容
 - `RequiredSemantics` 要写成可判定的行为，不要写成模糊愿景
 - `Validation` 至少给一个自动化命令和一个 scope 自检动作
+- ready gate 会校验 `Validation` 里至少有一条像真实 shell 的自动化验证命令，并且其中至少一条是可执行的 `test` / `build` / `check` / `lint` / `verify` 命令
 
 ## 判定标准
 
