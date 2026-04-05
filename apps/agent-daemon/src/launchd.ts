@@ -270,6 +270,28 @@ export function restartLaunchdService(
   }
 }
 
+export function stopLaunchdService(
+  paths: LaunchdServicePaths,
+  runner: LaunchctlRunner = runLaunchctl,
+): {
+  stopped: boolean
+  message: string
+} {
+  if (!existsSync(paths.plistPath)) {
+    return {
+      stopped: false,
+      message: `Launchd service ${paths.label} is not installed`,
+    }
+  }
+
+  runner(['bootout', paths.serviceTarget], { allowFailure: true })
+
+  return {
+    stopped: true,
+    message: `Stopped launchd service ${paths.label}`,
+  }
+}
+
 export function inspectLaunchdService(
   paths: LaunchdServicePaths,
   runner: LaunchctlRunner = runLaunchctl,

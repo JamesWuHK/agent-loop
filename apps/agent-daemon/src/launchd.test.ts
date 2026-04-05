@@ -13,6 +13,7 @@ import {
   parseLaunchdServiceDetail,
   restartLaunchdService,
   renderLaunchdPlist,
+  stopLaunchdService,
   uninstallLaunchdService,
 } from './launchd'
 
@@ -303,6 +304,72 @@ gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
 
     expect(restartLaunchdService(spec, () => '', () => {})).toEqual({
       restarted: false,
+      message: `Launchd service ${spec.label} is not installed`,
+    })
+  })
+
+  test('stops an installed launchd service without deleting the plist', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-stop-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+    mkdirSync(spec.launchAgentsDir, { recursive: true })
+    writeFileSync(spec.plistPath, '<plist />')
+
+    const calls: string[] = []
+    const result = stopLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      return ''
+    })
+
+    expect(result).toEqual({
+      stopped: true,
+      message: `Stopped launchd service ${spec.label}`,
+    })
+    expect(existsSync(spec.plistPath)).toBe(true)
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+    ])
+  })
+
+  test('reports when stopping a launchd service that is not installed', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-stop-missing-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+
+    expect(stopLaunchdService(spec, () => {
+      throw new Error('runner should not be called when plist is missing')
+    })).toEqual({
+      stopped: false,
       message: `Launchd service ${spec.label} is not installed`,
     })
   })

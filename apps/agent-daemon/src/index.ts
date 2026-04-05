@@ -32,6 +32,7 @@ import {
   inspectLaunchdService,
   installLaunchdService,
   restartLaunchdService,
+  stopLaunchdService,
   uninstallLaunchdService,
 } from './launchd'
 
@@ -55,6 +56,12 @@ export interface RestartManagedRuntimeResult {
   message: string
 }
 
+export interface StopManagedRuntimeResult {
+  kind: 'launchd' | 'detached' | 'none'
+  stopped: boolean
+  message: string
+}
+
 export interface ReconcileManagedRuntimeResult {
   kind: 'launchd' | 'detached' | 'none'
   ok: boolean
@@ -68,6 +75,7 @@ interface RestartManagedRuntimeDependencies {
   buildLaunchdServicePaths: typeof buildLaunchdServicePaths
   inspectLaunchdService: typeof inspectLaunchdService
   restartLaunchdService: typeof restartLaunchdService
+  stopLaunchdService?: typeof stopLaunchdService
   stopBackgroundRuntime: typeof stopBackgroundRuntime
   launchBackgroundRuntime: typeof launchBackgroundRuntime
 }
@@ -78,6 +86,7 @@ const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   buildLaunchdServicePaths,
   inspectLaunchdService,
   restartLaunchdService,
+  stopLaunchdService,
   stopBackgroundRuntime,
   launchBackgroundRuntime,
 }
@@ -260,13 +269,16 @@ async function main() {
     }
 
     if (args.stop) {
-      const result = discoveredRuntime
-        ? stopBackgroundRuntime(discoveredRuntime.recordPath)
-        : stopBackgroundRuntime(resolveFallbackRuntimeRecordPath({
-          repo: cliArgs.repo,
-          machineId: cliArgs.machineId,
-          healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
-        }))
+      const result = stopManagedRuntime({
+        discoveredRuntime,
+        repo: cliArgs.repo,
+        machineId: cliArgs.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+        metricsPort,
+        cwd: process.cwd(),
+        scriptPath: process.argv[1]!,
+        argv: process.argv.slice(2),
+      })
       console.log(`[agent-loop] ${result.message}`)
       process.exit(result.stopped ? 0 : 1)
     }
@@ -351,7 +363,7 @@ async function main() {
 
     const removeRuntimeFileIfManaged = () => {
       const runtimeFile = process.env.AGENT_LOOP_RUNTIME_FILE
-      if (runtimeFile) {
+      if (runtimeFile && shouldRemoveManagedRuntimeRecord(resolveCurrentRuntimeSupervisor())) {
         removeBackgroundRuntimeRecord(runtimeFile)
       }
     }
@@ -421,7 +433,7 @@ Options:
       --launchd-install       Install and start a macOS launchd service for this daemon (run from a durable repo checkout, not /tmp)
       --launchd-uninstall     Remove the macOS launchd service matching repo/machine-id/health-port
       --launchd-status        Inspect the macOS launchd service matching repo/machine-id/health-port
-      --stop                  Stop the detached daemon instance matching repo/machine-id/health-port
+      --stop                  Stop the managed daemon matching repo/machine-id/health-port
       --status                Print a compact local daemon status report and exit
       --doctor                Print a detailed local daemon diagnostic report and exit
       --dry-run               Simulate without making changes
@@ -496,28 +508,6 @@ function resolveDiscoveredRuntime(input: {
   }
 }
 
-function resolveFallbackRuntimeRecordPath(input: {
-  repo?: string
-  machineId?: string
-  healthPort: number
-}): string {
-  const identity = resolveLocalDaemonIdentity(
-    {
-      repo: input.repo,
-      machineId: input.machineId,
-    },
-    {
-      persistGeneratedMachineId: false,
-    },
-  )
-
-  return buildBackgroundRuntimePaths({
-    repo: identity.repo,
-    machineId: identity.machineId,
-    healthPort: input.healthPort,
-  }).recordPath
-}
-
 function ensureLaunchdSupported(): void {
   if (process.platform !== 'darwin') {
     throw new Error('launchd management is only supported on macOS')
@@ -536,6 +526,12 @@ export function buildManagedRestartArgs(input: {
     '--health-port', String(input.healthPort),
     '--metrics-port', String(input.metricsPort),
   ]
+}
+
+export function shouldRemoveManagedRuntimeRecord(
+  supervisor: ReturnType<typeof resolveCurrentRuntimeSupervisor>,
+): boolean {
+  return supervisor !== 'launchd'
 }
 
 export function reconcileManagedRuntime(
@@ -639,6 +635,55 @@ export function reconcileManagedRuntime(
     kind: 'none',
     ok: false,
     changed: false,
+    message: 'No managed daemon runtime or launchd service matched the current repo/machine-id/health-port',
+  }
+}
+
+export function stopManagedRuntime(
+  input: RestartManagedRuntimeInput,
+  deps: RestartManagedRuntimeDependencies = DEFAULT_RESTART_DEPENDENCIES,
+): StopManagedRuntimeResult {
+  const runtime = input.discoveredRuntime
+
+  if (runtime?.record.supervisor === 'detached') {
+    const result = deps.stopBackgroundRuntime(runtime.recordPath)
+    return {
+      kind: 'detached',
+      stopped: result.stopped,
+      message: result.message,
+    }
+  }
+
+  if (deps.platform === 'darwin') {
+    const identity = deps.resolveLocalDaemonIdentity(
+      {
+        repo: runtime?.record.repo ?? input.repo,
+        machineId: runtime?.record.machineId ?? input.machineId,
+      },
+      {
+        persistGeneratedMachineId: false,
+      },
+    )
+    const launchdPaths = deps.buildLaunchdServicePaths({
+      repo: identity.repo,
+      machineId: identity.machineId,
+      healthPort: runtime?.record.healthPort ?? input.healthPort,
+    })
+    const launchdStatus = deps.inspectLaunchdService(launchdPaths)
+
+    if (launchdStatus.installed || runtime?.record.supervisor === 'launchd') {
+      const stopResult = (deps.stopLaunchdService ?? stopLaunchdService)(launchdPaths)
+      return {
+        kind: 'launchd',
+        stopped: stopResult.stopped,
+        message: stopResult.message,
+      }
+    }
+  }
+
+  return {
+    kind: 'none',
+    stopped: false,
     message: 'No managed daemon runtime or launchd service matched the current repo/machine-id/health-port',
   }
 }
