@@ -13,6 +13,14 @@ const LAUNCH_AGENTS_DIR_NAME = 'Library/LaunchAgents'
 const LAUNCHD_LABEL_PREFIX = 'com.agentloop'
 const DEFAULT_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 const SAFE_ENV_KEYS = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR'] as const
+const LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS = 3
+const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 250
+const LAUNCHD_RETRYABLE_BOOTSTRAP_ERROR_PATTERNS = [
+  'bootstrap failed: 5',
+  'input/output error',
+  'resource busy',
+  'operation already in progress',
+] as const
 
 export interface LaunchdServicePaths {
   label: string
@@ -45,6 +53,7 @@ interface LaunchctlOptions {
 }
 
 type LaunchctlRunner = (args: string[], options?: LaunchctlOptions) => string
+type SleepFn = (ms: number) => void
 
 export function buildLaunchdServicePaths(
   identity: BackgroundRuntimeIdentity,
@@ -180,14 +189,28 @@ export function renderLaunchdPlist(spec: LaunchdServiceSpec): string {
 export function installLaunchdService(
   spec: LaunchdServiceSpec,
   runner: LaunchctlRunner = runLaunchctl,
+  sleep: SleepFn = sleepSync,
 ): LaunchdServicePaths {
   assertLaunchdWorkingDirectorySafe(spec.workingDirectory)
   mkdirSync(spec.launchAgentsDir, { recursive: true })
-  runner(['bootout', spec.serviceTarget], { allowFailure: true })
   writeFileSync(spec.plistPath, renderLaunchdPlist(spec), {
     mode: 0o644,
   })
-  runner(['bootstrap', spec.domain, spec.plistPath])
+
+  for (let attempt = 1; attempt <= LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt += 1) {
+    runner(['bootout', spec.serviceTarget], { allowFailure: true })
+
+    try {
+      runner(['bootstrap', spec.domain, spec.plistPath])
+      break
+    } catch (error) {
+      if (!isRetryableLaunchdBootstrapError(error) || attempt === LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS) {
+        throw error
+      }
+      sleep(LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS)
+    }
+  }
+
   runner(['enable', spec.serviceTarget], { allowFailure: true })
   runner(['kickstart', '-k', spec.serviceTarget])
 
@@ -309,6 +332,20 @@ function isSameOrChildPath(candidate: string, parent: string): boolean {
   const normalizedParent = resolve(parent)
   return normalizedCandidate === normalizedParent
     || normalizedCandidate.startsWith(`${normalizedParent}/`)
+}
+
+function isRetryableLaunchdBootstrapError(error: unknown): boolean {
+  const message = formatLaunchdError(error).toLowerCase()
+  return LAUNCHD_RETRYABLE_BOOTSTRAP_ERROR_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
+function formatLaunchdError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
 function escapeXml(value: string): string {

@@ -95,7 +95,7 @@ describe('launchd helpers', () => {
     installLaunchdService(spec, (args) => {
       calls.push(args.join(' '))
       return ''
-    })
+    }, () => {})
 
     expect(existsSync(spec.plistPath)).toBe(true)
     expect(calls).toEqual([
@@ -135,6 +135,85 @@ describe('launchd helpers', () => {
       loaded: true,
       detail: 'state = running',
     })
+  })
+
+  test('retries retryable bootstrap failures during launchd install', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-retry-'))
+    const calls: string[] = []
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--launchd-install', '--health-port', '9314', '--metrics-port', '9094'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+
+    let bootstrapAttempts = 0
+    installLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      if (args[0] === 'bootstrap') {
+        bootstrapAttempts += 1
+        if (bootstrapAttempts === 1) {
+          throw new Error('launchctl bootstrap failed: Bootstrap failed: 5: Input/output error')
+        }
+      }
+      return ''
+    }, () => {})
+
+    expect(bootstrapAttempts).toBe(2)
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `enable ${spec.serviceTarget}`,
+      `kickstart -k ${spec.serviceTarget}`,
+    ])
+  })
+
+  test('does not retry non-retryable bootstrap failures during launchd install', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-no-retry-'))
+    const calls: string[] = []
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--launchd-install', '--health-port', '9314', '--metrics-port', '9094'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+
+    expect(() => installLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      if (args[0] === 'bootstrap') {
+        throw new Error('launchctl bootstrap failed: permission denied')
+      }
+      return ''
+    }, () => {})).toThrow('permission denied')
+
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+    ])
   })
 
   test('uninstalls a launchd service and clears the runtime record', () => {
