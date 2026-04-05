@@ -62,6 +62,10 @@ import {
   type MetricsServer,
 } from './metrics'
 import { resolveCurrentRuntimeSupervisor } from './background'
+import {
+  ManagedDaemonPresencePublisher,
+  type ManagedDaemonPresenceRuntimeState,
+} from './presence'
 
 export interface HealthServerConfig {
   host: string
@@ -173,6 +177,7 @@ export class AgentDaemon {
   }
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
+  private presencePublisher: ManagedDaemonPresencePublisher | null = null
   private _inFlightProcess: Promise<void> | null = null
   private _inFlightPrReview: Promise<void> | null = null
   private activePrReviews = new Set<number>()
@@ -508,6 +513,20 @@ export class AgentDaemon {
     this.running = true
     this.syncRuntimeMetrics()
 
+    this.presencePublisher = new ManagedDaemonPresencePublisher({
+      config: this.config,
+      daemonInstanceId: this.daemonInstanceId,
+      healthPort: this.healthServerConfig.port,
+      metricsPort: this.metricsPort,
+      readRuntimeState: () => this.readPresenceRuntimeState(),
+      logger: this.logger,
+    })
+    try {
+      await this.presencePublisher.start()
+    } catch (error) {
+      this.logger.warn(`[daemon] failed to start GitHub presence heartbeat: ${formatDaemonError(error)}`)
+    }
+
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
   }
@@ -619,6 +638,16 @@ export class AgentDaemon {
     if (this.metricsServer) {
       this.metricsServer.stop()
       this.metricsServer = null
+    }
+
+    if (this.presencePublisher) {
+      try {
+        await this.presencePublisher.stop()
+      } catch (error) {
+        this.logger.warn(`[daemon] failed to publish stopped presence heartbeat: ${formatDaemonError(error)}`)
+      } finally {
+        this.presencePublisher = null
+      }
     }
 
     // Mark all active worktrees as stale
@@ -2457,6 +2486,15 @@ export class AgentDaemon {
       recentRecoveryActions: [...this.recoveryActionHistory],
       oldestBlockedIssueResumeEscalationAgeSeconds: this.getOldestBlockedIssueResumeEscalationAgeSeconds(),
     })
+  }
+
+  private readPresenceRuntimeState(): ManagedDaemonPresenceRuntimeState {
+    const runtime = this.buildRuntimeStatus()
+    return {
+      activeLeaseCount: runtime.activeLeaseCount,
+      activeWorktreeCount: this.activeWorktrees.size,
+      effectiveActiveTasks: runtime.effectiveActiveTasks,
+    }
   }
 
   private syncRuntimeMetrics(): void {

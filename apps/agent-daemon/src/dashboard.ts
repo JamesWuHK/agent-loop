@@ -18,6 +18,10 @@ import {
   listBackgroundRuntimeRecords,
   type BackgroundRuntimeSnapshot,
 } from './background'
+import {
+  listActiveManagedDaemonPresence,
+  type ManagedDaemonPresenceComment,
+} from './presence'
 
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
 export const DEFAULT_DASHBOARD_PORT = 9388
@@ -91,6 +95,24 @@ export interface DashboardRuntimeObservabilityView {
   warnings: string[]
 }
 
+export interface DashboardPresenceView {
+  repo: string
+  machineId: string
+  daemonInstanceId: string
+  status: 'idle' | 'busy' | 'stopped'
+  startedAt: string
+  lastHeartbeatAt: string
+  expiresAt: string
+  heartbeatAgeSeconds: number | null
+  expiresInSeconds: number | null
+  healthPort: number
+  metricsPort: number
+  activeLeaseCount: number
+  activeWorktreeCount: number
+  effectiveActiveTasks: number
+  source: 'github'
+}
+
 export interface DashboardMachineCard {
   machineId: string
   daemonInstanceIds: string[]
@@ -98,6 +120,7 @@ export interface DashboardMachineCard {
   localRuntimes: DashboardLocalRuntimeView[]
   observability: DashboardRuntimeObservabilityView[]
   activeLeases: DashboardLeaseView[]
+  presence: DashboardPresenceView | null
   warnings: string[]
 }
 
@@ -187,7 +210,7 @@ export async function collectDashboardSnapshot(
   const generatedAt = new Date().toISOString()
   const errors: string[] = []
   const notes = [
-    '远程机器只会在 GitHub 上存在当前仓库的活跃受管租约评论时显示。',
+    '远程机器会从 GitHub 上的活跃受管租约或共享 presence 心跳中显示出来。',
     'MVP 阶段不提供远程日志；日志面板目前只追踪本地受管 daemon 日志。',
   ]
 
@@ -205,6 +228,7 @@ export async function collectDashboardSnapshot(
   let issues: DashboardIssueView[] = []
   let prs: DashboardPullRequestView[] = []
   let remoteLeases: DashboardLeaseView[] = []
+  let remotePresences: DashboardPresenceView[] = []
 
   try {
     const githubCollection = await collectGitHubDashboardData({
@@ -221,7 +245,17 @@ export async function collectDashboardSnapshot(
     errors.push(`GitHub 快照不可用：${formatError(error)}`)
   }
 
-  const machines = buildDashboardMachineCards(localSnapshots, remoteLeases)
+  try {
+    const presences = await listActiveManagedDaemonPresence({
+      ...options.config,
+      repo,
+    })
+    remotePresences = presences.map((presence) => buildDashboardPresenceView(presence))
+  } catch (error) {
+    errors.push(`GitHub presence 不可用：${formatError(error)}`)
+  }
+
+  const machines = buildDashboardMachineCards(localSnapshots, remoteLeases, remotePresences)
 
   return {
     generatedAt,
@@ -238,6 +272,7 @@ export async function collectDashboardSnapshot(
 export function buildDashboardMachineCards(
   localSnapshots: DashboardLocalMachineSnapshot[],
   remoteLeases: DashboardLeaseView[],
+  remotePresences: DashboardPresenceView[] = [],
 ): DashboardMachineCard[] {
   const machines = new Map<string, DashboardMachineCard>()
 
@@ -265,6 +300,12 @@ export function buildDashboardMachineCards(
     mergeDashboardLease(machine, lease)
   }
 
+  for (const presence of remotePresences) {
+    const machine = getOrCreateMachineCard(machines, presence.machineId)
+    mergeDaemonInstance(machine, presence.daemonInstanceId)
+    mergeDashboardPresence(machine, presence)
+  }
+
   for (const machine of machines.values()) {
     machine.localRuntimes.sort((left, right) => {
       if (left.alive !== right.alive) return left.alive ? -1 : 1
@@ -276,7 +317,7 @@ export function buildDashboardMachineCards(
     })
     machine.activeLeases.sort(compareLeases)
 
-    machine.source = machine.localRuntimes.length > 0 && machine.activeLeases.length > 0
+    machine.source = machine.localRuntimes.length > 0 && (machine.activeLeases.length > 0 || machine.presence !== null)
       ? 'mixed'
       : machine.localRuntimes.length > 0
         ? 'local'
@@ -681,6 +722,7 @@ function getOrCreateMachineCard(
     localRuntimes: [],
     observability: [],
     activeLeases: [],
+    presence: null,
     warnings: [],
   }
   machines.set(machineId, created)
@@ -712,6 +754,19 @@ function mergeDashboardLease(machine: DashboardMachineCard, lease: DashboardLeas
   const existing = machine.activeLeases[existingIndex]
   if (existing && existing.source === 'github' && lease.source === 'local') {
     machine.activeLeases[existingIndex] = lease
+  }
+}
+
+function mergeDashboardPresence(machine: DashboardMachineCard, presence: DashboardPresenceView): void {
+  if (!machine.presence) {
+    machine.presence = presence
+    return
+  }
+
+  const currentHeartbeat = machine.presence.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY
+  const candidateHeartbeat = presence.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY
+  if (candidateHeartbeat <= currentHeartbeat) {
+    machine.presence = presence
   }
 }
 
@@ -826,6 +881,30 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): DashboardPresenceView {
+  const now = Date.now()
+  const heartbeatAgeSeconds = parseAgeSeconds(comment.presence.lastHeartbeatAt, now)
+  const expiresInSeconds = parseRemainingSeconds(comment.presence.expiresAt, now)
+
+  return {
+    repo: comment.presence.repo,
+    machineId: comment.presence.machineId,
+    daemonInstanceId: comment.presence.daemonInstanceId,
+    status: comment.presence.status,
+    startedAt: comment.presence.startedAt,
+    lastHeartbeatAt: comment.presence.lastHeartbeatAt,
+    expiresAt: comment.presence.expiresAt,
+    heartbeatAgeSeconds,
+    expiresInSeconds,
+    healthPort: comment.presence.healthPort,
+    metricsPort: comment.presence.metricsPort,
+    activeLeaseCount: comment.presence.activeLeaseCount,
+    activeWorktreeCount: comment.presence.activeWorktreeCount,
+    effectiveActiveTasks: comment.presence.effectiveActiveTasks,
+    source: 'github',
+  }
+}
+
 function renderDashboardHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -857,7 +936,7 @@ function renderDashboardHtml(): string {
             <p class="section-eyebrow">机器状态</p>
             <h2>当前有哪些机器在工作</h2>
           </div>
-          <p class="section-note">远程机器依据 GitHub 上的受管租约状态展示。MVP 阶段不会为闲置远程机器提供共享心跳。</p>
+          <p class="section-note">远程机器依据 GitHub 上的受管租约和 presence 心跳展示。空闲远程机器也会显示，但只提供共享心跳，不提供远程健康接口。</p>
         </div>
         <div id="machines" class="machine-grid"></div>
       </section>
@@ -1501,6 +1580,7 @@ function renderMachines(machines) {
     const leaseList = machine.activeLeases.length > 0
       ? '<div class="lease-list">' + machine.activeLeases.map(renderLeaseItem).join('') + '</div>'
       : '<div class="empty-state">未检测到活跃受管租约。</div>';
+    const presence = machine.presence ? renderPresenceItem(machine.presence) : '';
     const warnings = machine.warnings.length > 0
       ? '<div class="warning-list">' + machine.warnings.map((warning) => '<div class="warning-item">' + escapeHtml(warning) + '</div>').join('') + '</div>'
       : '';
@@ -1512,6 +1592,7 @@ function renderMachines(machines) {
       '<h3 class="machine-title">' + escapeHtml(machine.machineId) + '</h3>',
       '<div class="chip-row">',
       renderChip(localizeMachineSource(machine.source), machine.source === 'mixed' ? 'accent' : machine.source === 'local' ? 'gold' : ''),
+      machine.presence ? renderChip(localizePresenceStatus(machine.presence.status), machine.presence.status === 'busy' ? 'accent' : 'gold') : '',
       machine.daemonInstanceIds.map((daemonId) => renderChip(shortDaemonId(daemonId), '')).join(''),
       '</div>',
       '</div>',
@@ -1523,6 +1604,7 @@ function renderMachines(machines) {
       observability,
       runtimeList,
       leaseList,
+      presence,
       warnings,
       '</article>',
     ].join('');
@@ -1661,6 +1743,27 @@ function renderLeaseItem(lease) {
   return '<div class="lease-item">' + renderInlineLease(lease) + '</div>';
 }
 
+function renderPresenceItem(presence) {
+  const timing = [
+    presence.heartbeatAgeSeconds === null ? null : '心跳 ' + presence.heartbeatAgeSeconds + ' 秒',
+    presence.expiresInSeconds === null ? null : 'TTL ' + presence.expiresInSeconds + ' 秒',
+  ].filter(Boolean).join(' | ');
+
+  return [
+    '<div class="lease-item">',
+    '<div><strong>共享在线心跳</strong> <span class="muted">GitHub presence</span></div>',
+    '<div class="chip-row" style="margin-top:8px">',
+    renderChip(localizePresenceStatus(presence.status), presence.status === 'busy' ? 'accent' : 'gold'),
+    renderChip(shortDaemonId(presence.daemonInstanceId), ''),
+    renderChip('工作树 ' + presence.activeWorktreeCount, ''),
+    renderChip('租约 ' + presence.activeLeaseCount, ''),
+    '</div>',
+    '<div class="muted" style="margin-top:8px">启动于 ' + escapeHtml(formatTimestamp(presence.startedAt)) + '</div>',
+    timing ? '<div class="muted" style="margin-top:6px">' + escapeHtml(timing) + '</div>' : '',
+    '</div>',
+  ].join('');
+}
+
 function renderInlineLease(lease) {
   const target = lease.scope === 'issue-process'
     ? 'Issue #' + lease.targetNumber
@@ -1725,6 +1828,19 @@ function localizeLeaseSource(source) {
       return 'GitHub';
     default:
       return source || '未知';
+  }
+}
+
+function localizePresenceStatus(status) {
+  switch (status) {
+    case 'idle':
+      return '空闲在线'
+    case 'busy':
+      return '忙碌在线'
+    case 'stopped':
+      return '已停止'
+    default:
+      return status || '未知'
   }
 }
 

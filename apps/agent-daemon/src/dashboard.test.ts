@@ -6,6 +6,7 @@ import {
   type DashboardIssueView,
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
+  type DashboardPresenceView,
   type DashboardPullRequestView,
   startDashboardServer,
 } from './dashboard'
@@ -71,6 +72,27 @@ function buildLocalSnapshot(overrides: Partial<DashboardLocalMachineSnapshot> = 
     },
     activeLeases: [buildLease()],
     warnings: ['local warning'],
+    ...overrides,
+  }
+}
+
+function buildPresence(overrides: Partial<DashboardPresenceView> = {}): DashboardPresenceView {
+  return {
+    repo: 'JamesWuHK/digital-employee',
+    machineId: 'machine-b',
+    daemonInstanceId: 'daemon-remote-1',
+    status: 'idle',
+    startedAt: '2026-04-05T09:00:00.000Z',
+    lastHeartbeatAt: '2026-04-05T09:10:00.000Z',
+    expiresAt: '2026-04-05T09:11:00.000Z',
+    heartbeatAgeSeconds: 5,
+    expiresInSeconds: 55,
+    healthPort: 9313,
+    metricsPort: 9093,
+    activeLeaseCount: 0,
+    activeWorktreeCount: 0,
+    effectiveActiveTasks: 0,
+    source: 'github',
     ...overrides,
   }
 }
@@ -265,6 +287,24 @@ describe('dashboard machine aggregation', () => {
       failedIssueCount: 1,
       openPrCount: 1,
     })
+  })
+
+  test('includes idle remote machines discovered from GitHub presence heartbeats', () => {
+    const machines = buildDashboardMachineCards(
+      [buildLocalSnapshot()],
+      [],
+      [buildPresence()],
+    )
+
+    expect(machines).toHaveLength(2)
+
+    const remoteMachine = machines.find((machine) => machine.machineId === 'machine-b')
+    expect(remoteMachine).toBeDefined()
+    expect(remoteMachine?.source).toBe('github')
+    expect(remoteMachine?.localRuntimes).toHaveLength(0)
+    expect(remoteMachine?.activeLeases).toHaveLength(0)
+    expect(remoteMachine?.presence?.status).toBe('idle')
+    expect(remoteMachine?.daemonInstanceIds).toEqual(['daemon-remote-1'])
   })
 })
 
