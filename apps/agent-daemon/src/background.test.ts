@@ -7,6 +7,7 @@ import {
   listBackgroundRuntimeRecords,
   readBackgroundRuntimeRecord,
   removeBackgroundRuntimeRecord,
+  resolveCurrentRuntimeSupervisor,
   resolveBackgroundRuntimeRecord,
   sanitizeDaemonBackgroundArgs,
   stopBackgroundRuntime,
@@ -44,6 +45,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-verify-20260405',
       healthPort: 9311,
+      supervisor: 'launchd',
       pid: 12345,
       metricsPort: 9091,
       cwd: '/tmp/workdir',
@@ -54,8 +56,29 @@ describe('background helpers', () => {
 
     expect(readBackgroundRuntimeRecord(path)).toMatchObject({
       repo: 'JamesWuHK/digital-employee',
+      supervisor: 'launchd',
       pid: 12345,
       metricsPort: 9091,
+    })
+  })
+
+  test('defaults missing runtime supervisor to detached for older records', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-background-legacy-test-'))
+    const path = join(dir, 'runtime.json')
+    writeFileSync(path, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-verify-20260405',
+      healthPort: 9311,
+      pid: 12345,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T02:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+    }))
+
+    expect(readBackgroundRuntimeRecord(path)).toMatchObject({
+      supervisor: 'detached',
     })
   })
 
@@ -91,6 +114,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'alive-machine',
       healthPort: 9311,
+      supervisor: 'launchd',
       pid: process.pid,
       metricsPort: 9091,
       cwd: '/tmp/alive',
@@ -102,6 +126,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'stale-machine',
       healthPort: 9312,
+      supervisor: 'detached',
       pid: 999999,
       metricsPort: 9092,
       cwd: '/tmp/stale',
@@ -117,12 +142,14 @@ describe('background helpers', () => {
       alive: true,
       record: {
         machineId: 'alive-machine',
+        supervisor: 'launchd',
       },
     })
     expect(snapshots[1]).toMatchObject({
       alive: false,
       record: {
         machineId: 'stale-machine',
+        supervisor: 'detached',
       },
     })
   })
@@ -137,6 +164,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-stale',
       healthPort: 9311,
+      supervisor: 'detached',
       pid: 999999,
       metricsPort: 9091,
       cwd: '/tmp/stale',
@@ -148,6 +176,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-alive',
       healthPort: 9312,
+      supervisor: 'launchd',
       pid: process.pid,
       metricsPort: 9092,
       cwd: '/tmp/alive',
@@ -176,6 +205,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-a',
       healthPort: 9311,
+      supervisor: 'detached',
       pid: process.pid,
       metricsPort: 9091,
       cwd: '/tmp/first',
@@ -187,6 +217,7 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-b',
       healthPort: 9312,
+      supervisor: 'launchd',
       pid: process.pid,
       metricsPort: 9092,
       cwd: '/tmp/second',
@@ -199,5 +230,11 @@ describe('background helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       homeDir,
     })).toThrow('Multiple background daemon records matched')
+  })
+
+  test('detects the current process runtime supervisor from environment', () => {
+    expect(resolveCurrentRuntimeSupervisor({ AGENT_LOOP_RUNTIME_MANAGER: 'launchd' })).toBe('launchd')
+    expect(resolveCurrentRuntimeSupervisor({ AGENT_LOOP_RUNTIME_MANAGER: 'detached' })).toBe('detached')
+    expect(resolveCurrentRuntimeSupervisor({})).toBe('direct')
   })
 })

@@ -2,8 +2,10 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import type { DaemonRuntimeSupervisor } from '@agent/shared'
 
 const RUNTIME_DIR_NAME = '.agent-loop/runtime'
+const AGENT_LOOP_RUNTIME_MANAGER_ENV = 'AGENT_LOOP_RUNTIME_MANAGER'
 const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--daemonize',
   '--runtimes',
@@ -15,6 +17,8 @@ const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--launchd-uninstall',
   '--launchd-status',
 ])
+
+type ManagedDaemonRuntimeSupervisor = Exclude<DaemonRuntimeSupervisor, 'direct'>
 
 export interface BackgroundRuntimeIdentity {
   repo: string
@@ -29,6 +33,7 @@ export interface BackgroundRuntimePaths {
 }
 
 export interface BackgroundRuntimeRecord extends BackgroundRuntimeIdentity {
+  supervisor: ManagedDaemonRuntimeSupervisor
   pid: number
   metricsPort: number
   cwd: string
@@ -76,7 +81,38 @@ export function readBackgroundRuntimeRecord(path: string): BackgroundRuntimeReco
   if (!existsSync(path)) return null
 
   try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as BackgroundRuntimeRecord
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Partial<BackgroundRuntimeRecord>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (
+      typeof parsed.repo !== 'string'
+      || typeof parsed.machineId !== 'string'
+      || !Number.isFinite(parsed.healthPort)
+      || !Number.isFinite(parsed.pid)
+      || !Number.isFinite(parsed.metricsPort)
+      || typeof parsed.cwd !== 'string'
+      || typeof parsed.startedAt !== 'string'
+      || !Array.isArray(parsed.command)
+      || typeof parsed.logPath !== 'string'
+    ) {
+      return null
+    }
+
+    const healthPort = parsed.healthPort as number
+    const pid = parsed.pid as number
+    const metricsPort = parsed.metricsPort as number
+
+    return {
+      repo: parsed.repo,
+      machineId: parsed.machineId,
+      healthPort,
+      supervisor: normalizeManagedRuntimeSupervisor(parsed.supervisor),
+      pid,
+      metricsPort,
+      cwd: parsed.cwd,
+      startedAt: parsed.startedAt,
+      command: parsed.command.filter((value): value is string => typeof value === 'string'),
+      logPath: parsed.logPath,
+    }
   } catch {
     return null
   }
@@ -158,9 +194,12 @@ export function buildCurrentProcessRuntimeRecord(input: {
   cwd: string
   logPath: string
   command?: string[]
+  supervisor?: ManagedDaemonRuntimeSupervisor
+  env?: NodeJS.ProcessEnv
 }): BackgroundRuntimeRecord {
   return {
     ...input.identity,
+    supervisor: input.supervisor ?? resolveManagedRuntimeSupervisor(input.env),
     pid: process.pid,
     metricsPort: input.metricsPort,
     cwd: input.cwd,
@@ -227,6 +266,7 @@ export function launchBackgroundRuntime(input: {
       ...input.env,
       AGENT_LOOP_RUNTIME_FILE: paths.recordPath,
       AGENT_LOOP_LOG_FILE: paths.logPath,
+      [AGENT_LOOP_RUNTIME_MANAGER_ENV]: 'detached',
     },
     detached: true,
     stdio: ['ignore', logFd, logFd],
@@ -241,11 +281,35 @@ export function launchBackgroundRuntime(input: {
       cwd: input.cwd,
       logPath: paths.logPath,
       command,
+      supervisor: 'detached',
     }),
     pid: child.pid!,
   }
   writeBackgroundRuntimeRecord(paths.recordPath, record)
   return record
+}
+
+export function resolveCurrentRuntimeSupervisor(
+  env: NodeJS.ProcessEnv = process.env,
+): DaemonRuntimeSupervisor {
+  const supervisor = env[AGENT_LOOP_RUNTIME_MANAGER_ENV]
+  if (supervisor === 'launchd' || supervisor === 'detached') {
+    return supervisor
+  }
+  return 'direct'
+}
+
+function resolveManagedRuntimeSupervisor(
+  env: NodeJS.ProcessEnv = process.env,
+): ManagedDaemonRuntimeSupervisor {
+  const supervisor = env[AGENT_LOOP_RUNTIME_MANAGER_ENV]
+  return supervisor === 'launchd' ? 'launchd' : 'detached'
+}
+
+function normalizeManagedRuntimeSupervisor(
+  supervisor: unknown,
+): ManagedDaemonRuntimeSupervisor {
+  return supervisor === 'launchd' ? 'launchd' : 'detached'
 }
 
 function sanitizeBackgroundSegment(value: string): string {

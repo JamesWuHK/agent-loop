@@ -60,6 +60,10 @@ const baseHealth: DaemonStatus & {
     },
   },
   runtime: {
+    supervisor: 'launchd',
+    workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
+    runtimeRecordPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json',
+    logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log',
     activePrReviews: 1,
     inFlightIssueProcess: true,
     inFlightPrReview: false,
@@ -304,6 +308,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
+      localRuntime: null,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -315,6 +320,7 @@ describe('status helpers', () => {
 
     expect(report).toContain('repo: JamesWuHK/digital-employee')
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
+    expect(report).toContain('process: launchd | pid 12345 | cwd /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
     expect(report).toContain('connectivity: transient 2 | startup deferred 1 | last transient startup-recovery 15s ago')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
@@ -323,6 +329,7 @@ describe('status helpers', () => {
     expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
+    expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -334,6 +341,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
+      localRuntime: null,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -362,6 +370,10 @@ describe('status helpers', () => {
     expect(report).toContain('Daemon Doctor')
     expect(report).toContain('project max concurrency: 3')
     expect(report).toContain('daemon instance: daemon-codex-dev-1')
+    expect(report).toContain('supervisor: launchd')
+    expect(report).toContain('working directory: /Users/wujames/codeRepo/digital-employee-main')
+    expect(report).toContain('runtime record: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json')
+    expect(report).toContain('log file: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('Active Worktrees')
     expect(report).toContain('#77 agent/77/codex-dev /tmp/issue-77-codex-dev')
     expect(report).toContain('Active Leases')
@@ -673,6 +685,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
+      localRuntime: null,
       health: {
         ...baseHealth,
         runtime: {
@@ -797,6 +810,22 @@ describe('status helpers', () => {
       healthPort: 1,
       includeGitHubAudit: true,
       fallbackRepo: 'JamesWuHK/digital-employee',
+      fallbackRuntime: {
+        recordPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.json',
+        alive: true,
+        record: {
+          repo: 'JamesWuHK/digital-employee',
+          machineId: 'codex-dev',
+          healthPort: 9311,
+          supervisor: 'launchd',
+          pid: 90610,
+          metricsPort: 9091,
+          cwd: '/Users/wujames/codeRepo/digital-employee-main',
+          startedAt: '2026-04-05T08:00:00.000Z',
+          command: ['bun', '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts'],
+          logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log',
+        },
+      },
       ghRunner: async (args) => {
         if (args[0] === 'issue' && args[1] === 'list') {
           return {
@@ -846,6 +875,11 @@ describe('status helpers', () => {
     expect(snapshot.ok).toBe(false)
     expect(snapshot.health).toBeNull()
     expect(snapshot.diagnosticRepo).toBe('JamesWuHK/digital-employee')
+    expect(snapshot.localRuntime).toMatchObject({
+      supervisor: 'launchd',
+      alive: true,
+      pid: 90610,
+    })
     expect(snapshot.githubAudit?.checks).toContainEqual(expect.objectContaining({
       scope: 'issue-process',
       targetNumber: 91,
@@ -857,6 +891,9 @@ describe('status helpers', () => {
     const report = formatDoctorReport(snapshot)
     expect(report).toContain('health: unreachable (http://127.0.0.1:1/health)')
     expect(report).toContain('repo: JamesWuHK/digital-employee')
+    expect(report).toContain('Local Runtime')
+    expect(report).toContain('supervisor: launchd')
+    expect(report).toContain('cwd: /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
   })

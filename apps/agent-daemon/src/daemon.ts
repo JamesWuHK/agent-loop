@@ -61,6 +61,7 @@ import {
   METRICS_PATH,
   type MetricsServer,
 } from './metrics'
+import { resolveCurrentRuntimeSupervisor } from './background'
 
 export interface HealthServerConfig {
   host: string
@@ -2368,6 +2369,10 @@ export class AgentDaemon {
 
   private buildRuntimeStatus(): DaemonStatus['runtime'] {
     return buildDaemonRuntimeStatus({
+      supervisor: resolveCurrentRuntimeSupervisor(),
+      workingDirectory: process.cwd(),
+      runtimeRecordPath: process.env.AGENT_LOOP_RUNTIME_FILE ?? null,
+      logPath: process.env.AGENT_LOOP_LOG_FILE ?? null,
       activeWorktreeCount: this.activeWorktrees.size,
       activePrReviewCount: this.activePrReviews.size,
       hasInFlightProcess: this._inFlightProcess !== null,
@@ -2770,6 +2775,10 @@ export function getEffectiveActiveTaskCount(input: {
 }
 
 export function buildDaemonRuntimeStatus(input: {
+  supervisor: DaemonStatus['runtime']['supervisor']
+  workingDirectory: string
+  runtimeRecordPath: string | null
+  logPath: string | null
   activeWorktreeCount: number
   activePrReviewCount: number
   hasInFlightProcess: boolean
@@ -2798,6 +2807,10 @@ export function buildDaemonRuntimeStatus(input: {
   oldestBlockedIssueResumeEscalationAgeSeconds: number
 }): DaemonStatus['runtime'] {
   return {
+    supervisor: input.supervisor,
+    workingDirectory: input.workingDirectory,
+    runtimeRecordPath: input.runtimeRecordPath,
+    logPath: input.logPath,
     activePrReviews: input.activePrReviewCount,
     inFlightIssueProcess: input.hasInFlightProcess,
     inFlightPrReview: input.hasInFlightPrReview,

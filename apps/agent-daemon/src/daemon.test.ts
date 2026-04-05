@@ -111,6 +111,12 @@ describe('daemon merge recovery helpers', () => {
           path: '/metrics',
         },
       },
+      runtime: {
+        supervisor: 'direct',
+        workingDirectory: process.cwd(),
+        runtimeRecordPath: null,
+        logPath: null,
+      },
     })
   })
 
@@ -134,6 +140,10 @@ describe('daemon merge recovery helpers', () => {
 
   test('builds runtime status snapshots for health and metrics surfaces', () => {
     expect(buildDaemonRuntimeStatus({
+      supervisor: 'launchd',
+      workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
+      runtimeRecordPath: '/Users/wujames/.agent-loop/runtime/runtime.json',
+      logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
       activeWorktreeCount: 1,
       activePrReviewCount: 2,
       hasInFlightProcess: true,
@@ -209,6 +219,10 @@ describe('daemon merge recovery helpers', () => {
       ],
       oldestBlockedIssueResumeEscalationAgeSeconds: 6,
     })).toEqual({
+      supervisor: 'launchd',
+      workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
+      runtimeRecordPath: '/Users/wujames/.agent-loop/runtime/runtime.json',
+      logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
       activePrReviews: 2,
       inFlightIssueProcess: true,
       inFlightPrReview: true,

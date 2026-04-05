@@ -291,6 +291,8 @@ export interface Subtask {
 
 // ─── Daemon Status ──────────────────────────────────────────────────────────
 
+export type DaemonRuntimeSupervisor = 'direct' | 'detached' | 'launchd'
+
 export interface DaemonStatus {
   running: boolean
   machineId: string
@@ -323,6 +325,10 @@ export interface DaemonStatus {
     }
   }
   runtime: {
+    supervisor: DaemonRuntimeSupervisor
+    workingDirectory: string
+    runtimeRecordPath: string | null
+    logPath: string | null
     activePrReviews: number
     inFlightIssueProcess: boolean
     inFlightPrReview: boolean

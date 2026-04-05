@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import {
   buildBackgroundRuntimePaths,
@@ -89,6 +89,7 @@ export function buildLaunchdEnvironmentVariables(input: {
   const variables: Record<string, string> = {
     AGENT_LOOP_RUNTIME_FILE: input.runtimeRecordPath,
     AGENT_LOOP_LOG_FILE: input.logPath,
+    AGENT_LOOP_RUNTIME_MANAGER: 'launchd',
   }
 
   for (const key of SAFE_ENV_KEYS) {
@@ -180,6 +181,7 @@ export function installLaunchdService(
   spec: LaunchdServiceSpec,
   runner: LaunchctlRunner = runLaunchctl,
 ): LaunchdServicePaths {
+  assertLaunchdWorkingDirectorySafe(spec.workingDirectory)
   mkdirSync(spec.launchAgentsDir, { recursive: true })
   runner(['bootout', spec.serviceTarget], { allowFailure: true })
   writeFileSync(spec.plistPath, renderLaunchdPlist(spec), {
@@ -243,6 +245,37 @@ export function inspectLaunchdService(
   }
 }
 
+export function assertLaunchdWorkingDirectorySafe(cwd: string): void {
+  const reason = getUnsafeLaunchdWorkingDirectoryReason(cwd)
+  if (reason) {
+    throw new Error(reason)
+  }
+}
+
+export function getUnsafeLaunchdWorkingDirectoryReason(
+  cwd: string,
+  osTempDir = tmpdir(),
+): string | null {
+  const cwdCandidates = buildPathVariants(cwd)
+  const unsafeRoots = [
+    '/tmp',
+    '/private/tmp',
+    osTempDir,
+  ]
+    .flatMap((path) => buildPathVariants(path))
+    .filter((path, index, all) => all.indexOf(path) === index)
+
+  for (const cwdCandidate of cwdCandidates) {
+    for (const unsafeRoot of unsafeRoots) {
+      if (isSameOrChildPath(cwdCandidate, unsafeRoot)) {
+        return `launchd working directory must be a durable repo checkout, not a temporary path (${cwdCandidate} is under ${unsafeRoot})`
+      }
+    }
+  }
+
+  return null
+}
+
 function buildLaunchdLabel(identity: BackgroundRuntimeIdentity): string {
   return [
     LAUNCHD_LABEL_PREFIX,
@@ -257,6 +290,25 @@ function sanitizeLaunchdSegment(value: string): string {
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
+}
+
+function buildPathVariants(path: string): string[] {
+  const variants = new Set([resolve(path)])
+
+  try {
+    variants.add(realpathSync(path))
+  } catch {
+    // ignore paths that do not yet exist
+  }
+
+  return [...variants]
+}
+
+function isSameOrChildPath(candidate: string, parent: string): boolean {
+  const normalizedCandidate = resolve(candidate)
+  const normalizedParent = resolve(parent)
+  return normalizedCandidate === normalizedParent
+    || normalizedCandidate.startsWith(`${normalizedParent}/`)
 }
 
 function escapeXml(value: string): string {

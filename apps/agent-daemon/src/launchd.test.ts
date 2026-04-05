@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  assertLaunchdWorkingDirectorySafe,
   buildLaunchdProgramArguments,
   buildLaunchdServicePaths,
   buildLaunchdServiceSpec,
+  getUnsafeLaunchdWorkingDirectoryReason,
   inspectLaunchdService,
   installLaunchdService,
   renderLaunchdPlist,
@@ -48,7 +50,7 @@ describe('launchd helpers', () => {
         machineId: 'codex-verify-20260405',
         healthPort: 9311,
       },
-      cwd: '/tmp/work & dir',
+      cwd: '/Users/wujames/codeRepo/work & dir',
       scriptPath: '/repo/apps/agent-daemon/src/index.ts',
       execPath: '/Users/wujames/.local/bin/bun',
       argv: ['--health-port', '9311'],
@@ -63,8 +65,9 @@ describe('launchd helpers', () => {
     const plist = renderLaunchdPlist(spec)
 
     expect(plist).toContain('<string>com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311</string>')
-    expect(plist).toContain('<string>/tmp/work &amp; dir</string>')
+    expect(plist).toContain('<string>/Users/wujames/codeRepo/work &amp; dir</string>')
     expect(plist).toContain('<key>AGENT_LOOP_RUNTIME_FILE</key>')
+    expect(plist).toContain('<key>AGENT_LOOP_RUNTIME_MANAGER</key>')
     expect(plist).toContain('<string>/usr/bin</string>')
   })
 
@@ -77,7 +80,7 @@ describe('launchd helpers', () => {
         machineId: 'codex-launchd',
         healthPort: 9314,
       },
-      cwd: '/private/tmp/digital-employee-verify-main',
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
       scriptPath: '/repo/apps/agent-daemon/src/index.ts',
       execPath: '/Users/wujames/.local/bin/bun',
       argv: ['--launchd-install', '--health-port', '9314', '--metrics-port', '9094'],
@@ -111,7 +114,7 @@ describe('launchd helpers', () => {
         machineId: 'codex-launchd',
         healthPort: 9314,
       },
-      cwd: '/private/tmp/digital-employee-verify-main',
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
       scriptPath: '/repo/apps/agent-daemon/src/index.ts',
       execPath: '/Users/wujames/.local/bin/bun',
       argv: ['--health-port', '9314'],
@@ -142,7 +145,7 @@ describe('launchd helpers', () => {
         machineId: 'codex-launchd',
         healthPort: 9314,
       },
-      cwd: '/private/tmp/digital-employee-verify-main',
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
       scriptPath: '/repo/apps/agent-daemon/src/index.ts',
       execPath: '/Users/wujames/.local/bin/bun',
       argv: ['--health-port', '9314'],
@@ -173,5 +176,11 @@ describe('launchd helpers', () => {
     expect(calls).toEqual([
       `bootout ${spec.serviceTarget}`,
     ])
+  })
+
+  test('detects unsafe temporary working directories for launchd installs', () => {
+    expect(getUnsafeLaunchdWorkingDirectoryReason('/private/tmp/digital-employee-main')).toContain('temporary path')
+    expect(getUnsafeLaunchdWorkingDirectoryReason('/Users/wujames/codeRepo/digital-employee-main')).toBeNull()
+    expect(() => assertLaunchdWorkingDirectorySafe('/private/tmp/digital-employee-main')).toThrow('durable repo checkout')
   })
 })

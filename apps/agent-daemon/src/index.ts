@@ -19,12 +19,14 @@ import {
   launchBackgroundRuntime,
   listBackgroundRuntimeRecords,
   removeBackgroundRuntimeRecord,
+  resolveCurrentRuntimeSupervisor,
   resolveBackgroundRuntimeRecord,
   stopBackgroundRuntime,
   writeBackgroundRuntimeRecord,
   type BackgroundRuntimeSnapshot,
 } from './background'
 import {
+  assertLaunchdWorkingDirectorySafe,
   buildLaunchdServiceSpec,
   buildLaunchdServicePaths,
   inspectLaunchdService,
@@ -127,6 +129,7 @@ async function main() {
       metricsPort: metricsPort ?? discoveredRuntime?.record.metricsPort,
       includeGitHubAudit: Boolean(args.doctor),
       fallbackRepo,
+      fallbackRuntime: discoveredRuntime ?? undefined,
     })
     console.log(args.doctor ? formatDoctorReport(snapshot) : formatStatusReport(snapshot))
     process.exit(snapshot.ok ? 0 : 1)
@@ -168,6 +171,7 @@ async function main() {
       })
 
       if (args['launchd-install']) {
+        assertLaunchdWorkingDirectorySafe(process.cwd())
         const spec = buildLaunchdServiceSpec({
           identity: {
             repo: managedIdentity.repo,
@@ -232,6 +236,8 @@ async function main() {
           metricsPort: metricsPort ?? 9090,
           cwd: process.cwd(),
           logPath: process.env.AGENT_LOOP_LOG_FILE ?? runtimePaths.logPath,
+          supervisor: resolveCurrentRuntimeSupervisor() === 'launchd' ? 'launchd' : 'detached',
+          env: process.env,
         }),
       )
     }
@@ -322,7 +328,7 @@ Options:
       --metrics-port <port>   Prometheus metrics port (default: 9090)
       --daemonize             Start the daemon detached from the current terminal
       --runtimes              List local background daemon records discovered on this machine
-      --launchd-install       Install and start a macOS launchd service for this daemon
+      --launchd-install       Install and start a macOS launchd service for this daemon (run from a durable repo checkout, not /tmp)
       --launchd-uninstall     Remove the macOS launchd service matching repo/machine-id/health-port
       --launchd-status        Inspect the macOS launchd service matching repo/machine-id/health-port
       --stop                  Stop the detached daemon instance matching repo/machine-id/health-port
@@ -429,16 +435,16 @@ function formatRuntimeListing(
   repoHint?: string,
 ): string {
   if (runtimes.length === 0) {
-    return 'No local background daemon runtime records found.'
+    return 'No local managed daemon runtime records found.'
   }
 
-  const lines = ['Local background daemons:']
+  const lines = ['Local managed daemons:']
 
   for (const runtime of runtimes) {
     const state = runtime.alive ? 'alive' : 'stale'
     const match = repoHint && runtime.record.repo === repoHint ? ' current-repo' : ''
     lines.push(
-      `- ${state}${match} repo=${runtime.record.repo} machine=${runtime.record.machineId} pid=${runtime.record.pid} health=${runtime.record.healthPort} metrics=${runtime.record.metricsPort} started=${runtime.record.startedAt} cwd=${runtime.record.cwd}`,
+      `- ${state}${match} supervisor=${runtime.record.supervisor} repo=${runtime.record.repo} machine=${runtime.record.machineId} pid=${runtime.record.pid} health=${runtime.record.healthPort} metrics=${runtime.record.metricsPort} started=${runtime.record.startedAt} cwd=${runtime.record.cwd}`,
     )
   }
 

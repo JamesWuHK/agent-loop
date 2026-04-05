@@ -18,6 +18,7 @@ import {
   METRICS_PORT_DEFAULT,
 } from './metrics'
 import { canResumeAutomatedPrReview } from './pr-reviewer'
+import type { BackgroundRuntimeSnapshot } from './background'
 
 const REVIEW_OUTCOME_ORDER = ['approved', 'rejected', 'invalid_output', 'execution_failed'] as const
 const REVIEW_STAGE_ORDER = ['initial', 'post_fix', 'merge_refresh'] as const
@@ -67,6 +68,7 @@ export interface DaemonObservabilitySnapshot {
   metricsUrl: string | null
   error: string | null
   diagnosticRepo: string | null
+  localRuntime: LocalRuntimeDiagnostic | null
   health: DaemonHealthPayload | null
   metrics: DaemonMetricSummary | null
   metricsError: string | null
@@ -81,7 +83,22 @@ export interface StatusCommandOptions {
   includeGitHubAudit?: boolean
   fallbackRepo?: string
   fallbackDaemonInstanceId?: string
+  fallbackRuntime?: BackgroundRuntimeSnapshot
   ghRunner?: GhJsonRunner
+}
+
+export interface LocalRuntimeDiagnostic {
+  supervisor: 'detached' | 'launchd'
+  alive: boolean
+  pid: number
+  cwd: string
+  recordPath: string
+  logPath: string
+  startedAt: string
+  repo: string
+  machineId: string
+  healthPort: number
+  metricsPort: number
 }
 
 interface MetricSample {
@@ -171,6 +188,9 @@ export async function collectDaemonObservability(
   const healthHost = options.healthHost ?? DEFAULT_HEALTH_SERVER_HOST
   const healthPort = options.healthPort ?? DEFAULT_HEALTH_SERVER_PORT
   const healthUrl = buildEndpointUrl(healthHost, healthPort, HEALTH_PATH)
+  const localRuntime = options.fallbackRuntime
+    ? toLocalRuntimeDiagnostic(options.fallbackRuntime)
+    : null
 
   let health: DaemonHealthPayload
   try {
@@ -215,6 +235,7 @@ export async function collectDaemonObservability(
     metricsUrl,
     error: null,
     diagnosticRepo: health.repo,
+    localRuntime,
     health,
     metrics,
     metricsError,
@@ -250,6 +271,7 @@ async function buildUnreachableSnapshot(
     metricsUrl: null,
     error,
     diagnosticRepo: options.fallbackRepo ?? null,
+    localRuntime: options.fallbackRuntime ? toLocalRuntimeDiagnostic(options.fallbackRuntime) : null,
     health: null,
     metrics: null,
     metricsError: null,
@@ -261,11 +283,29 @@ async function buildUnreachableSnapshot(
   }
 }
 
+function toLocalRuntimeDiagnostic(snapshot: BackgroundRuntimeSnapshot): LocalRuntimeDiagnostic {
+  return {
+    supervisor: snapshot.record.supervisor,
+    alive: snapshot.alive,
+    pid: snapshot.record.pid,
+    cwd: snapshot.record.cwd,
+    recordPath: snapshot.recordPath,
+    logPath: snapshot.record.logPath,
+    startedAt: snapshot.record.startedAt,
+    repo: snapshot.record.repo,
+    machineId: snapshot.record.machineId,
+    healthPort: snapshot.record.healthPort,
+    metricsPort: snapshot.record.metricsPort,
+  }
+}
+
 export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): string {
   if (!snapshot.ok || !snapshot.health) {
     return [
       'daemon: unreachable',
       ...(snapshot.diagnosticRepo ? [`repo: ${snapshot.diagnosticRepo}`] : []),
+      ...(snapshot.localRuntime ? [`local runtime: ${formatLocalRuntimeSummary(snapshot.localRuntime)}`] : []),
+      ...(snapshot.localRuntime ? [`runtime files: record ${snapshot.localRuntime.recordPath} | log ${snapshot.localRuntime.logPath}`] : []),
       `health: ${snapshot.healthUrl}`,
       `error: ${snapshot.error ?? 'unknown error'}`,
       'hint: start the daemon or pass the correct --health-host/--health-port.',
@@ -285,6 +325,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `repo: ${health.repo}`,
     `project: ${health.project.profile} | agents: ${health.agent.primary} -> ${health.agent.fallback ?? 'none'}`,
     `daemon: ${health.machineId} / ${health.daemonInstanceId}`,
+    `process: ${formatRuntimeManagerSummary(health.runtime.supervisor, health.pid, health.runtime.workingDirectory)}`,
     `concurrency: ${formatConcurrencyPolicy(health.concurrencyPolicy)}`,
     `runtime: active ${health.runtime.effectiveActiveTasks}/${health.concurrency} | worktrees ${health.activeWorktrees.length} | pr reviews ${health.runtime.activePrReviews} | issue loop ${formatBoolean(health.runtime.inFlightIssueProcess)} | review loop ${formatBoolean(health.runtime.inFlightPrReview)}`,
     `recovery: heartbeat ${health.recovery.heartbeatIntervalMs}ms | ttl ${health.recovery.leaseTtlMs}ms | idle ${health.recovery.workerIdleTimeoutMs}ms | adopt backoff ${health.recovery.leaseAdoptionBackoffMs}ms`,
@@ -302,6 +343,11 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   }
   if (blockedIssueResumeDetails.length > 0) {
     lines.push(`blocked resumes: ${formatBlockedIssueResumeInlineSummary(blockedIssueResumeDetails)}`)
+  }
+  if (health.runtime.runtimeRecordPath || health.runtime.logPath) {
+    lines.push(
+      `runtime files: record ${health.runtime.runtimeRecordPath ?? 'none'} | log ${health.runtime.logPath ?? 'none'}`,
+    )
   }
 
   if (snapshot.metrics) {
@@ -340,6 +386,19 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
       `health: unreachable (${snapshot.healthUrl})`,
       `error: ${snapshot.error ?? 'unknown error'}`,
       ...(snapshot.diagnosticRepo ? ['', 'Config', `repo: ${snapshot.diagnosticRepo}`] : []),
+      ...(snapshot.localRuntime
+        ? [
+            '',
+            'Local Runtime',
+            `supervisor: ${snapshot.localRuntime.supervisor}`,
+            `state: ${snapshot.localRuntime.alive ? 'alive' : 'stale'}`,
+            `pid: ${snapshot.localRuntime.pid}`,
+            `cwd: ${snapshot.localRuntime.cwd}`,
+            `started: ${snapshot.localRuntime.startedAt}`,
+            `runtime record: ${snapshot.localRuntime.recordPath}`,
+            `log file: ${snapshot.localRuntime.logPath}`,
+          ]
+        : []),
       '',
       'GitHub Audit',
       ...gitHubAuditLines,
@@ -420,8 +479,12 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `lease adoption backoff: ${health.recovery.leaseAdoptionBackoffMs}ms`,
     '',
     'Runtime',
+    `supervisor: ${health.runtime.supervisor}`,
     `pid: ${health.pid}`,
     `uptime: ${formatDuration(health.uptimeMs)}`,
+    `working directory: ${health.runtime.workingDirectory}`,
+    `runtime record: ${health.runtime.runtimeRecordPath ?? 'none'}`,
+    `log file: ${health.runtime.logPath ?? 'none'}`,
     `last poll: ${health.lastPollAt ?? 'never'}`,
     `last claimed: ${health.lastClaimedAt ?? 'never'}`,
     `next poll: ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
@@ -471,6 +534,18 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     'Warnings',
     ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
   ].join('\n')
+}
+
+function formatRuntimeManagerSummary(
+  supervisor: DaemonHealthPayload['runtime']['supervisor'],
+  pid: number,
+  cwd: string,
+): string {
+  return `${supervisor} | pid ${pid} | cwd ${cwd}`
+}
+
+function formatLocalRuntimeSummary(runtime: LocalRuntimeDiagnostic): string {
+  return `${runtime.supervisor} | ${runtime.alive ? 'alive' : 'stale'} | pid ${runtime.pid} | cwd ${runtime.cwd} | started ${runtime.startedAt}`
 }
 
 export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary {
@@ -607,7 +682,11 @@ function parsePrometheusLabels(labelBlock: string): Record<string, string> {
 
 function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (!snapshot.health) {
-    return snapshot.warnings
+    const warnings = [...snapshot.warnings]
+    if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
+      warnings.push(`local runtime record exists but pid ${snapshot.localRuntime.pid} is not alive (${snapshot.localRuntime.supervisor})`)
+    }
+    return warnings
   }
 
   const warnings: string[] = []
@@ -622,6 +701,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if ((snapshot.health.runtime.startupRecoveryDeferredCount ?? 0) > 0) {
     warnings.push(`startup recovery has been deferred ${snapshot.health.runtime.startupRecoveryDeferredCount} time(s) by transient GitHub/network errors`)
+  }
+  if (snapshot.health.runtime.supervisor === 'direct') {
+    warnings.push('daemon is running in direct mode; closing the current terminal/session will stop it')
   }
   if ((snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? null) !== null && (snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? 0) <= RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS) {
     warnings.push(`recent transient loop error: ${formatTransientLoopErrorWithMessage(snapshot.health.runtime.lastTransientLoopErrorKind, snapshot.health.runtime.lastTransientLoopErrorAgeSeconds, snapshot.health.runtime.lastTransientLoopErrorMessage)}`)
