@@ -355,4 +355,7 @@ export interface DaemonStatus {
   lastClaimedAt: string | null
   uptimeMs: number
   pid: number
+  nextPollAt: string | null
+  nextPollReason: string | null
+  nextPollDelayMs: number | null
 }

@@ -39,6 +39,7 @@ import {
   setConcurrencyPolicy,
   setDaemonUptime,
   setEffectiveActiveTasks,
+  setNextPollDelaySeconds,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setActiveLeases,
@@ -161,6 +162,9 @@ export class AgentDaemon {
   private lastPollAt: string | null = null
   private lastClaimedAt: string | null = null
   private pollTimeoutId: ReturnType<typeof setTimeout> | null = null
+  private nextPollAt: string | null = null
+  private nextPollReason: string | null = null
+  private nextPollDelayMs: number | null = null
   private healthServer: ReturnType<typeof Bun.serve> | null = null
   private healthServerConfig: HealthServerConfig = {
     host: DEFAULT_HEALTH_SERVER_HOST,
@@ -349,8 +353,16 @@ export class AgentDaemon {
   }
 
   private refreshObservability(): void {
+    this.nextPollDelayMs = this.readNextPollDelayMs()
     this.syncRuntimeMetrics()
     setDaemonUptime((Date.now() - this.startedAt) / 1000)
+  }
+
+  private getTransientRetryDelayMs(): number {
+    return Math.max(
+      1_000,
+      Math.min(this.config.pollIntervalMs, this.config.recovery.leaseAdoptionBackoffMs),
+    )
   }
 
   private async sleepWithLeaseBackoff(): Promise<void> {
@@ -590,7 +602,11 @@ export class AgentDaemon {
 
     if (this.pollTimeoutId !== null) {
       clearTimeout(this.pollTimeoutId)
+      this.pollTimeoutId = null
     }
+    this.nextPollAt = null
+    this.nextPollReason = null
+    this.nextPollDelayMs = null
 
     // Stop health server
     if (this.healthServer) {
@@ -669,6 +685,9 @@ export class AgentDaemon {
       lastClaimedAt: this.lastClaimedAt,
       uptimeMs: Date.now() - this.startedAt,
       pid: process.pid,
+      nextPollAt: this.nextPollAt,
+      nextPollReason: this.nextPollReason,
+      nextPollDelayMs: this.readNextPollDelayMs(),
     }
   }
 
@@ -686,12 +705,32 @@ export class AgentDaemon {
     }
   }
 
-  private scheduleNextPoll(): void {
+  private scheduleNextPoll(options: {
+    delayMs?: number
+    reason?: string
+  } = {}): void {
     if (this.shutdownRequested) return
 
+    if (this.pollTimeoutId !== null) {
+      clearTimeout(this.pollTimeoutId)
+    }
+
+    const delayMs = Math.max(0, options.delayMs ?? this.config.pollIntervalMs)
+    this.nextPollAt = new Date(Date.now() + delayMs).toISOString()
+    this.nextPollReason = options.reason ?? 'normal'
+    this.nextPollDelayMs = delayMs
+    this.syncRuntimeMetrics()
+
     this.pollTimeoutId = setTimeout(
-      () => { this.runPollCycleSafely().catch(err => this.logger.error('[daemon] poll wrapper error:', err)) },
-      this.config.pollIntervalMs,
+      () => {
+        this.pollTimeoutId = null
+        this.nextPollAt = null
+        this.nextPollReason = null
+        this.nextPollDelayMs = null
+        this.syncRuntimeMetrics()
+        this.runPollCycleSafely().catch(err => this.logger.error('[daemon] poll wrapper error:', err))
+      },
+      delayMs,
     )
   }
 
@@ -699,26 +738,53 @@ export class AgentDaemon {
     const startedAt = Date.now()
 
     try {
-      await this.runStartupMaintenanceIfNeeded()
+      const startupResult = await this.runStartupMaintenanceIfNeeded()
+      if (startupResult !== 'ready') {
+        recordPoll('error')
+        recordPollDuration(Date.now() - startedAt)
+        if (!this.shutdownRequested && this.running) {
+          this.scheduleNextPoll({
+            delayMs: startupResult === 'deferred-transient'
+              ? this.getTransientRetryDelayMs()
+              : this.config.pollIntervalMs,
+            reason: startupResult,
+          })
+        }
+        return
+      }
       await this.pollCycle()
     } catch (err) {
       const formatted = formatDaemonError(err)
       if (isRetryableDaemonLoopError(err)) {
         this.noteTransientLoopError('poll-cycle', err)
-        this.logger.warn(`[daemon] transient loop error; will retry on next poll: ${formatted}`)
+        this.logger.warn(`[daemon] transient loop error; will retry early: ${formatted}`)
       } else {
         this.logger.error(`[daemon] poll cycle failed; will retry on next poll: ${formatted}`)
       }
       recordPoll('error')
       recordPollDuration(Date.now() - startedAt)
       if (!this.shutdownRequested && this.running) {
-        this.scheduleNextPoll()
+        this.scheduleNextPoll({
+          delayMs: isRetryableDaemonLoopError(err)
+            ? this.getTransientRetryDelayMs()
+            : this.config.pollIntervalMs,
+          reason: isRetryableDaemonLoopError(err)
+            ? 'transient-poll-error'
+            : 'poll-error',
+        })
       }
     }
   }
 
-  private async runStartupMaintenanceIfNeeded(): Promise<void> {
-    if (!this.startupRecoveryPending) return
+  private readNextPollDelayMs(now = Date.now()): number | null {
+    if (!this.nextPollAt) return null
+    const nextPollAt = Date.parse(this.nextPollAt)
+    if (!Number.isFinite(nextPollAt)) return null
+    return Math.max(0, nextPollAt - now)
+  }
+
+  private async runStartupMaintenanceIfNeeded(): Promise<'ready' | 'deferred-transient' | 'deferred-error'> {
+    if (!this.startupRecoveryPending) return 'ready'
 
     try {
       await cleanupOrphanedWorktrees(this.config)
@@ -727,6 +793,7 @@ export class AgentDaemon {
       this.startupRecoveryPending = false
       this.syncRuntimeMetrics()
       this.logger.log('[daemon] startup recovery complete')
+      return 'ready'
     } catch (err) {
       this.startupRecoveryPending = true
       this.syncRuntimeMetrics()
@@ -734,10 +801,11 @@ export class AgentDaemon {
       if (isRetryableDaemonLoopError(err)) {
         this.noteTransientLoopError('startup-recovery', err)
         this.logger.warn(`[daemon] startup recovery deferred until connectivity recovers: ${formatted}`)
-        return
+        return 'deferred-transient'
       }
 
       this.logger.error(`[daemon] startup recovery failed; will retry on next poll: ${formatted}`)
+      return 'deferred-error'
     }
   }
 
@@ -2337,6 +2405,7 @@ export class AgentDaemon {
     setInFlightPrReviews(runtime.inFlightPrReview)
     setStartupRecoveryPending(runtime.startupRecoveryPending)
     setEffectiveActiveTasks(runtime.effectiveActiveTasks)
+    setNextPollDelaySeconds((this.readNextPollDelayMs() ?? 0) / 1000)
     setLastTransientLoopErrorAgeSeconds(runtime.lastTransientLoopErrorAgeSeconds ?? 0)
     setActiveLeases(runtime.activeLeaseCount)
     setLeaseHeartbeatAgeSeconds(runtime.oldestLeaseHeartbeatAgeSeconds)

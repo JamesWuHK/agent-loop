@@ -176,6 +176,9 @@ const baseHealth: DaemonStatus & {
   lastClaimedAt: '2026-04-05T08:09:00.000Z',
   uptimeMs: 125_000,
   pid: 12345,
+  nextPollAt: '2026-04-05T08:10:05.000Z',
+  nextPollReason: 'deferred-transient',
+  nextPollDelayMs: 5_000,
 }
 
 const metricsText = `
@@ -195,6 +198,7 @@ agent_loop_recovery_actions_total{kind="issue-process-idle-timeout",outcome="rec
 agent_loop_transient_loop_errors_total{kind="startup-recovery"} 1
 agent_loop_transient_loop_errors_total{kind="poll-cycle"} 1
 agent_loop_last_transient_loop_error_age_seconds 15
+agent_loop_next_poll_delay_seconds 5
 agent_loop_worker_idle_timeouts_total{scope="issue-process"} 2
 agent_loop_active_leases 2
 agent_loop_lease_heartbeat_age_seconds 75
@@ -280,6 +284,7 @@ describe('status helpers', () => {
         'issue-process': 2,
       },
       lastTransientLoopErrorAgeSeconds: 15,
+      nextPollDelaySeconds: 5,
       activeLeases: 2,
       leaseHeartbeatAgeSeconds: 75,
       stalledWorkers: 1,
@@ -315,6 +320,7 @@ describe('status helpers', () => {
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
     expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
+    expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
@@ -412,11 +418,13 @@ describe('status helpers', () => {
       const report = formatDoctorReport(snapshot)
 
       expect(snapshot.warnings).toContain('failed issue resumes blocked by linked PR state: issue#91<-pr#110')
+      expect(snapshot.warnings).toContain('next poll scheduled in 5s because deferred-transient')
       expect(snapshot.warnings).toContain('startup recovery has been deferred 1 time(s) by transient GitHub/network errors')
       expect(snapshot.warnings).toContain('recent transient loop error: startup-recovery 15s ago | Could not resolve host: api.github.com')
       expect(snapshot.warnings).toContain('adoptable leases detected: issue-process#77')
       expect(snapshot.warnings).toContain('same target recovered multiple times recently: issue-process#77=2')
       expect(report).toContain('- failed issue resumes blocked by linked PR state: issue#91<-pr#110')
+      expect(report).toContain('- next poll scheduled in 5s because deferred-transient')
       expect(report).toContain('- startup recovery has been deferred 1 time(s) by transient GitHub/network errors')
       expect(report).toContain('- recent transient loop error: startup-recovery 15s ago | Could not resolve host: api.github.com')
       expect(report).toContain('- adoptable leases detected: issue-process#77')

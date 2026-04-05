@@ -16,6 +16,7 @@
  * - agent_loop_inflight_pr_reviews: Gauge of in-flight PR review/merge workers
  * - agent_loop_startup_recovery_pending: Gauge showing whether startup recovery is still pending
  * - agent_loop_effective_active_tasks: Gauge of effective active task count used by concurrency control
+ * - agent_loop_next_poll_delay_seconds: Gauge of the currently scheduled next poll delay
  * - agent_loop_project_info: Gauge carrying project/runtime configuration labels
  * - agent_loop_concurrency_limit: Gauge of configured concurrency limit
  * - agent_loop_concurrency_policy: Gauge carrying requested/effective/cap concurrency values
@@ -276,6 +277,15 @@ export const startupRecoveryPending = new Gauge({
 export const effectiveActiveTasks = new Gauge({
   name: 'agent_loop_effective_active_tasks',
   help: 'Effective active task count used by daemon concurrency control',
+  registers: [registry],
+})
+
+/**
+ * Delay in seconds until the currently scheduled next poll fires.
+ */
+export const nextPollDelaySeconds = new Gauge({
+  name: 'agent_loop_next_poll_delay_seconds',
+  help: 'Delay in seconds until the daemon next poll is scheduled to run',
   registers: [registry],
 })
 
@@ -595,6 +605,13 @@ export function setStartupRecoveryPending(active: boolean): void {
  */
 export function setEffectiveActiveTasks(count: number): void {
   effectiveActiveTasks.set(count)
+}
+
+/**
+ * Update the currently scheduled next poll delay.
+ */
+export function setNextPollDelaySeconds(delaySeconds: number): void {
+  nextPollDelaySeconds.set(delaySeconds)
 }
 
 /**

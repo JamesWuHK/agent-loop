@@ -49,6 +49,7 @@ export interface DaemonMetricSummary {
   transientLoopErrors: Record<string, number>
   workerIdleTimeouts: Record<string, number>
   lastTransientLoopErrorAgeSeconds: number | null
+  nextPollDelaySeconds: number | null
   activeLeases: number | null
   leaseHeartbeatAgeSeconds: number | null
   stalledWorkers: number | null
@@ -290,7 +291,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `connectivity: transient ${transientLoopErrorCount} | startup deferred ${startupRecoveryDeferredCount} | last transient ${formatTransientLoopError(health.runtime.lastTransientLoopErrorKind, health.runtime.lastTransientLoopErrorAgeSeconds)}`,
     `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)} | escalated ${blockedIssueResumeEscalationCount} | oldest escalation ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
-    `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'}`,
+    `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'} | next ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
   ]
 
   if (health.runtime.activeLeaseDetails.length > 0) {
@@ -386,6 +387,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         `merge-recovery: ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
         `transient-loop-errors: ${formatInlineKeyValue(snapshot.metrics.transientLoopErrors) || 'none'}`,
         `last-transient-loop-error-age-seconds: ${snapshot.metrics.lastTransientLoopErrorAgeSeconds ?? 0}`,
+        `next-poll-delay-seconds: ${snapshot.metrics.nextPollDelaySeconds ?? 0}`,
         `lease-conflicts: ${snapshot.metrics.leaseConflicts}`,
         `worker-idle-timeouts: ${formatInlineKeyValue(snapshot.metrics.workerIdleTimeouts) || 'none'}`,
         `blocked-issue-resumes: ${snapshot.metrics.blockedIssueResumes ?? 0}`,
@@ -422,6 +424,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `uptime: ${formatDuration(health.uptimeMs)}`,
     `last poll: ${health.lastPollAt ?? 'never'}`,
     `last claimed: ${health.lastClaimedAt ?? 'never'}`,
+    `next poll: ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
     `startup recovery pending: ${formatBoolean(health.runtime.startupRecoveryPending)}`,
     `transient loop errors: ${health.runtime.transientLoopErrorCount ?? 0}`,
     `startup recovery deferred count: ${health.runtime.startupRecoveryDeferredCount ?? 0}`,
@@ -480,6 +483,7 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     transientLoopErrors: {},
     workerIdleTimeouts: {},
     lastTransientLoopErrorAgeSeconds: null,
+    nextPollDelaySeconds: null,
     activeLeases: null,
     leaseHeartbeatAgeSeconds: null,
     stalledWorkers: null,
@@ -520,6 +524,9 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_last_transient_loop_error_age_seconds':
         summary.lastTransientLoopErrorAgeSeconds = sample.value
+        break
+      case 'agent_loop_next_poll_delay_seconds':
+        summary.nextPollDelaySeconds = sample.value
         break
       case 'agent_loop_active_leases':
         summary.activeLeases = sample.value
@@ -609,6 +616,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   const oldestBlockedIssueResumeAgeSeconds = snapshot.health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
   if (snapshot.health.runtime.startupRecoveryPending) {
     warnings.push('startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile')
+  }
+  if (snapshot.health.nextPollReason && snapshot.health.nextPollReason !== 'normal' && snapshot.health.nextPollDelayMs !== null) {
+    warnings.push(`next poll scheduled in ${formatNullableSeconds(Math.ceil(snapshot.health.nextPollDelayMs / 1000))} because ${snapshot.health.nextPollReason}`)
   }
   if ((snapshot.health.runtime.startupRecoveryDeferredCount ?? 0) > 0) {
     warnings.push(`startup recovery has been deferred ${snapshot.health.runtime.startupRecoveryDeferredCount} time(s) by transient GitHub/network errors`)
@@ -824,6 +834,15 @@ function formatTransientLoopErrorWithMessage(
 ): string {
   if (!kind || ageSeconds === null) return 'none'
   return `${kind} ${formatNullableSeconds(ageSeconds)} ago${message ? ` | ${message}` : ''}`
+}
+
+function formatNextPollSummary(
+  nextPollAt: string | null,
+  nextPollReason: string | null,
+  nextPollDelayMs: number | null,
+): string {
+  if (!nextPollAt || !nextPollReason || nextPollDelayMs === null) return 'unscheduled'
+  return `${Math.max(0, Math.ceil(nextPollDelayMs / 1000))}s (${nextPollReason}) @ ${nextPollAt}`
 }
 
 function formatInlineKeyValue(values: Record<string, number>): string {

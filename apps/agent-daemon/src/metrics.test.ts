@@ -20,6 +20,7 @@ import {
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
   setLastTransientLoopErrorAgeSeconds,
+  setNextPollDelaySeconds,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -210,6 +211,7 @@ describe('metrics', () => {
       setBlockedIssueResumeEscalations(1)
       setBlockedIssueResumeEscalationAgeSeconds(15)
       setLastTransientLoopErrorAgeSeconds(12)
+      setNextPollDelaySeconds(5)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
@@ -225,6 +227,7 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalations')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalation_age_seconds')
       expect(metrics).toContain('agent_loop_last_transient_loop_error_age_seconds')
+      expect(metrics).toContain('agent_loop_next_poll_delay_seconds')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')
