@@ -208,19 +208,11 @@ export function installLaunchdService(
     mode: 0o644,
   })
 
-  for (let attempt = 1; attempt <= LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt += 1) {
-    runner(['bootout', spec.serviceTarget], { allowFailure: true })
-
-    try {
-      runner(['bootstrap', spec.domain, spec.plistPath])
-      break
-    } catch (error) {
-      if (!isRetryableLaunchdBootstrapError(error) || attempt === LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS) {
-        throw error
-      }
-      sleep(LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS)
-    }
-  }
+  retryLaunchdBootstrap({
+    serviceTarget: spec.serviceTarget,
+    domain: spec.domain,
+    plistPath: spec.plistPath,
+  }, runner, sleep)
 
   runner(['enable', spec.serviceTarget], { allowFailure: true })
   runner(['kickstart', '-k', spec.serviceTarget])
@@ -246,6 +238,35 @@ export function uninstallLaunchdService(
     message: installed
       ? `Removed launchd service ${paths.label}`
       : `Launchd service ${paths.label} was not installed`,
+  }
+}
+
+export function restartLaunchdService(
+  paths: LaunchdServicePaths,
+  runner: LaunchctlRunner = runLaunchctl,
+  sleep: SleepFn = sleepSync,
+): {
+  restarted: boolean
+  message: string
+} {
+  if (!existsSync(paths.plistPath)) {
+    return {
+      restarted: false,
+      message: `Launchd service ${paths.label} is not installed`,
+    }
+  }
+
+  retryLaunchdBootstrap({
+    serviceTarget: paths.serviceTarget,
+    domain: paths.domain,
+    plistPath: paths.plistPath,
+  }, runner, sleep)
+  runner(['enable', paths.serviceTarget], { allowFailure: true })
+  runner(['kickstart', '-k', paths.serviceTarget])
+
+  return {
+    restarted: true,
+    message: `Restarted launchd service ${paths.label}`,
   }
 }
 
@@ -379,6 +400,30 @@ function isSameOrChildPath(candidate: string, parent: string): boolean {
 function isRetryableLaunchdBootstrapError(error: unknown): boolean {
   const message = formatLaunchdError(error).toLowerCase()
   return LAUNCHD_RETRYABLE_BOOTSTRAP_ERROR_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
+function retryLaunchdBootstrap(
+  input: {
+    serviceTarget: string
+    domain: string
+    plistPath: string
+  },
+  runner: LaunchctlRunner,
+  sleep: SleepFn,
+): void {
+  for (let attempt = 1; attempt <= LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS; attempt += 1) {
+    runner(['bootout', input.serviceTarget], { allowFailure: true })
+
+    try {
+      runner(['bootstrap', input.domain, input.plistPath])
+      return
+    } catch (error) {
+      if (!isRetryableLaunchdBootstrapError(error) || attempt === LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS) {
+        throw error
+      }
+      sleep(LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS)
+    }
+  }
 }
 
 function formatLaunchdError(error: unknown): string {

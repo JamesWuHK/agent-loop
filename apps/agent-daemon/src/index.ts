@@ -31,10 +31,49 @@ import {
   buildLaunchdServicePaths,
   inspectLaunchdService,
   installLaunchdService,
+  restartLaunchdService,
   uninstallLaunchdService,
 } from './launchd'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
+type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
+
+export interface RestartManagedRuntimeInput {
+  discoveredRuntime: BackgroundRuntimeSnapshot | null
+  repo?: string
+  machineId?: string
+  healthPort: number
+  metricsPort?: number
+  cwd: string
+  scriptPath: string
+  argv: string[]
+}
+
+export interface RestartManagedRuntimeResult {
+  kind: 'launchd' | 'detached' | 'none'
+  restarted: boolean
+  message: string
+}
+
+interface RestartManagedRuntimeDependencies {
+  platform: NodeJS.Platform
+  resolveLocalDaemonIdentity: LocalDaemonIdentityResolver
+  buildLaunchdServicePaths: typeof buildLaunchdServicePaths
+  inspectLaunchdService: typeof inspectLaunchdService
+  restartLaunchdService: typeof restartLaunchdService
+  stopBackgroundRuntime: typeof stopBackgroundRuntime
+  launchBackgroundRuntime: typeof launchBackgroundRuntime
+}
+
+const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
+  platform: process.platform,
+  resolveLocalDaemonIdentity,
+  buildLaunchdServicePaths,
+  inspectLaunchdService,
+  restartLaunchdService,
+  stopBackgroundRuntime,
+  launchBackgroundRuntime,
+}
 
 async function main() {
   const { values: args } = parseArgs({
@@ -48,6 +87,7 @@ async function main() {
       'metrics-port': { type: 'string' },
       daemonize: { type: 'boolean' },
       runtimes: { type: 'boolean' },
+      restart: { type: 'boolean' },
       'launchd-install': { type: 'boolean' },
       'launchd-uninstall': { type: 'boolean' },
       'launchd-status': { type: 'boolean' },
@@ -70,16 +110,20 @@ async function main() {
     process.exit(0)
   }
 
-  if (args.daemonize && (args.stop || args.status || args.doctor || args.once)) {
-    throw new Error('--daemonize cannot be combined with --stop, --status, --doctor, or --once')
+  if (args.daemonize && (args.restart || args.stop || args.status || args.doctor || args.once)) {
+    throw new Error('--daemonize cannot be combined with --restart, --stop, --status, --doctor, or --once')
   }
 
-  if (args.runtimes && (args.daemonize || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--runtimes cannot be combined with --daemonize, --stop, --status, --doctor, --once, or launchd management flags')
+  if (args.runtimes && (args.daemonize || args.restart || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--runtimes cannot be combined with --daemonize, --restart, --stop, --status, --doctor, --once, or launchd management flags')
   }
 
-  if (args.stop && (args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--stop cannot be combined with --status, --doctor, --once, or launchd management flags')
+  if (args.stop && (args.restart || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--stop cannot be combined with --restart, --status, --doctor, --once, or launchd management flags')
+  }
+
+  if (args.restart && (args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--restart cannot be combined with --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
   if (args['launchd-install'] && (args.daemonize || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-uninstall'] || args['launchd-status'])) {
@@ -97,7 +141,7 @@ async function main() {
   const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
   const runtimeMachineIdHint = args['machine-id'] as string | undefined
   const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
-  const discoveredRuntime = args.status || args.doctor || args.stop
+  const discoveredRuntime = args.status || args.doctor || args.stop || args.restart
     ? resolveDiscoveredRuntime({
       repo: runtimeRepoHint,
       machineId: runtimeMachineIdHint,
@@ -215,6 +259,21 @@ async function main() {
       process.exit(result.stopped ? 0 : 1)
     }
 
+    if (args.restart) {
+      const result = restartManagedRuntime({
+        discoveredRuntime,
+        repo: cliArgs.repo,
+        machineId: cliArgs.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+        metricsPort,
+        cwd: process.cwd(),
+        scriptPath: process.argv[1]!,
+        argv: process.argv.slice(2),
+      })
+      console.log(`[agent-loop] ${result.message}`)
+      process.exit(result.restarted ? 0 : 1)
+    }
+
     const config = loadConfig(cliArgs)
 
     const runtimePaths = buildBackgroundRuntimePaths({
@@ -308,6 +367,7 @@ agent-loop — Distributed automation daemon
 
 Usage:
   agent-loop [options]
+  agent-loop --restart [--health-port 9310]
   agent-loop --status [--health-port 9310]
   agent-loop --doctor [--health-port 9310]
   agent-loop --runtimes
@@ -328,6 +388,7 @@ Options:
       --metrics-port <port>   Prometheus metrics port (default: 9090)
       --daemonize             Start the daemon detached from the current terminal
       --runtimes              List local background daemon records discovered on this machine
+      --restart               Restart the managed daemon matching repo/machine-id/health-port
       --launchd-install       Install and start a macOS launchd service for this daemon (run from a durable repo checkout, not /tmp)
       --launchd-uninstall     Remove the macOS launchd service matching repo/machine-id/health-port
       --launchd-status        Inspect the macOS launchd service matching repo/machine-id/health-port
@@ -356,6 +417,7 @@ Examples:
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
   agent-loop --runtimes
+  agent-loop --restart --health-port 9311
   agent-loop --launchd-install --health-port 9311 --metrics-port 9091
   agent-loop --launchd-status --health-port 9311
   agent-loop --launchd-uninstall --health-port 9311
@@ -367,10 +429,12 @@ Examples:
 `)
 }
 
-main().catch((err) => {
-  console.error('[agent-loop] fatal error:', err)
-  process.exit(1)
-})
+if (import.meta.main) {
+  main().catch((err) => {
+    console.error('[agent-loop] fatal error:', err)
+    process.exit(1)
+  })
+}
 
 function resolveRepoHint(repo: string | undefined): string | undefined {
   try {
@@ -430,7 +494,87 @@ function ensureLaunchdSupported(): void {
   }
 }
 
-function formatRuntimeListing(
+export function buildManagedRestartArgs(input: {
+  repo: string
+  machineId: string
+  healthPort: number
+  metricsPort: number
+}): string[] {
+  return [
+    '--repo', input.repo,
+    '--machine-id', input.machineId,
+    '--health-port', String(input.healthPort),
+    '--metrics-port', String(input.metricsPort),
+  ]
+}
+
+export function restartManagedRuntime(
+  input: RestartManagedRuntimeInput,
+  deps: RestartManagedRuntimeDependencies = DEFAULT_RESTART_DEPENDENCIES,
+): RestartManagedRuntimeResult {
+  const runtime = input.discoveredRuntime
+
+  if (runtime?.record.supervisor === 'detached') {
+    const stopResult = deps.stopBackgroundRuntime(runtime.recordPath)
+    const restarted = deps.launchBackgroundRuntime({
+      identity: {
+        repo: runtime.record.repo,
+        machineId: runtime.record.machineId,
+        healthPort: runtime.record.healthPort,
+      },
+      metricsPort: runtime.record.metricsPort,
+      cwd: input.cwd,
+      argv: buildManagedRestartArgs({
+        repo: runtime.record.repo,
+        machineId: runtime.record.machineId,
+        healthPort: runtime.record.healthPort,
+        metricsPort: runtime.record.metricsPort,
+      }),
+      scriptPath: input.scriptPath,
+    })
+
+    return {
+      kind: 'detached',
+      restarted: true,
+      message: `${stopResult.message}; restarted detached daemon with pid ${restarted.pid}`,
+    }
+  }
+
+  if (deps.platform === 'darwin') {
+    const identity = deps.resolveLocalDaemonIdentity(
+      {
+        repo: runtime?.record.repo ?? input.repo,
+        machineId: runtime?.record.machineId ?? input.machineId,
+      },
+      {
+        persistGeneratedMachineId: false,
+      },
+    )
+    const launchdPaths = deps.buildLaunchdServicePaths({
+      repo: identity.repo,
+      machineId: identity.machineId,
+      healthPort: runtime?.record.healthPort ?? input.healthPort,
+    })
+    const launchdStatus = deps.inspectLaunchdService(launchdPaths)
+
+    if (launchdStatus.installed) {
+      const result = deps.restartLaunchdService(launchdPaths)
+      return {
+        kind: 'launchd',
+        restarted: result.restarted,
+        message: result.message,
+      }
+    }
+  }
+
+  return {
+    kind: 'none',
+    restarted: false,
+    message: 'No managed daemon runtime or launchd service matched the current repo/machine-id/health-port',
+  }
+}
+
+export function formatRuntimeListing(
   runtimes: BackgroundRuntimeSnapshot[],
   repoHint?: string,
 ): string {
@@ -451,7 +595,7 @@ function formatRuntimeListing(
   return lines.join('\n')
 }
 
-function formatLaunchdStatus(status: ReturnType<typeof inspectLaunchdService>): string {
+export function formatLaunchdStatus(status: ReturnType<typeof inspectLaunchdService>): string {
   const lines = [
     'Launchd Status',
     '',

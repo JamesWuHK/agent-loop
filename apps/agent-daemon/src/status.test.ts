@@ -949,6 +949,8 @@ describe('status helpers', () => {
     expect(report).toContain('supervisor: launchd')
     expect(report).toContain('cwd: /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('launchd runs: 4')
+    expect(snapshot.warnings).toContain('launchd has restarted this daemon 4 times; inspect recent exits if this keeps increasing')
+    expect(report).toContain('- launchd has restarted this daemon 4 times; inspect recent exits if this keeps increasing')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
   })

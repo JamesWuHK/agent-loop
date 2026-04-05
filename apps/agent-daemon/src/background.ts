@@ -9,6 +9,7 @@ const AGENT_LOOP_RUNTIME_MANAGER_ENV = 'AGENT_LOOP_RUNTIME_MANAGER'
 const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--daemonize',
   '--runtimes',
+  '--restart',
   '--stop',
   '--status',
   '--doctor',

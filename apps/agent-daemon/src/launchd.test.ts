@@ -11,6 +11,7 @@ import {
   inspectLaunchdService,
   installLaunchdService,
   parseLaunchdServiceDetail,
+  restartLaunchdService,
   renderLaunchdPlist,
   uninstallLaunchdService,
 } from './launchd'
@@ -237,6 +238,122 @@ gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
     expect(calls).toEqual([
       `bootout ${spec.serviceTarget}`,
       `bootstrap ${spec.domain} ${spec.plistPath}`,
+    ])
+  })
+
+  test('restarts an installed launchd service without rewriting the plist', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-restart-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+    mkdirSync(spec.launchAgentsDir, { recursive: true })
+    writeFileSync(spec.plistPath, '<plist />')
+
+    const calls: string[] = []
+    const result = restartLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      return ''
+    }, () => {})
+
+    expect(result).toEqual({
+      restarted: true,
+      message: `Restarted launchd service ${spec.label}`,
+    })
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `enable ${spec.serviceTarget}`,
+      `kickstart -k ${spec.serviceTarget}`,
+    ])
+  })
+
+  test('reports when restarting a launchd service that is not installed', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-restart-missing-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+
+    expect(restartLaunchdService(spec, () => '', () => {})).toEqual({
+      restarted: false,
+      message: `Launchd service ${spec.label} is not installed`,
+    })
+  })
+
+  test('retries retryable bootstrap failures during launchd restart', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-restart-retry-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+    mkdirSync(spec.launchAgentsDir, { recursive: true })
+    writeFileSync(spec.plistPath, '<plist />')
+
+    const calls: string[] = []
+    let bootstrapAttempts = 0
+    const result = restartLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      if (args[0] === 'bootstrap') {
+        bootstrapAttempts += 1
+        if (bootstrapAttempts === 1) {
+          throw new Error('launchctl bootstrap failed: Bootstrap failed: 5: Input/output error')
+        }
+      }
+      return ''
+    }, () => {})
+
+    expect(result).toEqual({
+      restarted: true,
+      message: `Restarted launchd service ${spec.label}`,
+    })
+    expect(bootstrapAttempts).toBe(2)
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `enable ${spec.serviceTarget}`,
+      `kickstart -k ${spec.serviceTarget}`,
     ])
   })
 

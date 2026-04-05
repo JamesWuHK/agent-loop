@@ -285,7 +285,7 @@ async function buildUnreachableSnapshot(
     }, options.ghRunner)
   }
 
-  return {
+  const snapshot: DaemonObservabilitySnapshot = {
     ok: false,
     healthUrl,
     metricsUrl: null,
@@ -306,6 +306,9 @@ async function buildUnreachableSnapshot(
       ...(githubAudit?.warnings ?? []),
     ],
   }
+
+  snapshot.warnings = buildDoctorWarnings(snapshot)
+  return snapshot
 }
 
 function toLocalRuntimeDiagnostic(snapshot: BackgroundRuntimeSnapshot): LocalRuntimeDiagnostic {
@@ -780,6 +783,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
     if (snapshot.localRuntime?.launchd && !snapshot.localRuntime.launchd.loaded) {
       warnings.push(`launchd service is installed but not currently loaded (${snapshot.localRuntime.launchd.serviceTarget})`)
     }
+    if ((snapshot.localRuntime?.launchd?.runtime?.runs ?? 0) >= 3) {
+      warnings.push(`launchd has restarted this daemon ${snapshot.localRuntime?.launchd?.runtime?.runs} times; inspect recent exits if this keeps increasing`)
+    }
     return warnings
   }
 
@@ -801,6 +807,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if (snapshot.localRuntime?.launchd && !snapshot.localRuntime.launchd.loaded) {
     warnings.push(`launchd service is installed but not currently loaded (${snapshot.localRuntime.launchd.serviceTarget})`)
+  }
+  if ((snapshot.localRuntime?.launchd?.runtime?.runs ?? 0) >= 3) {
+    warnings.push(`launchd has restarted this daemon ${snapshot.localRuntime?.launchd?.runtime?.runs} times; inspect recent exits if this keeps increasing`)
   }
   if ((snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? null) !== null && (snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? 0) <= RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS) {
     warnings.push(`recent transient loop error: ${formatTransientLoopErrorWithMessage(snapshot.health.runtime.lastTransientLoopErrorKind, snapshot.health.runtime.lastTransientLoopErrorAgeSeconds, snapshot.health.runtime.lastTransientLoopErrorMessage)}`)
