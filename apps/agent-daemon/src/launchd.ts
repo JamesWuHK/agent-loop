@@ -40,12 +40,23 @@ export interface LaunchdServiceSpec extends LaunchdServicePaths {
 
 export interface LaunchdServiceStatus {
   label: string
+  serviceTarget: string
   plistPath: string
   runtimeRecordPath: string
   logPath: string
   installed: boolean
   loaded: boolean
   detail: string | null
+  runtime: LaunchdServiceRuntimeDetail | null
+}
+
+export interface LaunchdServiceRuntimeDetail {
+  serviceTarget: string | null
+  activeCount: number | null
+  state: string | null
+  pid: number | null
+  runs: number | null
+  lastTerminatingSignal: string | null
 }
 
 interface LaunchctlOptions {
@@ -248,23 +259,42 @@ export function inspectLaunchdService(
     const detail = runner(['print', paths.serviceTarget])
     return {
       label: paths.label,
+      serviceTarget: paths.serviceTarget,
       plistPath: paths.plistPath,
       runtimeRecordPath: paths.runtimeRecordPath,
       logPath: paths.logPath,
       installed,
       loaded: true,
       detail,
+      runtime: parseLaunchdServiceDetail(detail),
     }
   } catch {
     return {
       label: paths.label,
+      serviceTarget: paths.serviceTarget,
       plistPath: paths.plistPath,
       runtimeRecordPath: paths.runtimeRecordPath,
       logPath: paths.logPath,
       installed,
       loaded: false,
       detail: installed ? readFileSync(paths.plistPath, 'utf-8') : null,
+      runtime: null,
     }
+  }
+}
+
+export function parseLaunchdServiceDetail(detail: string | null): LaunchdServiceRuntimeDetail | null {
+  if (!detail || detail.trim().length === 0 || detail.trimStart().startsWith('<?xml')) {
+    return null
+  }
+
+  return {
+    serviceTarget: matchLaunchdString(detail, /^([^\n]+?)\s*=\s*\{/m),
+    activeCount: matchLaunchdNumber(detail, /^\s*active count = (\d+)/m),
+    state: matchLaunchdString(detail, /^\s*state = (.+)$/m),
+    pid: matchLaunchdNumber(detail, /^\s*pid = (\d+)/m),
+    runs: matchLaunchdNumber(detail, /^\s*runs = (\d+)/m),
+    lastTerminatingSignal: matchLaunchdString(detail, /^\s*last terminating signal = (.+)$/m),
   }
 }
 
@@ -325,6 +355,18 @@ function buildPathVariants(path: string): string[] {
   }
 
   return [...variants]
+}
+
+function matchLaunchdString(detail: string, pattern: RegExp): string | null {
+  const value = detail.match(pattern)?.[1]?.trim()
+  return value && value.length > 0 ? value : null
+}
+
+function matchLaunchdNumber(detail: string, pattern: RegExp): number | null {
+  const value = matchLaunchdString(detail, pattern)
+  if (!value) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function isSameOrChildPath(candidate: string, parent: string): boolean {

@@ -19,6 +19,11 @@ import {
 } from './metrics'
 import { canResumeAutomatedPrReview } from './pr-reviewer'
 import type { BackgroundRuntimeSnapshot } from './background'
+import {
+  buildLaunchdServicePaths,
+  inspectLaunchdService,
+  type LaunchdServiceRuntimeDetail,
+} from './launchd'
 
 const REVIEW_OUTCOME_ORDER = ['approved', 'rejected', 'invalid_output', 'execution_failed'] as const
 const REVIEW_STAGE_ORDER = ['initial', 'post_fix', 'merge_refresh'] as const
@@ -85,6 +90,7 @@ export interface StatusCommandOptions {
   fallbackDaemonInstanceId?: string
   fallbackRuntime?: BackgroundRuntimeSnapshot
   ghRunner?: GhJsonRunner
+  launchdInspector?: LaunchdInspector
 }
 
 export interface LocalRuntimeDiagnostic {
@@ -99,7 +105,18 @@ export interface LocalRuntimeDiagnostic {
   machineId: string
   healthPort: number
   metricsPort: number
+  launchd: LocalLaunchdDiagnostic | null
 }
+
+export interface LocalLaunchdDiagnostic {
+  serviceTarget: string
+  plistPath: string
+  installed: boolean
+  loaded: boolean
+  runtime: LaunchdServiceRuntimeDetail | null
+}
+
+type LaunchdInspector = (runtime: LocalRuntimeDiagnostic) => LocalLaunchdDiagnostic | null
 
 interface MetricSample {
   name: string
@@ -189,7 +206,10 @@ export async function collectDaemonObservability(
   const healthPort = options.healthPort ?? DEFAULT_HEALTH_SERVER_PORT
   const healthUrl = buildEndpointUrl(healthHost, healthPort, HEALTH_PATH)
   const localRuntime = options.fallbackRuntime
-    ? toLocalRuntimeDiagnostic(options.fallbackRuntime)
+    ? enrichLocalRuntimeDiagnostic(
+        toLocalRuntimeDiagnostic(options.fallbackRuntime),
+        options.launchdInspector ?? inspectLocalLaunchdRuntime,
+      )
     : null
 
   let health: DaemonHealthPayload
@@ -271,7 +291,12 @@ async function buildUnreachableSnapshot(
     metricsUrl: null,
     error,
     diagnosticRepo: options.fallbackRepo ?? null,
-    localRuntime: options.fallbackRuntime ? toLocalRuntimeDiagnostic(options.fallbackRuntime) : null,
+    localRuntime: options.fallbackRuntime
+      ? enrichLocalRuntimeDiagnostic(
+          toLocalRuntimeDiagnostic(options.fallbackRuntime),
+          options.launchdInspector ?? inspectLocalLaunchdRuntime,
+        )
+      : null,
     health: null,
     metrics: null,
     metricsError: null,
@@ -296,6 +321,42 @@ function toLocalRuntimeDiagnostic(snapshot: BackgroundRuntimeSnapshot): LocalRun
     machineId: snapshot.record.machineId,
     healthPort: snapshot.record.healthPort,
     metricsPort: snapshot.record.metricsPort,
+    launchd: null,
+  }
+}
+
+function enrichLocalRuntimeDiagnostic(
+  runtime: LocalRuntimeDiagnostic,
+  launchdInspector: LaunchdInspector,
+): LocalRuntimeDiagnostic {
+  if (runtime.supervisor !== 'launchd') {
+    return runtime
+  }
+
+  return {
+    ...runtime,
+    launchd: launchdInspector(runtime),
+  }
+}
+
+function inspectLocalLaunchdRuntime(runtime: LocalRuntimeDiagnostic): LocalLaunchdDiagnostic | null {
+  try {
+    const paths = buildLaunchdServicePaths({
+      repo: runtime.repo,
+      machineId: runtime.machineId,
+      healthPort: runtime.healthPort,
+    })
+    const status = inspectLaunchdService(paths)
+
+    return {
+      serviceTarget: status.serviceTarget,
+      plistPath: status.plistPath,
+      installed: status.installed,
+      loaded: status.loaded,
+      runtime: status.runtime,
+    }
+  } catch {
+    return null
   }
 }
 
@@ -305,6 +366,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
       'daemon: unreachable',
       ...(snapshot.diagnosticRepo ? [`repo: ${snapshot.diagnosticRepo}`] : []),
       ...(snapshot.localRuntime ? [`local runtime: ${formatLocalRuntimeSummary(snapshot.localRuntime)}`] : []),
+      ...(snapshot.localRuntime?.launchd ? [`launchd: ${formatLaunchdInlineSummary(snapshot.localRuntime.launchd)}`] : []),
       ...(snapshot.localRuntime ? [`runtime files: record ${snapshot.localRuntime.recordPath} | log ${snapshot.localRuntime.logPath}`] : []),
       `health: ${snapshot.healthUrl}`,
       `error: ${snapshot.error ?? 'unknown error'}`,
@@ -343,6 +405,9 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   }
   if (blockedIssueResumeDetails.length > 0) {
     lines.push(`blocked resumes: ${formatBlockedIssueResumeInlineSummary(blockedIssueResumeDetails)}`)
+  }
+  if (snapshot.localRuntime?.launchd) {
+    lines.push(`launchd: ${formatLaunchdInlineSummary(snapshot.localRuntime.launchd)}`)
   }
   if (health.runtime.runtimeRecordPath || health.runtime.logPath) {
     lines.push(
@@ -397,6 +462,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
             `started: ${snapshot.localRuntime.startedAt}`,
             `runtime record: ${snapshot.localRuntime.recordPath}`,
             `log file: ${snapshot.localRuntime.logPath}`,
+            ...(snapshot.localRuntime.launchd ? formatLaunchdDoctorLines(snapshot.localRuntime.launchd) : []),
           ]
         : []),
       '',
@@ -485,6 +551,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `working directory: ${health.runtime.workingDirectory}`,
     `runtime record: ${health.runtime.runtimeRecordPath ?? 'none'}`,
     `log file: ${health.runtime.logPath ?? 'none'}`,
+    ...(snapshot.localRuntime?.launchd ? formatLaunchdDoctorLines(snapshot.localRuntime.launchd) : []),
     `last poll: ${health.lastPollAt ?? 'never'}`,
     `last claimed: ${health.lastClaimedAt ?? 'never'}`,
     `next poll: ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
@@ -546,6 +613,30 @@ function formatRuntimeManagerSummary(
 
 function formatLocalRuntimeSummary(runtime: LocalRuntimeDiagnostic): string {
   return `${runtime.supervisor} | ${runtime.alive ? 'alive' : 'stale'} | pid ${runtime.pid} | cwd ${runtime.cwd} | started ${runtime.startedAt}`
+}
+
+function formatLaunchdInlineSummary(launchd: LocalLaunchdDiagnostic): string {
+  const runtime = launchd.runtime
+  return [
+    `loaded ${launchd.loaded ? 'yes' : 'no'}`,
+    `state ${runtime?.state ?? 'unknown'}`,
+    `runs ${runtime?.runs ?? 0}`,
+    `last signal ${runtime?.lastTerminatingSignal ?? 'none'}`,
+  ].join(' | ')
+}
+
+function formatLaunchdDoctorLines(launchd: LocalLaunchdDiagnostic): string[] {
+  return [
+    `launchd service: ${launchd.serviceTarget}`,
+    `launchd plist: ${launchd.plistPath}`,
+    `launchd installed: ${launchd.installed ? 'yes' : 'no'}`,
+    `launchd loaded: ${launchd.loaded ? 'yes' : 'no'}`,
+    `launchd state: ${launchd.runtime?.state ?? 'unknown'}`,
+    `launchd active count: ${launchd.runtime?.activeCount ?? 0}`,
+    `launchd runs: ${launchd.runtime?.runs ?? 0}`,
+    `launchd pid: ${launchd.runtime?.pid ?? 'unknown'}`,
+    `launchd last terminating signal: ${launchd.runtime?.lastTerminatingSignal ?? 'none'}`,
+  ]
 }
 
 export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary {
@@ -686,6 +777,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
     if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
       warnings.push(`local runtime record exists but pid ${snapshot.localRuntime.pid} is not alive (${snapshot.localRuntime.supervisor})`)
     }
+    if (snapshot.localRuntime?.launchd && !snapshot.localRuntime.launchd.loaded) {
+      warnings.push(`launchd service is installed but not currently loaded (${snapshot.localRuntime.launchd.serviceTarget})`)
+    }
     return warnings
   }
 
@@ -704,6 +798,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if (snapshot.health.runtime.supervisor === 'direct') {
     warnings.push('daemon is running in direct mode; closing the current terminal/session will stop it')
+  }
+  if (snapshot.localRuntime?.launchd && !snapshot.localRuntime.launchd.loaded) {
+    warnings.push(`launchd service is installed but not currently loaded (${snapshot.localRuntime.launchd.serviceTarget})`)
   }
   if ((snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? null) !== null && (snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? 0) <= RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS) {
     warnings.push(`recent transient loop error: ${formatTransientLoopErrorWithMessage(snapshot.health.runtime.lastTransientLoopErrorKind, snapshot.health.runtime.lastTransientLoopErrorAgeSeconds, snapshot.health.runtime.lastTransientLoopErrorMessage)}`)

@@ -10,6 +10,7 @@ import {
   getUnsafeLaunchdWorkingDirectoryReason,
   inspectLaunchdService,
   installLaunchdService,
+  parseLaunchdServiceDetail,
   renderLaunchdPlist,
   uninstallLaunchdService,
 } from './launchd'
@@ -131,9 +132,32 @@ describe('launchd helpers', () => {
     const status = inspectLaunchdService(spec, () => 'state = running')
 
     expect(status).toMatchObject({
+      serviceTarget: spec.serviceTarget,
       installed: true,
       loaded: true,
       detail: 'state = running',
+      runtime: {
+        state: 'running',
+      },
+    })
+  })
+
+  test('parses structured runtime fields from launchctl print output', () => {
+    expect(parseLaunchdServiceDetail(`
+gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
+  active count = 1
+  state = running
+  runs = 3
+  pid = 13204
+  last terminating signal = Terminated: 15
+}
+`)).toEqual({
+      serviceTarget: 'gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311',
+      activeCount: 1,
+      state: 'running',
+      pid: 13204,
+      runs: 3,
+      lastTerminatingSignal: 'Terminated: 15',
     })
   })
 

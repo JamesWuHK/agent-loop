@@ -215,6 +215,36 @@ agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
 
+const baseLaunchdDiagnostic = {
+  serviceTarget: 'gui/501/com.agentloop.jameswuhk-digital-employee.codex-dev.9310',
+  plistPath: '/Users/wujames/Library/LaunchAgents/com.agentloop.jameswuhk-digital-employee.codex-dev.9310.plist',
+  installed: true,
+  loaded: true,
+  runtime: {
+    serviceTarget: 'gui/501/com.agentloop.jameswuhk-digital-employee.codex-dev.9310',
+    activeCount: 1,
+    state: 'running',
+    pid: 12345,
+    runs: 2,
+    lastTerminatingSignal: 'Terminated: 15',
+  },
+} as const
+
+const baseLocalRuntime = {
+  supervisor: 'launchd',
+  alive: true,
+  pid: 12345,
+  cwd: '/Users/wujames/codeRepo/digital-employee-main',
+  recordPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json',
+  logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log',
+  startedAt: '2026-04-05T08:08:00.000Z',
+  repo: 'JamesWuHK/digital-employee',
+  machineId: 'codex-dev',
+  healthPort: 9310,
+  metricsPort: 9090,
+  launchd: baseLaunchdDiagnostic,
+} as const
+
 function buildRemoteLease(overrides: Partial<ManagedLease> = {}): ManagedLease {
   return {
     leaseId: 'lease-remote-1',
@@ -308,7 +338,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
-      localRuntime: null,
+      localRuntime: baseLocalRuntime,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -329,6 +359,7 @@ describe('status helpers', () => {
     expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
+    expect(report).toContain('launchd: loaded yes | state running | runs 2 | last signal Terminated: 15')
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
@@ -341,7 +372,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
-      localRuntime: null,
+      localRuntime: baseLocalRuntime,
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
@@ -374,6 +405,9 @@ describe('status helpers', () => {
     expect(report).toContain('working directory: /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('runtime record: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json')
     expect(report).toContain('log file: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
+    expect(report).toContain('launchd loaded: yes')
+    expect(report).toContain('launchd runs: 2')
+    expect(report).toContain('launchd last terminating signal: Terminated: 15')
     expect(report).toContain('Active Worktrees')
     expect(report).toContain('#77 agent/77/codex-dev /tmp/issue-77-codex-dev')
     expect(report).toContain('Active Leases')
@@ -685,7 +719,7 @@ describe('status helpers', () => {
       metricsUrl: 'http://127.0.0.1:9090/metrics',
       error: null,
       diagnosticRepo: baseHealth.repo,
-      localRuntime: null,
+      localRuntime: baseLocalRuntime,
       health: {
         ...baseHealth,
         runtime: {
@@ -826,6 +860,20 @@ describe('status helpers', () => {
           logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log',
         },
       },
+      launchdInspector: (runtime) => ({
+        serviceTarget: `gui/501/com.agentloop.jameswuhk-digital-employee.${runtime.machineId}.${runtime.healthPort}`,
+        plistPath: `/Users/wujames/Library/LaunchAgents/com.agentloop.jameswuhk-digital-employee.${runtime.machineId}.${runtime.healthPort}.plist`,
+        installed: true,
+        loaded: true,
+        runtime: {
+          serviceTarget: `gui/501/com.agentloop.jameswuhk-digital-employee.${runtime.machineId}.${runtime.healthPort}`,
+          activeCount: 1,
+          state: 'running',
+          pid: 90610,
+          runs: 4,
+          lastTerminatingSignal: 'Terminated: 15',
+        },
+      }),
       ghRunner: async (args) => {
         if (args[0] === 'issue' && args[1] === 'list') {
           return {
@@ -879,6 +927,12 @@ describe('status helpers', () => {
       supervisor: 'launchd',
       alive: true,
       pid: 90610,
+      launchd: {
+        loaded: true,
+        runtime: {
+          runs: 4,
+        },
+      },
     })
     expect(snapshot.githubAudit?.checks).toContainEqual(expect.objectContaining({
       scope: 'issue-process',
@@ -894,6 +948,7 @@ describe('status helpers', () => {
     expect(report).toContain('Local Runtime')
     expect(report).toContain('supervisor: launchd')
     expect(report).toContain('cwd: /Users/wujames/codeRepo/digital-employee-main')
+    expect(report).toContain('launchd runs: 4')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
   })
