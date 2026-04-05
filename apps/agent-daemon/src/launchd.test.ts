@@ -11,6 +11,7 @@ import {
   inspectLaunchdService,
   installLaunchdService,
   parseLaunchdServiceDetail,
+  startLaunchdService,
   restartLaunchdService,
   renderLaunchdPlist,
   stopLaunchdService,
@@ -304,6 +305,72 @@ gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
 
     expect(restartLaunchdService(spec, () => '', () => {})).toEqual({
       restarted: false,
+      message: `Launchd service ${spec.label} is not installed`,
+    })
+  })
+
+  test('starts an installed launchd service without rewriting the plist', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-start-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+    mkdirSync(spec.launchAgentsDir, { recursive: true })
+    writeFileSync(spec.plistPath, '<plist />')
+
+    const calls: string[] = []
+    const result = startLaunchdService(spec, (args) => {
+      calls.push(args.join(' '))
+      return ''
+    }, () => {})
+
+    expect(result).toEqual({
+      started: true,
+      message: `Started launchd service ${spec.label}`,
+    })
+    expect(calls).toEqual([
+      `bootout ${spec.serviceTarget}`,
+      `bootstrap ${spec.domain} ${spec.plistPath}`,
+      `enable ${spec.serviceTarget}`,
+      `kickstart -k ${spec.serviceTarget}`,
+    ])
+  })
+
+  test('reports when starting a launchd service that is not installed', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-launchd-start-missing-'))
+    const spec = buildLaunchdServiceSpec({
+      identity: {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-launchd',
+        healthPort: 9314,
+      },
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/repo/apps/agent-daemon/src/index.ts',
+      execPath: '/Users/wujames/.local/bin/bun',
+      argv: ['--health-port', '9314'],
+      env: {
+        PATH: '/usr/bin',
+        HOME: '/Users/wujames',
+      },
+      homeDir,
+      uid: 501,
+    })
+
+    expect(startLaunchdService(spec, () => '', () => {})).toEqual({
+      started: false,
       message: `Launchd service ${spec.label} is not installed`,
     })
   })

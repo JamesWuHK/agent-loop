@@ -989,10 +989,10 @@ describe('status helpers', () => {
     const statusReport = formatStatusReport(snapshot)
     expect(statusReport).toContain('local runtime: launchd | stale | pid 12345')
     expect(statusReport).toContain('launchd: loaded no | state unknown | runs 0 | last signal none')
-    expect(statusReport).toContain('hint: launchd service is installed but stopped; rerun the daemon CLI with `--reconcile --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` or `--restart --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to bring it back.')
+    expect(statusReport).toContain('hint: launchd service is installed but stopped; rerun the daemon CLI with `--start --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` or `--restart --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to bring it back.')
 
     const doctorReport = formatDoctorReport(snapshot)
-    expect(doctorReport).toContain('- rerun the daemon CLI with `--reconcile --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to reload the launchd service')
+    expect(doctorReport).toContain('- rerun the daemon CLI with `--start --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to reload the launchd service')
     expect(doctorReport).toContain('- if you want a forced restart instead, rerun with `--restart --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311`')
     expect(doctorReport).toContain('- inspect the daemon log file at /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log')
   })

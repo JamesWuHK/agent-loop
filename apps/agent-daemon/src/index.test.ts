@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildManagedRestartArgs,
+  startManagedRuntime,
   reconcileManagedRuntime,
   formatLaunchdStatus,
   formatRuntimeListing,
@@ -29,6 +30,215 @@ describe('index helpers', () => {
     expect(shouldRemoveManagedRuntimeRecord('launchd')).toBe(false)
     expect(shouldRemoveManagedRuntimeRecord('detached')).toBe(true)
     expect(shouldRemoveManagedRuntimeRecord('direct')).toBe(true)
+  })
+
+  test('starts detached runtimes by launching a new background daemon when none is running', () => {
+    const calls: string[] = []
+    const result = startManagedRuntime({
+      discoveredRuntime: null,
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--start'],
+    }, {
+      platform: 'linux',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'unused',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/unused',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+      }),
+      inspectLaunchdService: () => ({
+        label: 'unused',
+        serviceTarget: 'gui/501/unused',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+        installed: false,
+        loaded: false,
+        detail: null,
+        runtime: null,
+      }),
+      startLaunchdService: () => ({
+        started: false,
+        message: 'unused',
+      }),
+      restartLaunchdService: () => ({
+        restarted: false,
+        message: 'unused',
+      }),
+      stopLaunchdService: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      launchBackgroundRuntime: (input) => {
+        calls.push(`launch:${input.identity.repo}:${input.identity.machineId}:${input.identity.healthPort}:${input.metricsPort}`)
+        expect(input.argv).toEqual([
+          '--repo', 'JamesWuHK/digital-employee',
+          '--machine-id', 'codex-dev',
+          '--health-port', '9311',
+          '--metrics-port', '9091',
+        ])
+        return {
+          ...buildRuntimeSnapshot().record,
+          pid: 67890,
+        }
+      },
+    })
+
+    expect(result).toEqual({
+      kind: 'detached',
+      started: true,
+      message: 'started detached daemon with pid 67890',
+    })
+    expect(calls).toEqual([
+      'launch:JamesWuHK/digital-employee:codex-dev:9311:9091',
+    ])
+  })
+
+  test('starts installed launchd services when they are currently stopped', () => {
+    const calls: string[] = []
+    const result = startManagedRuntime({
+      discoveredRuntime: buildRuntimeSnapshot({
+        supervisor: 'launchd',
+      }, false),
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--start'],
+    }, {
+      platform: 'darwin',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'com.agentloop.example',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/com.agentloop.example.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/com.agentloop.example',
+        runtimeRecordPath: '/tmp/runtime.json',
+        logPath: '/tmp/runtime.log',
+      }),
+      inspectLaunchdService: (paths) => ({
+        label: paths.label,
+        serviceTarget: paths.serviceTarget,
+        plistPath: paths.plistPath,
+        runtimeRecordPath: paths.runtimeRecordPath,
+        logPath: paths.logPath,
+        installed: true,
+        loaded: false,
+        detail: '<plist />',
+        runtime: null,
+      }),
+      startLaunchdService: (paths) => {
+        calls.push(`start:${paths.serviceTarget}`)
+        return {
+          started: true,
+          message: `Started launchd service ${paths.label}`,
+        }
+      },
+      restartLaunchdService: () => ({
+        restarted: false,
+        message: 'unused',
+      }),
+      stopLaunchdService: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      launchBackgroundRuntime: () => buildRuntimeSnapshot().record,
+    })
+
+    expect(result).toEqual({
+      kind: 'launchd',
+      started: true,
+      message: 'Started launchd service com.agentloop.example',
+    })
+    expect(calls).toEqual([
+      'start:gui/501/com.agentloop.example',
+    ])
+  })
+
+  test('reports when launchd services are already running during start', () => {
+    expect(startManagedRuntime({
+      discoveredRuntime: buildRuntimeSnapshot({
+        supervisor: 'launchd',
+      }),
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--start'],
+    }, {
+      platform: 'darwin',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'com.agentloop.example',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/com.agentloop.example.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/com.agentloop.example',
+        runtimeRecordPath: '/tmp/runtime.json',
+        logPath: '/tmp/runtime.log',
+      }),
+      inspectLaunchdService: (paths) => ({
+        label: paths.label,
+        serviceTarget: paths.serviceTarget,
+        plistPath: paths.plistPath,
+        runtimeRecordPath: paths.runtimeRecordPath,
+        logPath: paths.logPath,
+        installed: true,
+        loaded: true,
+        detail: 'state = running',
+        runtime: {
+          serviceTarget: paths.serviceTarget,
+          activeCount: 1,
+          state: 'running',
+          pid: 12345,
+          runs: 2,
+          lastTerminatingSignal: 'Terminated: 15',
+        },
+      }),
+      startLaunchdService: () => ({
+        started: false,
+        message: 'unused',
+      }),
+      restartLaunchdService: () => ({
+        restarted: false,
+        message: 'unused',
+      }),
+      stopLaunchdService: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      launchBackgroundRuntime: () => buildRuntimeSnapshot().record,
+    })).toEqual({
+      kind: 'launchd',
+      started: true,
+      message: 'Launchd service com.agentloop.example is already running',
+    })
   })
 
   test('restarts detached runtimes by stopping the old pid and launching a new background daemon', () => {

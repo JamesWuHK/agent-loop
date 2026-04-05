@@ -641,15 +641,15 @@ function formatLaunchdDoctorLines(launchd: LocalLaunchdDiagnostic): string[] {
 }
 
 function buildOfflineStatusHint(snapshot: DaemonObservabilitySnapshot): string {
-  const reconcileArgs = buildDaemonControlArgs(snapshot, '--reconcile')
+  const startArgs = buildDaemonControlArgs(snapshot, '--start')
   const restartArgs = buildDaemonControlArgs(snapshot, '--restart')
 
   if (snapshot.localRuntime?.launchd?.installed && !snapshot.localRuntime.launchd.loaded) {
-    return `launchd service is installed but stopped; rerun the daemon CLI with \`${reconcileArgs}\` or \`${restartArgs}\` to bring it back.`
+    return `launchd service is installed but stopped; rerun the daemon CLI with \`${startArgs}\` or \`${restartArgs}\` to bring it back.`
   }
 
   if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
-    return `local ${snapshot.localRuntime.supervisor} runtime looks stale; rerun the daemon CLI with \`${reconcileArgs}\` to recover it.`
+    return `local ${snapshot.localRuntime.supervisor} runtime looks stale; rerun the daemon CLI with \`${startArgs}\` to recover it.`
   }
 
   if (snapshot.localRuntime?.alive) {
@@ -660,12 +660,12 @@ function buildOfflineStatusHint(snapshot: DaemonObservabilitySnapshot): string {
 }
 
 function buildOfflineDoctorNextChecks(snapshot: DaemonObservabilitySnapshot): string[] {
-  const reconcileArgs = buildDaemonControlArgs(snapshot, '--reconcile')
+  const startArgs = buildDaemonControlArgs(snapshot, '--start')
   const restartArgs = buildDaemonControlArgs(snapshot, '--restart')
 
   if (snapshot.localRuntime?.launchd?.installed && !snapshot.localRuntime.launchd.loaded) {
     return [
-      `- rerun the daemon CLI with \`${reconcileArgs}\` to reload the launchd service`,
+      `- rerun the daemon CLI with \`${startArgs}\` to reload the launchd service`,
       `- if you want a forced restart instead, rerun with \`${restartArgs}\``,
       `- inspect the daemon log file at ${snapshot.localRuntime.logPath}`,
     ]
@@ -673,7 +673,7 @@ function buildOfflineDoctorNextChecks(snapshot: DaemonObservabilitySnapshot): st
 
   if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
     return [
-      `- rerun the daemon CLI with \`${reconcileArgs}\` to recover the stale ${snapshot.localRuntime.supervisor} runtime`,
+      `- rerun the daemon CLI with \`${startArgs}\` to recover the stale ${snapshot.localRuntime.supervisor} runtime`,
       `- inspect the daemon log file at ${snapshot.localRuntime.logPath}`,
     ]
   }
@@ -694,7 +694,7 @@ function buildOfflineDoctorNextChecks(snapshot: DaemonObservabilitySnapshot): st
 
 function buildDaemonControlArgs(
   snapshot: DaemonObservabilitySnapshot,
-  flag: '--reconcile' | '--restart',
+  flag: '--start' | '--restart',
 ): string {
   const repo = snapshot.localRuntime?.repo ?? snapshot.diagnosticRepo ?? null
   const machineId = snapshot.localRuntime?.machineId ?? null

@@ -31,6 +31,7 @@ import {
   buildLaunchdServicePaths,
   inspectLaunchdService,
   installLaunchdService,
+  startLaunchdService,
   restartLaunchdService,
   stopLaunchdService,
   uninstallLaunchdService,
@@ -56,6 +57,12 @@ export interface RestartManagedRuntimeResult {
   message: string
 }
 
+export interface StartManagedRuntimeResult {
+  kind: 'launchd' | 'detached'
+  started: boolean
+  message: string
+}
+
 export interface StopManagedRuntimeResult {
   kind: 'launchd' | 'detached' | 'none'
   stopped: boolean
@@ -74,6 +81,7 @@ interface RestartManagedRuntimeDependencies {
   resolveLocalDaemonIdentity: LocalDaemonIdentityResolver
   buildLaunchdServicePaths: typeof buildLaunchdServicePaths
   inspectLaunchdService: typeof inspectLaunchdService
+  startLaunchdService?: typeof startLaunchdService
   restartLaunchdService: typeof restartLaunchdService
   stopLaunchdService?: typeof stopLaunchdService
   stopBackgroundRuntime: typeof stopBackgroundRuntime
@@ -85,6 +93,7 @@ const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   resolveLocalDaemonIdentity,
   buildLaunchdServicePaths,
   inspectLaunchdService,
+  startLaunchdService,
   restartLaunchdService,
   stopLaunchdService,
   stopBackgroundRuntime,
@@ -103,6 +112,7 @@ async function main() {
       'metrics-port': { type: 'string' },
       daemonize: { type: 'boolean' },
       runtimes: { type: 'boolean' },
+      start: { type: 'boolean' },
       reconcile: { type: 'boolean' },
       restart: { type: 'boolean' },
       'launchd-install': { type: 'boolean' },
@@ -127,42 +137,46 @@ async function main() {
     process.exit(0)
   }
 
-  if (args.daemonize && (args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
-    throw new Error('--daemonize cannot be combined with --reconcile, --restart, --stop, --status, --doctor, or --once')
+  if (args.daemonize && (args.start || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
+    throw new Error('--daemonize cannot be combined with --start, --reconcile, --restart, --stop, --status, --doctor, or --once')
   }
 
-  if (args.runtimes && (args.daemonize || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--runtimes cannot be combined with --daemonize, --reconcile, --restart, --stop, --status, --doctor, --once, or launchd management flags')
+  if (args.runtimes && (args.daemonize || args.start || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--runtimes cannot be combined with --daemonize, --start, --reconcile, --restart, --stop, --status, --doctor, --once, or launchd management flags')
   }
 
-  if (args.stop && (args.reconcile || args.restart || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--stop cannot be combined with --reconcile, --restart, --status, --doctor, --once, or launchd management flags')
+  if (args.start && (args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--start cannot be combined with --reconcile, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
-  if (args.restart && (args.reconcile || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--restart cannot be combined with --reconcile, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  if (args.stop && (args.start || args.reconcile || args.restart || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--stop cannot be combined with --start, --reconcile, --restart, --status, --doctor, --once, or launchd management flags')
   }
 
-  if (args.reconcile && (args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--reconcile cannot be combined with --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  if (args.restart && (args.start || args.reconcile || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--restart cannot be combined with --start, --reconcile, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
-  if (args['launchd-install'] && (args.daemonize || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-uninstall'] || args['launchd-status'])) {
+  if (args.reconcile && (args.start || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--reconcile cannot be combined with --start, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  }
+
+  if (args['launchd-install'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-uninstall'] || args['launchd-status'])) {
     throw new Error('--launchd-install cannot be combined with other control flags')
   }
 
-  if (args['launchd-uninstall'] && (args.daemonize || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-status'])) {
+  if (args['launchd-uninstall'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-status'])) {
     throw new Error('--launchd-uninstall cannot be combined with other control flags')
   }
 
-  if (args['launchd-status'] && (args.daemonize || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'])) {
+  if (args['launchd-status'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'])) {
     throw new Error('--launchd-status cannot be combined with other control flags')
   }
 
   const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
   const runtimeMachineIdHint = args['machine-id'] as string | undefined
   const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
-  const discoveredRuntime = args.status || args.doctor || args.stop || args.restart || args.reconcile
+  const discoveredRuntime = args.status || args.doctor || args.start || args.stop || args.restart || args.reconcile
     ? resolveDiscoveredRuntime({
       repo: runtimeRepoHint,
       machineId: runtimeMachineIdHint,
@@ -281,6 +295,21 @@ async function main() {
       })
       console.log(`[agent-loop] ${result.message}`)
       process.exit(result.stopped ? 0 : 1)
+    }
+
+    if (args.start) {
+      const result = startManagedRuntime({
+        discoveredRuntime,
+        repo: cliArgs.repo,
+        machineId: cliArgs.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+        metricsPort,
+        cwd: process.cwd(),
+        scriptPath: process.argv[1]!,
+        argv: process.argv.slice(2),
+      })
+      console.log(`[agent-loop] ${result.message}`)
+      process.exit(result.started ? 0 : 1)
     }
 
     if (args.restart) {
@@ -407,6 +436,7 @@ agent-loop — Distributed automation daemon
 Usage:
   agent-loop [options]
   agent-loop --reconcile [--health-port 9310]
+  agent-loop --start [--health-port 9310]
   agent-loop --restart [--health-port 9310]
   agent-loop --status [--health-port 9310]
   agent-loop --doctor [--health-port 9310]
@@ -428,6 +458,7 @@ Options:
       --metrics-port <port>   Prometheus metrics port (default: 9090)
       --daemonize             Start the daemon detached from the current terminal
       --runtimes              List local background daemon records discovered on this machine
+      --start                 Start the managed daemon matching repo/machine-id/health-port if it is not already running
       --reconcile             Reconcile the managed daemon runtime for this repo/machine-id/health-port
       --restart               Restart the managed daemon matching repo/machine-id/health-port
       --launchd-install       Install and start a macOS launchd service for this daemon (run from a durable repo checkout, not /tmp)
@@ -458,6 +489,7 @@ Examples:
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
   agent-loop --runtimes
+  agent-loop --start --health-port 9311
   agent-loop --reconcile --health-port 9311
   agent-loop --restart --health-port 9311
   agent-loop --launchd-install --health-port 9311 --metrics-port 9091
@@ -532,6 +564,94 @@ export function shouldRemoveManagedRuntimeRecord(
   supervisor: ReturnType<typeof resolveCurrentRuntimeSupervisor>,
 ): boolean {
   return supervisor !== 'launchd'
+}
+
+export function startManagedRuntime(
+  input: RestartManagedRuntimeInput,
+  deps: RestartManagedRuntimeDependencies = DEFAULT_RESTART_DEPENDENCIES,
+): StartManagedRuntimeResult {
+  const runtime = input.discoveredRuntime
+
+  if (runtime?.record.supervisor === 'detached' && runtime.alive) {
+    return {
+      kind: 'detached',
+      started: true,
+      message: `Detached daemon pid ${runtime.record.pid} is already running`,
+    }
+  }
+
+  if (deps.platform === 'darwin') {
+    const identity = deps.resolveLocalDaemonIdentity(
+      {
+        repo: runtime?.record.repo ?? input.repo,
+        machineId: runtime?.record.machineId ?? input.machineId,
+      },
+      {
+        persistGeneratedMachineId: false,
+      },
+    )
+    const launchdPaths = deps.buildLaunchdServicePaths({
+      repo: identity.repo,
+      machineId: identity.machineId,
+      healthPort: runtime?.record.healthPort ?? input.healthPort,
+    })
+    const launchdStatus = deps.inspectLaunchdService(launchdPaths)
+
+    if (launchdStatus.installed) {
+      if (launchdStatus.loaded) {
+        return {
+          kind: 'launchd',
+          started: true,
+          message: `Launchd service ${launchdStatus.label} is already running`,
+        }
+      }
+
+      const startResult = (deps.startLaunchdService ?? startLaunchdService)(launchdPaths)
+      return {
+        kind: 'launchd',
+        started: startResult.started,
+        message: startResult.message,
+      }
+    }
+  }
+
+  const identity = deps.resolveLocalDaemonIdentity(
+    {
+      repo: runtime?.record.repo ?? input.repo,
+      machineId: runtime?.record.machineId ?? input.machineId,
+    },
+    {
+      persistGeneratedMachineId: false,
+    },
+  )
+  const healthPort = runtime?.record.healthPort ?? input.healthPort
+  const metricsPort = runtime?.record.metricsPort ?? input.metricsPort ?? 9090
+  const launchArgs = buildManagedRestartArgs({
+    repo: identity.repo,
+    machineId: identity.machineId,
+    healthPort,
+    metricsPort,
+  })
+  const stopPrefix = runtime?.record.supervisor === 'detached' && !runtime.alive
+    ? `${deps.stopBackgroundRuntime(runtime.recordPath).message}; `
+    : ''
+  const started = deps.launchBackgroundRuntime({
+    identity: {
+      repo: identity.repo,
+      machineId: identity.machineId,
+      healthPort,
+    },
+    metricsPort,
+    cwd: input.cwd,
+    argv: launchArgs,
+    scriptPath: input.scriptPath,
+  })
+
+  return {
+    kind: 'detached',
+    started: true,
+    message: `${stopPrefix}started detached daemon with pid ${started.pid}`,
+  }
 }
 
 export function reconcileManagedRuntime(

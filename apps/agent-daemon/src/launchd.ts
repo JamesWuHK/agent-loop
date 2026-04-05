@@ -270,6 +270,35 @@ export function restartLaunchdService(
   }
 }
 
+export function startLaunchdService(
+  paths: LaunchdServicePaths,
+  runner: LaunchctlRunner = runLaunchctl,
+  sleep: SleepFn = sleepSync,
+): {
+  started: boolean
+  message: string
+} {
+  if (!existsSync(paths.plistPath)) {
+    return {
+      started: false,
+      message: `Launchd service ${paths.label} is not installed`,
+    }
+  }
+
+  retryLaunchdBootstrap({
+    serviceTarget: paths.serviceTarget,
+    domain: paths.domain,
+    plistPath: paths.plistPath,
+  }, runner, sleep)
+  runner(['enable', paths.serviceTarget], { allowFailure: true })
+  runner(['kickstart', '-k', paths.serviceTarget])
+
+  return {
+    started: true,
+    message: `Started launchd service ${paths.label}`,
+  }
+}
+
 export function stopLaunchdService(
   paths: LaunchdServicePaths,
   runner: LaunchctlRunner = runLaunchctl,

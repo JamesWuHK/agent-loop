@@ -31,6 +31,7 @@ describe('background helpers', () => {
       '--daemonize',
       '--repo', 'JamesWuHK/digital-employee',
       '--health-port', '9311',
+      '--start',
       '--stop',
     ])).toEqual([
       '--repo', 'JamesWuHK/digital-employee',
