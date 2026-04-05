@@ -33,6 +33,11 @@ cd agent-loop
 # Install dependencies
 bun install
 
+# Join the current repo from a new machine and start a managed daemon
+agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
+# or:
+bun run agent:join-project -- --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
+
 # Configure — daemon 将消费本仓库的 Issues
 agent-loop --repo JamesWuHK/agent-loop --pat ghp_xxx --machine-id my-dev-machine
 # 或先 gh auth login，daemon 会自动复用 gh auth token
@@ -255,6 +260,22 @@ agent-loop --start --health-port 9311
 
 现在 `--status` / `--doctor` 在 health endpoint 不通但本地还能识别出 runtime record 和 launchd service 时，会直接打印可执行的 `--start` / `--restart` 建议，而不是只告诉你 “daemon unreachable”。
 
+如果是第二台电脑要加入同一个项目，推荐直接从目标产品仓库根目录运行：
+
+```bash
+agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
+```
+
+这个命令会：
+
+- 解析当前仓库对应的 GitHub repo，并把本机 `machineId` / `repo` 写入 `~/.agent-loop/config.json`
+- 可选把 `repo-cap` 一起写入 `scheduling.concurrencyByRepo`
+- 校验当前机器是否已经具备 GitHub 认证能力
+- macOS 默认安装并启动 `launchd` service；其他平台默认启动 detached daemon
+- 输出固定的 `agent-loop --status ...` / `agent-loop --doctor ...` 命令，方便 agent 继续排障或验收
+
+如果只想先看将要发生什么，不立刻写配置或启动 daemon，可以加 `--dry-run`。
+
 ## CLI Options
 
 | Flag | Description |
@@ -265,6 +286,8 @@ agent-loop --start --health-port 9311
 | `--poll-interval MS` | Poll interval (default: 60000ms) |
 | `--machine-id` | Override machine ID |
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
+| `--join-project` | Persist machine config for the current repo and start a managed daemon on this machine |
+| `--repo-cap N` | With `--join-project`, persist a repo-level concurrency cap for this repo in `~/.agent-loop/config.json` |
 | `--daemonize` | Start the daemon detached from the current terminal |
 | `--runtimes` | List local background daemon runtime records found on this machine |
 | `--logs` | Print the recent local daemon log for the managed daemon matching repo/machine-id/health-port |

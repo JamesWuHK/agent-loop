@@ -10,6 +10,7 @@
   "scripts": {
     "agent:issues:audit": "bun apps/agent-daemon/src/audit-issue-contracts.ts",
     "agent:issues:enforce-ready": "bun apps/agent-daemon/src/ready-gate.ts",
+    "agent:join-project": "bun apps/agent-daemon/src/index.ts --join-project",
     "start": "bun run apps/agent-daemon/src/index.ts",
     "dev": "bun --watch run apps/agent-daemon/src/index.ts",
     "typecheck": "bun run --cwd packages/agent-shared typecheck && bun run --cwd apps/agent-daemon typecheck",

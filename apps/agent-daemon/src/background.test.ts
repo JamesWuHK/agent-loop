@@ -29,6 +29,7 @@ describe('background helpers', () => {
   test('removes daemon control flags before background launch', () => {
     expect(sanitizeDaemonBackgroundArgs([
       '--daemonize',
+      '--join-project',
       '--repo', 'JamesWuHK/digital-employee',
       '--health-port', '9311',
       '--start',

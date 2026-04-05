@@ -14,7 +14,7 @@ const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
 const REPO_CONFIG_DIR = '.agent-loop'
 const REPO_CONFIG_FILE = 'project.json'
 
-interface RepoLocalConfig {
+export interface RepoLocalConfig {
   project?: {
     profile?: ProjectProfileName
     promptGuidance?: ProjectPromptGuidanceOverrides
@@ -52,7 +52,7 @@ export interface CliArgs {
 export function loadConfig(args: CliArgs = {}): AgentConfig {
   ensureConfigDir()
 
-  const fileConfig = loadJsonFile<Partial<AgentConfig>>(CONFIG_PATH)
+  const fileConfig = readConfigFile()
   const repoConfig = loadRepoLocalConfig()
 
   return buildConfig(args, {
@@ -72,7 +72,7 @@ export function resolveLocalDaemonIdentity(
   ensureConfigDir()
 
   const fileConfig: Partial<AgentConfig> =
-    options.fileConfig ?? loadJsonFile<Partial<AgentConfig>>(CONFIG_PATH) as Partial<AgentConfig>
+    options.fileConfig ?? readConfigFile()
   const machineId = args.machineId ?? fileConfig.machineId ?? generateMachineId()
   const repo = args.repo ?? fileConfig.repo ?? options.repoGuess ?? guessRepoFromGit()
 
@@ -249,13 +249,17 @@ function findRepoRoot(startDir = process.cwd()): string | null {
   }
 }
 
-function loadRepoLocalConfig(startDir = process.cwd()): RepoLocalConfig {
+export function loadRepoLocalConfig(startDir = process.cwd()): RepoLocalConfig {
   const repoRoot = findRepoRoot(startDir)
   if (!repoRoot) return {}
 
   return loadJsonFile<RepoLocalConfig>(
     resolve(repoRoot, REPO_CONFIG_DIR, REPO_CONFIG_FILE),
   )
+}
+
+export function readConfigFile(path = CONFIG_PATH): Partial<AgentConfig> {
+  return loadJsonFile<Partial<AgentConfig>>(path) as Partial<AgentConfig>
 }
 
 function loadJsonFile<T extends object>(path: string): T | {} {
@@ -330,12 +334,15 @@ function mergePromptGuidance(
   return Object.keys(merged).length > 0 ? merged : undefined
 }
 
+export function writeConfigFile(config: Record<string, unknown>, path = CONFIG_PATH): void {
+  ensureConfigDir()
+  writeFileSync(path, JSON.stringify(config, null, 2))
+}
+
 function saveConfigPartial(partial: Record<string, unknown>): void {
-  const existing: Record<string, unknown> = existsSync(CONFIG_PATH)
-    ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
-    : {}
+  const existing = readConfigFile() as Record<string, unknown>
   const merged = { ...existing, ...partial }
-  writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2))
+  writeConfigFile(merged)
 }
 
 export class ConfigError extends Error {

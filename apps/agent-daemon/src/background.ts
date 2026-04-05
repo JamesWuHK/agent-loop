@@ -8,6 +8,7 @@ const RUNTIME_DIR_NAME = '.agent-loop/runtime'
 const AGENT_LOOP_RUNTIME_MANAGER_ENV = 'AGENT_LOOP_RUNTIME_MANAGER'
 const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--daemonize',
+  '--join-project',
   '--runtimes',
   '--start',
   '--reconcile',

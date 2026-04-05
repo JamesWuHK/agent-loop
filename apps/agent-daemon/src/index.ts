@@ -37,6 +37,7 @@ import {
   stopLaunchdService,
   uninstallLaunchdService,
 } from './launchd'
+import { formatJoinProjectResult, joinProjectMachine } from './join-project'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -120,6 +121,8 @@ async function main() {
       'dry-run': { type: 'boolean' },
       'metrics-port': { type: 'string' },
       daemonize: { type: 'boolean' },
+      'join-project': { type: 'boolean' },
+      'repo-cap': { type: 'string' },
       runtimes: { type: 'boolean' },
       start: { type: 'boolean' },
       logs: { type: 'boolean' },
@@ -145,6 +148,14 @@ async function main() {
   if (args.help) {
     printHelp()
     process.exit(0)
+  }
+
+  if (args['repo-cap'] && !args['join-project']) {
+    throw new Error('--repo-cap can only be used with --join-project')
+  }
+
+  if (args['join-project'] && (args.daemonize || args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--join-project cannot be combined with daemon control, status, or launchd management flags')
   }
 
   if (args.daemonize && (args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
@@ -190,6 +201,25 @@ async function main() {
   const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
   const runtimeMachineIdHint = args['machine-id'] as string | undefined
   const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
+
+  if (args['join-project']) {
+    const result = joinProjectMachine({
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      machineId: args['machine-id'] as string | undefined,
+      concurrency: args.concurrency ? parseInt(args.concurrency as string) : undefined,
+      repoCap: args['repo-cap'] ? parseInt(args['repo-cap'] as string) : undefined,
+      healthPort: runtimeHealthPortHint ?? DEFAULT_HEALTH_SERVER_PORT,
+      metricsPort,
+      cwd: process.cwd(),
+      scriptPath: process.argv[1]!,
+      dryRun: args['dry-run'] as boolean | undefined,
+      env: process.env,
+    })
+    console.log(formatJoinProjectResult(result))
+    process.exit(0)
+  }
+
   const discoveredRuntime = args.status || args.doctor || args.start || args.logs || args.stop || args.restart || args.reconcile
     ? resolveDiscoveredRuntime({
       repo: runtimeRepoHint,
@@ -460,6 +490,7 @@ agent-loop — Distributed automation daemon
 
 Usage:
   agent-loop [options]
+  agent-loop --join-project [options]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --logs [--health-port 9310]
@@ -483,6 +514,8 @@ Options:
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
       --daemonize             Start the daemon detached from the current terminal
+      --join-project          Persist local machine config for the current repo and start a managed daemon (launchd on macOS, detached elsewhere)
+      --repo-cap <n>          When used with --join-project, persist a repo-level concurrency cap for this repo in ~/.agent-loop/config.json
       --runtimes              List local background daemon records discovered on this machine
       --start                 Start the managed daemon matching repo/machine-id/health-port if it is not already running
       --logs                  Print the recent local daemon log for the managed daemon matching repo/machine-id/health-port
@@ -515,6 +548,7 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
   agent-loop --runtimes
   agent-loop --start --health-port 9311
   agent-loop --logs --health-port 9311
