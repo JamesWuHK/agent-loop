@@ -29,6 +29,11 @@ interface RepoLocalConfig {
   }
 }
 
+export interface LocalDaemonIdentity {
+  repo: string
+  machineId: string
+}
+
 export interface CliArgs {
   repo?: string
   pat?: string
@@ -54,6 +59,37 @@ export function loadConfig(args: CliArgs = {}): AgentConfig {
     fileConfig,
     repoConfig,
   })
+}
+
+export function resolveLocalDaemonIdentity(
+  args: Pick<CliArgs, 'repo' | 'machineId'> = {},
+  options: {
+    fileConfig?: Partial<AgentConfig>
+    repoGuess?: string | null
+    persistGeneratedMachineId?: boolean
+  } = {},
+): LocalDaemonIdentity {
+  ensureConfigDir()
+
+  const fileConfig: Partial<AgentConfig> =
+    options.fileConfig ?? loadJsonFile<Partial<AgentConfig>>(CONFIG_PATH) as Partial<AgentConfig>
+  const machineId = args.machineId ?? fileConfig.machineId ?? generateMachineId()
+  const repo = args.repo ?? fileConfig.repo ?? options.repoGuess ?? guessRepoFromGit()
+
+  if (!fileConfig.machineId && options.persistGeneratedMachineId !== false) {
+    saveConfigPartial({ machineId })
+  }
+
+  if (!repo) {
+    throw new ConfigError(
+      'No repo specified. Pass --repo or run inside a git repo with a GitHub remote.',
+    )
+  }
+
+  return {
+    repo,
+    machineId,
+  }
 }
 
 export function buildConfig(
@@ -85,17 +121,17 @@ export function buildConfig(
     concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
     concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
   }
-
-  const machineId =
-    args.machineId ??
-    fileConfig.machineId ??
-    generateMachineId()
-
-  const repo =
-    args.repo ??
-    fileConfig.repo ??
-    options.repoGuess ??
-    guessRepoFromGit()
+  const identity = resolveLocalDaemonIdentity(
+    {
+      repo: args.repo,
+      machineId: args.machineId,
+    },
+    {
+      fileConfig,
+      repoGuess: options.repoGuess,
+    },
+  )
+  const { machineId, repo } = identity
 
   const pat = resolveGitHubToken({
     cliPat: args.pat,
@@ -107,12 +143,6 @@ export function buildConfig(
   if (!pat) {
     throw new ConfigError(
       'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
-    )
-  }
-
-  if (!repo) {
-    throw new ConfigError(
-      'No repo specified. Pass --repo or run inside a git repo with a GitHub remote.',
     )
   }
 

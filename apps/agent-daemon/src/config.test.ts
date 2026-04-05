@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentConfig } from '@agent/shared'
-import { buildConfig, ConfigError } from './config'
+import { buildConfig, ConfigError, resolveLocalDaemonIdentity } from './config'
 
 const baseFileConfig: Partial<AgentConfig> = {
   machineId: 'machine-from-home',
@@ -267,5 +267,24 @@ describe('buildConfig', () => {
     )).toThrow(new ConfigError(
       'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
     ))
+  })
+
+  test('resolves local daemon identity without requiring a PAT', () => {
+    const identity = resolveLocalDaemonIdentity(
+      {
+        machineId: 'cli-machine',
+      },
+      {
+        fileConfig: {
+          repo: 'JamesWuHK/digital-employee',
+        },
+        persistGeneratedMachineId: false,
+      },
+    )
+
+    expect(identity).toEqual({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'cli-machine',
+    })
   })
 })

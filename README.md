@@ -40,6 +40,9 @@ agent-loop --repo JamesWuHK/agent-loop --pat ghp_xxx --machine-id my-dev-machine
 # Run (持续轮询)
 agent-loop
 
+# Run detached so it survives closing the current terminal/Codex window
+agent-loop --daemonize --health-port 9311 --metrics-port 9091
+
 # 或一次性验证模式
 agent-loop --once
 ```
@@ -179,6 +182,20 @@ agent-loop/
 
 要让 repo-local 配置生效，请从目标产品仓库根目录启动 daemon，而不是从别的仓库目录代跑。
 
+如果希望 daemon 在关闭当前终端或 Codex 对话窗口后仍继续运行，使用 `--daemonize` 从目标产品仓库根目录启动。运行实例记录和日志会写到 `~/.agent-loop/runtime/`，便于后续 `--stop`、排障和机器重启后的现场确认。
+
+```bash
+cd /path/to/product-repo
+agent-loop --daemonize --health-port 9311 --metrics-port 9091
+
+# 查看本地控制面
+agent-loop --status --health-port 9311 --metrics-port 9091
+agent-loop --doctor --health-port 9311 --metrics-port 9091
+
+# 停止同一个 repo/machine-id/health-port 对应的后台 daemon
+agent-loop --stop --health-port 9311
+```
+
 ## CLI Options
 
 | Flag | Description |
@@ -189,6 +206,8 @@ agent-loop/
 | `--poll-interval MS` | Poll interval (default: 60000ms) |
 | `--machine-id` | Override machine ID |
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
+| `--daemonize` | Start the daemon detached from the current terminal |
+| `--stop` | Stop the detached daemon matching repo/machine-id/health-port |
 | `--status` | Query the local daemon health + metrics summary and exit |
 | `--doctor` | Query the local daemon and print a detailed diagnostic report |
 | `--dry-run` | Simulate without making changes |
@@ -251,6 +270,11 @@ agent-loop --doctor
 - `/health` 保持为紧凑控制面摘要，适合 readiness / liveness 和快速判断 daemon 是否卡住
 - `/metrics` 承载细粒度 outcome、counter 和趋势，适合 dashboard、告警和 agent 读数
 - `agent-loop --status` / `agent-loop --doctor` 组合读取 `/health` + `/metrics`，给人和 agent 都提供可直接消费的排障视图
+
+后台模式额外提供：
+
+- `~/.agent-loop/runtime/*.json`：运行实例记录，便于本地 stop / 排障
+- `~/.agent-loop/runtime/*.log`：daemon 标准输出与错误日志
 
 ## Key Design Decisions
 

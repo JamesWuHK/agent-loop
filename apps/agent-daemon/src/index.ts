@@ -11,8 +11,14 @@
 
 import { parseArgs } from 'node:util'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
-import { loadConfig, type CliArgs } from './config'
+import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
+import {
+  buildBackgroundRuntimePaths,
+  launchBackgroundRuntime,
+  removeBackgroundRuntimeRecord,
+  stopBackgroundRuntime,
+} from './background'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 
@@ -26,6 +32,8 @@ async function main() {
       'machine-id': { type: 'string' },
       'dry-run': { type: 'boolean' },
       'metrics-port': { type: 'string' },
+      daemonize: { type: 'boolean' },
+      stop: { type: 'boolean' },
       once: { type: 'boolean' },
       status: { type: 'boolean' },
       doctor: { type: 'boolean' },
@@ -44,12 +52,19 @@ async function main() {
     process.exit(0)
   }
 
+  if (args.daemonize && (args.stop || args.status || args.doctor || args.once)) {
+    throw new Error('--daemonize cannot be combined with --stop, --status, --doctor, or --once')
+  }
+
+  if (args.stop && (args.status || args.doctor || args.once)) {
+    throw new Error('--stop cannot be combined with --status, --doctor, or --once')
+  }
+
   if (args.status || args.doctor) {
     let fallbackRepo: string | undefined
     try {
-      fallbackRepo = loadConfig({
+      fallbackRepo = resolveLocalDaemonIdentity({
         repo: args.repo as string | undefined,
-        pat: args.pat as string | undefined,
         machineId: args['machine-id'] as string | undefined,
       }).repo
     } catch {
@@ -85,14 +100,67 @@ async function main() {
   if (cliArgs.healthPort) healthServerConfig.port = cliArgs.healthPort
 
   try {
+    if (args.stop) {
+      const identity = resolveLocalDaemonIdentity(
+        {
+          repo: cliArgs.repo,
+          machineId: cliArgs.machineId,
+        },
+        {
+          persistGeneratedMachineId: false,
+        },
+      )
+      const runtimePaths = buildBackgroundRuntimePaths({
+        repo: identity.repo,
+        machineId: identity.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+      })
+      const result = stopBackgroundRuntime(runtimePaths.recordPath)
+      console.log(`[agent-loop] ${result.message}`)
+      process.exit(result.stopped ? 0 : 1)
+    }
+
     const config = loadConfig(cliArgs)
 
+    const runtimePaths = buildBackgroundRuntimePaths({
+      repo: config.repo,
+      machineId: config.machineId,
+      healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+    })
+
+    if (args.daemonize) {
+      const record = launchBackgroundRuntime({
+        identity: {
+          repo: config.repo,
+          machineId: config.machineId,
+          healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+        },
+        metricsPort: metricsPort ?? 9090,
+        cwd: process.cwd(),
+        argv: process.argv.slice(2),
+        scriptPath: process.argv[1]!,
+      })
+      console.log(`[agent-loop] background daemon started: pid ${record.pid}`)
+      console.log(`[agent-loop] runtime record: ${runtimePaths.recordPath}`)
+      console.log(`[agent-loop] log file: ${record.logPath}`)
+      console.log(`[agent-loop] health: http://${healthServerConfig.host ?? DEFAULT_HEALTH_SERVER_HOST}:${healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT}/health`)
+      process.exit(0)
+    }
+
     const daemon = new AgentDaemon(config, console, healthServerConfig, metricsPort)
+
+    const removeRuntimeFileIfManaged = () => {
+      const runtimeFile = process.env.AGENT_LOOP_RUNTIME_FILE
+      if (runtimeFile) {
+        removeBackgroundRuntimeRecord(runtimeFile)
+      }
+    }
 
     // Graceful shutdown
     const shutdown = async (signal: string) => {
       console.log(`\n[agent-loop] received ${signal}`)
       await daemon.stop()
+      removeRuntimeFileIfManaged()
       process.exit(0)
     }
 
@@ -105,6 +173,7 @@ async function main() {
       console.log('[agent-loop] --once mode: waiting for first issue to complete...')
       await daemon.waitForInFlightProcess()
       await daemon.stop()
+      removeRuntimeFileIfManaged()
       process.exit(0)
     }
 
@@ -127,6 +196,8 @@ Usage:
   agent-loop [options]
   agent-loop --status [--health-port 9310]
   agent-loop --doctor [--health-port 9310]
+  agent-loop --daemonize [options]
+  agent-loop --stop [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
 
 Options:
   -r, --repo <owner/repo>     Target GitHub repository
@@ -137,6 +208,8 @@ Options:
       --health-host <host>    Health check server host (default: 127.0.0.1)
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
+      --daemonize             Start the daemon detached from the current terminal
+      --stop                  Stop the detached daemon instance matching repo/machine-id/health-port
       --status                Print a compact local daemon status report and exit
       --doctor                Print a detailed local daemon diagnostic report and exit
       --dry-run               Simulate without making changes
@@ -160,6 +233,8 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --daemonize --repo owner/repo --health-port 9311 --metrics-port 9091
+  agent-loop --stop --repo owner/repo --health-port 9311
   agent-loop --status
   agent-loop --doctor --health-port 9311 --metrics-port 9091
   GITHUB_TOKEN=ghp_xxx agent-loop --once
