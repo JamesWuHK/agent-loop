@@ -887,6 +887,7 @@ export class AgentDaemon {
 
   private async findResumableIssue(): Promise<ResumableIssueCandidate | null> {
     const issues = await listOpenAgentIssues(this.config)
+    const prs = await listOpenAgentPullRequests(this.config)
     const now = Date.now()
 
     for (const issue of issues) {
@@ -896,6 +897,14 @@ export class AgentDaemon {
       const comments = await listIssueComments(issue.number, this.config)
       const activeLease = getActiveManagedLease(comments, 'issue-process', now)
       const latestLease = getLatestManagedLease(comments, 'issue-process')
+      const branch = latestLease?.lease.branch ?? `agent/${issue.number}/${this.config.machineId}`
+      const linkedPr = findLinkedManagedPr(prs, issue.number, branch)
+      const linkedPrCanResumeHumanNeededReview = linkedPr && new Set(linkedPr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+        ? canResumeAutomatedPrReview(
+            await listIssueComments(linkedPr.number, this.config),
+            AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          )
+        : false
       const canAdoptLease = canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId, now)
       const canResumeFromLease = (
         latestLease?.lease.scope === 'issue-process'
@@ -912,6 +921,12 @@ export class AgentDaemon {
         AgentDaemon.MAX_FAILED_ISSUE_RESUMES,
       )
       if (!resumable) continue
+      if (
+        issue.state === 'failed'
+        && !shouldResumeFailedIssueWithLinkedPr(linkedPr, linkedPrCanResumeHumanNeededReview)
+      ) {
+        continue
+      }
       if (!canAdoptLease) continue
 
       return {
@@ -974,9 +989,7 @@ export class AgentDaemon {
     branch: string,
   ): Promise<ManagedPullRequest | null> {
     const prs = await listOpenAgentPullRequests(this.config)
-    return prs.find((pr) => pr.headRefName === branch)
-      ?? prs.find((pr) => extractIssueNumberFromPrTitle(pr.title) === issueNumber)
-      ?? null
+    return findLinkedManagedPr(prs, issueNumber, branch)
   }
 
   private async findPendingStandalonePrReview(): Promise<ManagedPullRequest | null> {
@@ -1497,8 +1510,12 @@ export class AgentDaemon {
         this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       } else {
-        this.registerFailedIssueResume(issueNumber)
+        if (shouldClearFailedIssueResumeTrackingAfterFinalize(finalized.status)) {
+          this.failedIssueResumeAttempts.delete(issueNumber)
+          this.failedIssueResumeCooldownUntil.delete(issueNumber)
+        }
         await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        this.syncRuntimeMetrics()
       }
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
@@ -2275,6 +2292,28 @@ export function getResumableIssueLinkedPrHandoff(
   return null
 }
 
+export function shouldResumeFailedIssueWithLinkedPr(
+  pr: Pick<ManagedPullRequest, 'labels'> | null,
+  canResumeHumanNeededReview: boolean,
+): boolean {
+  if (!pr) return true
+  if (shouldMergeManagedPr(pr)) return true
+  if (shouldReviewManagedPr(pr)) return true
+
+  const labels = new Set(pr.labels)
+  if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) {
+    return canResumeHumanNeededReview
+  }
+
+  return false
+}
+
+export function shouldClearFailedIssueResumeTrackingAfterFinalize(
+  status: 'completed' | 'failed' | 'recoverable',
+): boolean {
+  return status === 'failed'
+}
+
 export function getEffectiveActiveTaskCount(input: {
   activeWorktreeCount: number
   hasInFlightProcess: boolean
@@ -2478,6 +2517,16 @@ export function getStandaloneIssueTransitionForReviewLabels(
 
 function shouldMergeManagedPr(pr: Pick<ManagedPullRequest, 'labels'>): boolean {
   return new Set(pr.labels).has(PR_REVIEW_LABELS.APPROVED)
+}
+
+function findLinkedManagedPr(
+  prs: ManagedPullRequest[],
+  issueNumber: number,
+  branch: string,
+): ManagedPullRequest | null {
+  return prs.find((pr) => pr.headRefName === branch)
+    ?? prs.find((pr) => extractIssueNumberFromPrTitle(pr.title) === issueNumber)
+    ?? null
 }
 
 function formatDaemonError(error: unknown): string {

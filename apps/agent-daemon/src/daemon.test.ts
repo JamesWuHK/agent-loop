@@ -9,6 +9,8 @@ import {
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
   getResumableIssueLinkedPrHandoff,
+  shouldClearFailedIssueResumeTrackingAfterFinalize,
+  shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
   isRetryableDaemonLoopError,
   isMergeabilityFailure,
@@ -359,6 +361,12 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(false)
   })
 
+  test('clears resumable failure cooldown tracking only for terminal finalize failures', () => {
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(true)
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
+  })
+
   test('resets linked PR labels back to retry when issue recovery resumes', () => {
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED])).toBe(true)
@@ -391,6 +399,26 @@ describe('daemon merge recovery helpers', () => {
     expect(getResumableIssueLinkedPrHandoff({
       labels: [PR_REVIEW_LABELS.RETRY],
     }, false, false)).toBeNull()
+  })
+
+  test('does not resume failed issues behind terminal human-needed PRs', () => {
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+    }, false)).toBe(false)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      labels: [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
+    }, false)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr({
+      labels: [PR_REVIEW_LABELS.APPROVED],
+    }, false)).toBe(true)
+
+    expect(shouldResumeFailedIssueWithLinkedPr(null, false)).toBe(true)
   })
 
   test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {
