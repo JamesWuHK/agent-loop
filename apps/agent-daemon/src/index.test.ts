@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildManagedRestartArgs,
+  formatManagedRuntimeLog,
+  readManagedRuntimeLog,
   startManagedRuntime,
   reconcileManagedRuntime,
   formatLaunchdStatus,
@@ -30,6 +35,47 @@ describe('index helpers', () => {
     expect(shouldRemoveManagedRuntimeRecord('launchd')).toBe(false)
     expect(shouldRemoveManagedRuntimeRecord('detached')).toBe(true)
     expect(shouldRemoveManagedRuntimeRecord('direct')).toBe(true)
+  })
+
+  test('reads and tails managed daemon logs from a discovered runtime record', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-log-test-'))
+    const logPath = join(dir, 'daemon.log')
+    writeFileSync(logPath, [
+      'line-1',
+      'line-2',
+      'line-3',
+      'line-4',
+    ].join('\n'))
+
+    const result = readManagedRuntimeLog({
+      discoveredRuntime: buildRuntimeSnapshot({
+        logPath,
+      }),
+      healthPort: 9311,
+      maxLines: 2,
+    })
+
+    expect(result).toEqual({
+      found: true,
+      path: logPath,
+      content: 'line-3\nline-4',
+      truncated: true,
+      message: `Showing last 2 log lines from ${logPath}`,
+    })
+    expect(formatManagedRuntimeLog(result)).toContain('line-3\nline-4')
+  })
+
+  test('reports when no managed daemon log file exists', () => {
+    const result = readManagedRuntimeLog({
+      discoveredRuntime: null,
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+    })
+
+    expect(result.found).toBe(false)
+    expect(result.path).toContain('jameswuhk-digital-employee__codex-dev__9311.log')
+    expect(formatManagedRuntimeLog(result)).toContain('No managed daemon log file found')
   })
 
   test('starts detached runtimes by launching a new background daemon when none is running', () => {

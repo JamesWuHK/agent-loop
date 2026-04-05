@@ -10,6 +10,7 @@
  */
 
 import { parseArgs } from 'node:util'
+import { existsSync, readFileSync } from 'node:fs'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
@@ -76,6 +77,14 @@ export interface ReconcileManagedRuntimeResult {
   message: string
 }
 
+export interface ManagedRuntimeLogResult {
+  found: boolean
+  path: string
+  content: string
+  truncated: boolean
+  message: string
+}
+
 interface RestartManagedRuntimeDependencies {
   platform: NodeJS.Platform
   resolveLocalDaemonIdentity: LocalDaemonIdentityResolver
@@ -113,6 +122,7 @@ async function main() {
       daemonize: { type: 'boolean' },
       runtimes: { type: 'boolean' },
       start: { type: 'boolean' },
+      logs: { type: 'boolean' },
       reconcile: { type: 'boolean' },
       restart: { type: 'boolean' },
       'launchd-install': { type: 'boolean' },
@@ -137,46 +147,50 @@ async function main() {
     process.exit(0)
   }
 
-  if (args.daemonize && (args.start || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
-    throw new Error('--daemonize cannot be combined with --start, --reconcile, --restart, --stop, --status, --doctor, or --once')
+  if (args.daemonize && (args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
+    throw new Error('--daemonize cannot be combined with --start, --logs, --reconcile, --restart, --stop, --status, --doctor, or --once')
   }
 
-  if (args.runtimes && (args.daemonize || args.start || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--runtimes cannot be combined with --daemonize, --start, --reconcile, --restart, --stop, --status, --doctor, --once, or launchd management flags')
+  if (args.runtimes && (args.daemonize || args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--runtimes cannot be combined with --daemonize, --start, --logs, --reconcile, --restart, --stop, --status, --doctor, --once, or launchd management flags')
   }
 
-  if (args.start && (args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--start cannot be combined with --reconcile, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  if (args.start && (args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--start cannot be combined with --logs, --reconcile, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
-  if (args.stop && (args.start || args.reconcile || args.restart || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--stop cannot be combined with --start, --reconcile, --restart, --status, --doctor, --once, or launchd management flags')
+  if (args.logs && (args.start || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--logs cannot be combined with --start, --reconcile, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
-  if (args.restart && (args.start || args.reconcile || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--restart cannot be combined with --start, --reconcile, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  if (args.stop && (args.start || args.logs || args.reconcile || args.restart || args.status || args.doctor || args.once || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--stop cannot be combined with --start, --logs, --reconcile, --restart, --status, --doctor, --once, or launchd management flags')
   }
 
-  if (args.reconcile && (args.start || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
-    throw new Error('--reconcile cannot be combined with --start, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  if (args.restart && (args.start || args.logs || args.reconcile || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--restart cannot be combined with --start, --logs, --reconcile, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
   }
 
-  if (args['launchd-install'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-uninstall'] || args['launchd-status'])) {
+  if (args.reconcile && (args.start || args.logs || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--reconcile cannot be combined with --start, --logs, --restart, --stop, --status, --doctor, --once, --runtimes, or launchd management flags')
+  }
+
+  if (args['launchd-install'] && (args.daemonize || args.start || args.logs || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-uninstall'] || args['launchd-status'])) {
     throw new Error('--launchd-install cannot be combined with other control flags')
   }
 
-  if (args['launchd-uninstall'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-status'])) {
+  if (args['launchd-uninstall'] && (args.daemonize || args.start || args.logs || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-status'])) {
     throw new Error('--launchd-uninstall cannot be combined with other control flags')
   }
 
-  if (args['launchd-status'] && (args.daemonize || args.start || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'])) {
+  if (args['launchd-status'] && (args.daemonize || args.start || args.logs || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'])) {
     throw new Error('--launchd-status cannot be combined with other control flags')
   }
 
   const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
   const runtimeMachineIdHint = args['machine-id'] as string | undefined
   const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
-  const discoveredRuntime = args.status || args.doctor || args.start || args.stop || args.restart || args.reconcile
+  const discoveredRuntime = args.status || args.doctor || args.start || args.logs || args.stop || args.restart || args.reconcile
     ? resolveDiscoveredRuntime({
       repo: runtimeRepoHint,
       machineId: runtimeMachineIdHint,
@@ -188,6 +202,17 @@ async function main() {
     const runtimeRecords = listBackgroundRuntimeRecords()
     console.log(formatRuntimeListing(runtimeRecords, runtimeRepoHint))
     process.exit(0)
+  }
+
+  if (args.logs) {
+    const result = readManagedRuntimeLog({
+      discoveredRuntime,
+      repo: args.repo as string | undefined,
+      machineId: args['machine-id'] as string | undefined,
+      healthPort: runtimeHealthPortHint ?? discoveredRuntime?.record.healthPort ?? DEFAULT_HEALTH_SERVER_PORT,
+    })
+    console.log(formatManagedRuntimeLog(result))
+    process.exit(result.found ? 0 : 1)
   }
 
   if (args.status || args.doctor) {
@@ -437,6 +462,7 @@ Usage:
   agent-loop [options]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
+  agent-loop --logs [--health-port 9310]
   agent-loop --restart [--health-port 9310]
   agent-loop --status [--health-port 9310]
   agent-loop --doctor [--health-port 9310]
@@ -459,6 +485,7 @@ Options:
       --daemonize             Start the daemon detached from the current terminal
       --runtimes              List local background daemon records discovered on this machine
       --start                 Start the managed daemon matching repo/machine-id/health-port if it is not already running
+      --logs                  Print the recent local daemon log for the managed daemon matching repo/machine-id/health-port
       --reconcile             Reconcile the managed daemon runtime for this repo/machine-id/health-port
       --restart               Restart the managed daemon matching repo/machine-id/health-port
       --launchd-install       Install and start a macOS launchd service for this daemon (run from a durable repo checkout, not /tmp)
@@ -490,6 +517,7 @@ Examples:
   agent-loop --metrics-port 9090
   agent-loop --runtimes
   agent-loop --start --health-port 9311
+  agent-loop --logs --health-port 9311
   agent-loop --reconcile --health-port 9311
   agent-loop --restart --health-port 9311
   agent-loop --launchd-install --health-port 9311 --metrics-port 9091
@@ -558,6 +586,108 @@ export function buildManagedRestartArgs(input: {
     '--health-port', String(input.healthPort),
     '--metrics-port', String(input.metricsPort),
   ]
+}
+
+export function readManagedRuntimeLog(input: {
+  discoveredRuntime: BackgroundRuntimeSnapshot | null
+  repo?: string
+  machineId?: string
+  healthPort: number
+  maxLines?: number
+}): ManagedRuntimeLogResult {
+  const logPath = resolveManagedRuntimeLogPath(input)
+
+  if (!existsSync(logPath)) {
+    return {
+      found: false,
+      path: logPath,
+      content: '',
+      truncated: false,
+      message: `No managed daemon log file found at ${logPath}`,
+    }
+  }
+
+  const content = readFileSync(logPath, 'utf-8')
+  const rendered = tailLogContent(content, input.maxLines ?? 200)
+  return {
+    found: true,
+    path: logPath,
+    content: rendered.content,
+    truncated: rendered.truncated,
+    message: rendered.truncated
+      ? `Showing last ${rendered.lineCount} log lines from ${logPath}`
+      : `Showing log contents from ${logPath}`,
+  }
+}
+
+export function formatManagedRuntimeLog(result: ManagedRuntimeLogResult): string {
+  if (!result.found) {
+    return [
+      'Managed Daemon Log',
+      '',
+      `path: ${result.path}`,
+      `error: ${result.message}`,
+    ].join('\n')
+  }
+
+  return [
+    'Managed Daemon Log',
+    '',
+    `path: ${result.path}`,
+    `status: ${result.message}`,
+    '',
+    result.content.length > 0 ? result.content : '(log file is empty)',
+  ].join('\n')
+}
+
+function resolveManagedRuntimeLogPath(input: {
+  discoveredRuntime: BackgroundRuntimeSnapshot | null
+  repo?: string
+  machineId?: string
+  healthPort: number
+}): string {
+  if (input.discoveredRuntime?.record.logPath) {
+    return input.discoveredRuntime.record.logPath
+  }
+
+  const identity = resolveLocalDaemonIdentity(
+    {
+      repo: input.repo,
+      machineId: input.machineId,
+    },
+    {
+      persistGeneratedMachineId: false,
+    },
+  )
+
+  return buildBackgroundRuntimePaths({
+    repo: identity.repo,
+    machineId: identity.machineId,
+    healthPort: input.healthPort,
+  }).logPath
+}
+
+function tailLogContent(content: string, maxLines: number): {
+  content: string
+  truncated: boolean
+  lineCount: number
+} {
+  const lines = content.split('\n')
+  const normalizedLines = lines.at(-1) === '' ? lines.slice(0, -1) : lines
+  if (normalizedLines.length <= maxLines) {
+    return {
+      content: normalizedLines.join('\n'),
+      truncated: false,
+      lineCount: normalizedLines.length,
+    }
+  }
+
+  const tail = normalizedLines.slice(-maxLines)
+  return {
+    content: tail.join('\n'),
+    truncated: true,
+    lineCount: tail.length,
+  }
 }
 
 export function shouldRemoveManagedRuntimeRecord(

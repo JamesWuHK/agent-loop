@@ -33,6 +33,7 @@ describe('background helpers', () => {
       '--health-port', '9311',
       '--start',
       '--stop',
+      '--logs',
     ])).toEqual([
       '--repo', 'JamesWuHK/digital-employee',
       '--health-port', '9311',

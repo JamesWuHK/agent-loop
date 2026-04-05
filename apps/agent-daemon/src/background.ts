@@ -13,6 +13,7 @@ const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--reconcile',
   '--restart',
   '--stop',
+  '--logs',
   '--status',
   '--doctor',
   '--once',

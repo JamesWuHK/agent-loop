@@ -46,6 +46,9 @@ agent-loop --daemonize --health-port 9311 --metrics-port 9091
 # Re-open a fresh Codex/terminal session and rediscover local daemons
 agent-loop --runtimes
 
+# Print the recent managed daemon log without remembering the file path
+agent-loop --logs --health-port 9311
+
 # Start a managed daemon again after it has been stopped
 agent-loop --start --health-port 9311
 
@@ -199,6 +202,7 @@ agent-loop --daemonize --health-port 9311 --metrics-port 9091
 
 # 查看本地控制面
 agent-loop --runtimes
+agent-loop --logs
 agent-loop --start
 agent-loop --reconcile
 agent-loop --restart
@@ -221,6 +225,7 @@ agent-loop --stop --health-port 9311
 - `--reconcile`：做幂等恢复检查。如果 daemon 已经健康，它会直接返回 healthy；如果 runtime record 丢了、pid 变了或 service 没 load，会按当前 supervisor 自动修复。
 - `--restart`：强制重启托管 daemon。
 - `--stop`：停止托管 daemon。对 `launchd` 会 `bootout` 但保留 plist 和 runtime record，方便后续 `--status` / `--doctor` / `--start` 接回控制面。
+- `--logs`：直接打印最近一段 daemon log，默认展示最近 200 行，不需要手工找 `~/.agent-loop/runtime/*.log`。
 
 如果希望 daemon 在机器重启、用户重新登录之后也能自动恢复，macOS 上可以安装 `launchd` 服务：
 
@@ -244,6 +249,7 @@ agent-loop --launchd-uninstall --health-port 9311
 ```bash
 agent-loop --status --health-port 9311
 agent-loop --doctor --health-port 9311
+agent-loop --logs --health-port 9311
 agent-loop --start --health-port 9311
 ```
 
@@ -261,6 +267,7 @@ agent-loop --start --health-port 9311
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
 | `--daemonize` | Start the daemon detached from the current terminal |
 | `--runtimes` | List local background daemon runtime records found on this machine |
+| `--logs` | Print the recent local daemon log for the managed daemon matching repo/machine-id/health-port |
 | `--start` | Start the managed daemon matching repo/machine-id/health-port if it is not already running |
 | `--reconcile` | Reconcile and, if needed, repair the managed daemon matching repo/machine-id/health-port |
 | `--restart` | Force-restart the managed daemon matching repo/machine-id/health-port |
@@ -335,7 +342,7 @@ agent-loop --doctor
 
 - `~/.agent-loop/runtime/*.json`：运行实例记录，便于本地 stop / 排障
 - `~/.agent-loop/runtime/*.log`：daemon 标准输出与错误日志
-- 从目标 repo 根目录执行 `agent-loop --start` / `agent-loop --reconcile` / `agent-loop --restart` / `agent-loop --status` / `agent-loop --doctor` / `agent-loop --stop` 时，如果本机只有一个匹配的 runtime record，CLI 会自动发现对应 health/metrics 端口，不必手动再记一次端口号
+- 从目标 repo 根目录执行 `agent-loop --logs` / `agent-loop --start` / `agent-loop --reconcile` / `agent-loop --restart` / `agent-loop --status` / `agent-loop --doctor` / `agent-loop --stop` 时，如果本机只有一个匹配的 runtime record，CLI 会自动发现对应 health/metrics 端口，不必手动再记一次端口号
 - `agent-loop --runtimes` 可以让新打开的 Codex/终端会话快速找回当前机器上正在运行的 daemon 实例
 - `launchd` service 会把 plist 写到 `~/Library/LaunchAgents/`，并沿用同一套 runtime record/log 路径，方便和 detached 模式统一排障
 
