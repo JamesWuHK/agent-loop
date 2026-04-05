@@ -373,7 +373,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
       ...(snapshot.localRuntime ? [`runtime files: record ${snapshot.localRuntime.recordPath} | log ${snapshot.localRuntime.logPath}`] : []),
       `health: ${snapshot.healthUrl}`,
       `error: ${snapshot.error ?? 'unknown error'}`,
-      'hint: start the daemon or pass the correct --health-host/--health-port.',
+      `hint: ${buildOfflineStatusHint(snapshot)}`,
     ].join('\n')
   }
 
@@ -476,9 +476,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
       ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
       '',
       'Next checks',
-      '- confirm the daemon process is running',
-      '- confirm the health port matches the running daemon',
-      '- if the daemon uses a custom port, rerun with --health-port',
+      ...buildOfflineDoctorNextChecks(snapshot),
     ].join('\n')
   }
 
@@ -640,6 +638,90 @@ function formatLaunchdDoctorLines(launchd: LocalLaunchdDiagnostic): string[] {
     `launchd pid: ${launchd.runtime?.pid ?? 'unknown'}`,
     `launchd last terminating signal: ${launchd.runtime?.lastTerminatingSignal ?? 'none'}`,
   ]
+}
+
+function buildOfflineStatusHint(snapshot: DaemonObservabilitySnapshot): string {
+  const reconcileArgs = buildDaemonControlArgs(snapshot, '--reconcile')
+  const restartArgs = buildDaemonControlArgs(snapshot, '--restart')
+
+  if (snapshot.localRuntime?.launchd?.installed && !snapshot.localRuntime.launchd.loaded) {
+    return `launchd service is installed but stopped; rerun the daemon CLI with \`${reconcileArgs}\` or \`${restartArgs}\` to bring it back.`
+  }
+
+  if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
+    return `local ${snapshot.localRuntime.supervisor} runtime looks stale; rerun the daemon CLI with \`${reconcileArgs}\` to recover it.`
+  }
+
+  if (snapshot.localRuntime?.alive) {
+    return `the local runtime record is still alive, so confirm pid ${snapshot.localRuntime.pid} is serving the configured health port ${snapshot.localRuntime.healthPort}.`
+  }
+
+  return 'start the daemon or pass the correct --health-host/--health-port.'
+}
+
+function buildOfflineDoctorNextChecks(snapshot: DaemonObservabilitySnapshot): string[] {
+  const reconcileArgs = buildDaemonControlArgs(snapshot, '--reconcile')
+  const restartArgs = buildDaemonControlArgs(snapshot, '--restart')
+
+  if (snapshot.localRuntime?.launchd?.installed && !snapshot.localRuntime.launchd.loaded) {
+    return [
+      `- rerun the daemon CLI with \`${reconcileArgs}\` to reload the launchd service`,
+      `- if you want a forced restart instead, rerun with \`${restartArgs}\``,
+      `- inspect the daemon log file at ${snapshot.localRuntime.logPath}`,
+    ]
+  }
+
+  if (snapshot.localRuntime && !snapshot.localRuntime.alive) {
+    return [
+      `- rerun the daemon CLI with \`${reconcileArgs}\` to recover the stale ${snapshot.localRuntime.supervisor} runtime`,
+      `- inspect the daemon log file at ${snapshot.localRuntime.logPath}`,
+    ]
+  }
+
+  if (snapshot.localRuntime?.alive) {
+    return [
+      `- confirm pid ${snapshot.localRuntime.pid} is serving the configured health port ${snapshot.localRuntime.healthPort}`,
+      '- if the daemon uses a custom port, rerun with --health-port',
+    ]
+  }
+
+  return [
+    '- confirm the daemon process is running',
+    '- confirm the health port matches the running daemon',
+    '- if the daemon uses a custom port, rerun with --health-port',
+  ]
+}
+
+function buildDaemonControlArgs(
+  snapshot: DaemonObservabilitySnapshot,
+  flag: '--reconcile' | '--restart',
+): string {
+  const repo = snapshot.localRuntime?.repo ?? snapshot.diagnosticRepo ?? null
+  const machineId = snapshot.localRuntime?.machineId ?? null
+  const healthPort = snapshot.localRuntime?.healthPort ?? parsePortFromUrl(snapshot.healthUrl)
+  const parts: string[] = [flag]
+
+  if (repo) {
+    parts.push('--repo', repo)
+  }
+  if (machineId) {
+    parts.push('--machine-id', machineId)
+  }
+  if (healthPort !== null) {
+    parts.push('--health-port', String(healthPort))
+  }
+
+  return parts.join(' ')
+}
+
+function parsePortFromUrl(url: string): number | null {
+  try {
+    const parsed = new URL(url)
+    const port = Number(parsed.port)
+    return Number.isFinite(port) && port > 0 ? port : null
+  } catch {
+    return null
+  }
 }
 
 export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary {

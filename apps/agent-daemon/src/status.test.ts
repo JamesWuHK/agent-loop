@@ -949,10 +949,52 @@ describe('status helpers', () => {
     expect(report).toContain('supervisor: launchd')
     expect(report).toContain('cwd: /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('launchd runs: 4')
+    expect(report).toContain('- confirm pid 90610 is serving the configured health port 9311')
     expect(snapshot.warnings).toContain('launchd has restarted this daemon 4 times; inspect recent exits if this keeps increasing')
     expect(report).toContain('- launchd has restarted this daemon 4 times; inspect recent exits if this keeps increasing')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:working | ok | source=remote | comment=201')
+  })
+
+  test('offline status and doctor suggest reconcile commands for stopped launchd services', () => {
+    const snapshot = {
+      ok: false,
+      healthUrl: 'http://127.0.0.1:9311/health',
+      metricsUrl: null,
+      error: 'GET http://127.0.0.1:9311/health failed: curl: (7) Failed to connect',
+      diagnosticRepo: 'JamesWuHK/digital-employee',
+      localRuntime: {
+        ...baseLocalRuntime,
+        alive: false,
+        healthPort: 9311,
+        recordPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.json',
+        logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log',
+        launchd: {
+          ...baseLaunchdDiagnostic,
+          loaded: false,
+          runtime: null,
+        },
+      },
+      health: null,
+      metrics: null,
+      metricsError: null,
+      githubAudit: null,
+      warnings: [
+        'daemon health endpoint is not reachable at http://127.0.0.1:9311/health',
+        'local runtime record exists but pid 12345 is not alive (launchd)',
+        `launchd service is installed but not currently loaded (${baseLaunchdDiagnostic.serviceTarget})`,
+      ],
+    } satisfies Awaited<ReturnType<typeof collectDaemonObservability>>
+
+    const statusReport = formatStatusReport(snapshot)
+    expect(statusReport).toContain('local runtime: launchd | stale | pid 12345')
+    expect(statusReport).toContain('launchd: loaded no | state unknown | runs 0 | last signal none')
+    expect(statusReport).toContain('hint: launchd service is installed but stopped; rerun the daemon CLI with `--reconcile --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` or `--restart --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to bring it back.')
+
+    const doctorReport = formatDoctorReport(snapshot)
+    expect(doctorReport).toContain('- rerun the daemon CLI with `--reconcile --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311` to reload the launchd service')
+    expect(doctorReport).toContain('- if you want a forced restart instead, rerun with `--restart --repo JamesWuHK/digital-employee --machine-id codex-dev --health-port 9311`')
+    expect(doctorReport).toContain('- inspect the daemon log file at /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log')
   })
 
   test('offline doctor surfaces blocked failed issue resumes from GitHub state', async () => {
