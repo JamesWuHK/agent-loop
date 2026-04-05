@@ -22,6 +22,8 @@
  * - agent_loop_active_leases: Gauge of active managed leases
  * - agent_loop_lease_heartbeat_age_seconds: Gauge of oldest held lease heartbeat age
  * - agent_loop_stalled_workers: Gauge of stalled workers tracked by the daemon
+ * - agent_loop_transient_loop_errors_total: Counter of transient loop-level GitHub/network errors
+ * - agent_loop_last_transient_loop_error_age_seconds: Gauge of the most recent transient loop error age
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
@@ -209,6 +211,18 @@ export const workerIdleTimeoutsTotal = new Counter({
   registers: [registry],
 })
 
+/**
+ * Total number of transient loop-level errors that the daemon will retry from.
+ * Labels:
+ *   - kind: "startup-recovery" | "poll-cycle"
+ */
+export const transientLoopErrorsTotal = new Counter({
+  name: 'agent_loop_transient_loop_errors_total',
+  help: 'Total number of transient loop-level GitHub or network errors that were deferred for retry',
+  labelNames: ['kind'] as const,
+  registers: [registry],
+})
+
 // ─── Gauges ───────────────────────────────────────────────────────────────────
 
 /**
@@ -363,6 +377,15 @@ export const blockedIssueResumeEscalations = new Gauge({
 export const blockedIssueResumeEscalationAgeSeconds = new Gauge({
   name: 'agent_loop_blocked_issue_resume_escalation_age_seconds',
   help: 'Age in seconds of the oldest GitHub escalation comment for a blocked failed issue resume',
+  registers: [registry],
+})
+
+/**
+ * Age in seconds of the most recent transient loop-level error.
+ */
+export const lastTransientLoopErrorAgeSeconds = new Gauge({
+  name: 'agent_loop_last_transient_loop_error_age_seconds',
+  help: 'Age in seconds of the most recent transient loop-level error observed by the daemon',
   registers: [registry],
 })
 
@@ -524,6 +547,15 @@ export function recordWorkerIdleTimeout(
 }
 
 /**
+ * Record a transient loop-level error that will be retried.
+ */
+export function recordTransientLoopError(
+  kind: 'startup-recovery' | 'poll-cycle',
+): void {
+  transientLoopErrorsTotal.inc({ kind })
+}
+
+/**
  * Update active worktrees gauge.
  */
 export function setActiveWorktrees(count: number): void {
@@ -669,6 +701,13 @@ export function setBlockedIssueResumeEscalations(count: number): void {
  */
 export function setBlockedIssueResumeEscalationAgeSeconds(ageSeconds: number): void {
   blockedIssueResumeEscalationAgeSeconds.set(ageSeconds)
+}
+
+/**
+ * Update the age gauge for the most recent transient loop-level error.
+ */
+export function setLastTransientLoopErrorAgeSeconds(ageSeconds: number): void {
+  lastTransientLoopErrorAgeSeconds.set(ageSeconds)
 }
 
 /**

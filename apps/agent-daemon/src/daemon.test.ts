@@ -139,6 +139,12 @@ describe('daemon merge recovery helpers', () => {
       hasInFlightProcess: true,
       hasInFlightPrReview: true,
       startupRecoveryPending: true,
+      transientLoopErrorCount: 2,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorAt: '2026-04-05T08:10:50.000Z',
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+      lastTransientLoopErrorAgeSeconds: 10,
       failedIssueResumeAttemptCount: 3,
       failedIssueResumeCooldownCount: 2,
       oldestBlockedIssueResumeAgeSeconds: 12,
@@ -207,6 +213,12 @@ describe('daemon merge recovery helpers', () => {
       inFlightIssueProcess: true,
       inFlightPrReview: true,
       startupRecoveryPending: true,
+      transientLoopErrorCount: 2,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorAt: '2026-04-05T08:10:50.000Z',
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+      lastTransientLoopErrorAgeSeconds: 10,
       effectiveActiveTasks: 3,
       failedIssueResumeAttemptsTracked: 3,
       failedIssueResumeCooldownsTracked: 2,
@@ -349,6 +361,61 @@ describe('daemon merge recovery helpers', () => {
       lastEscalatedAt: '2026-04-05T07:30:00.000Z',
       now,
     })).toBe(true)
+  })
+
+  test('tracks transient loop errors in daemon runtime status', () => {
+    const config: AgentConfig = {
+      machineId: 'codex-dev',
+      repo: 'JamesWuHK/digital-employee',
+      pat: 'test-token',
+      pollIntervalMs: 60_000,
+      concurrency: 1,
+      requestedConcurrency: 1,
+      concurrencyPolicy: {
+        requested: 1,
+        effective: 1,
+        repoCap: null,
+        profileCap: null,
+        projectCap: null,
+      },
+      scheduling: {
+        concurrencyByRepo: {},
+        concurrencyByProfile: {},
+      },
+      recovery: {
+        heartbeatIntervalMs: 30_000,
+        leaseTtlMs: 60_000,
+        workerIdleTimeoutMs: 300_000,
+        leaseAdoptionBackoffMs: 5_000,
+      },
+      worktreesBase: '/tmp/worktrees',
+      project: {
+        profile: 'desktop-vite',
+      },
+      agent: {
+        primary: 'codex',
+        fallback: 'claude',
+        claudePath: 'claude',
+        codexPath: 'codex',
+        timeoutMs: 60_000,
+      },
+      git: {
+        defaultBranch: 'main',
+        authorName: 'agent-loop',
+        authorEmail: 'agent-loop@local',
+      },
+    }
+
+    const daemon = new AgentDaemon(config, console)
+    ;(daemon as any).noteTransientLoopError('startup-recovery', new Error('Could not resolve host: api.github.com'))
+
+    expect(daemon.getStatus().runtime).toMatchObject({
+      transientLoopErrorCount: 1,
+      startupRecoveryDeferredCount: 1,
+      lastTransientLoopErrorKind: 'startup-recovery',
+      lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+    })
+    expect(daemon.getStatus().runtime.lastTransientLoopErrorAgeSeconds).toBeTypeOf('number')
   })
 
   test('treats transient network-style daemon errors as retryable', () => {

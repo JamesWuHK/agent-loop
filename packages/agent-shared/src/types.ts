@@ -328,6 +328,12 @@ export interface DaemonStatus {
     inFlightPrReview: boolean
     startupRecoveryPending: boolean
     effectiveActiveTasks: number
+    transientLoopErrorCount: number
+    startupRecoveryDeferredCount: number
+    lastTransientLoopErrorAt: string | null
+    lastTransientLoopErrorKind: string | null
+    lastTransientLoopErrorMessage: string | null
+    lastTransientLoopErrorAgeSeconds: number | null
     failedIssueResumeAttemptsTracked: number
     failedIssueResumeCooldownsTracked: number
     oldestBlockedIssueResumeAgeSeconds: number

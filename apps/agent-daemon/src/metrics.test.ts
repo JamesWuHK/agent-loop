@@ -9,6 +9,7 @@ import {
   recordPrMergeRecoveryOutcome,
   recordLeaseConflict,
   recordRecoveryAction,
+  recordTransientLoopError,
   recordWorkerIdleTimeout,
   recordPrCreated,
   setActiveWorktrees,
@@ -18,6 +19,7 @@ import {
   setBlockedIssueResumeAgeSeconds,
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
+  setLastTransientLoopErrorAgeSeconds,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -165,6 +167,7 @@ describe('metrics', () => {
     test('tracks lease conflicts, recovery actions, and worker idle timeouts', async () => {
       recordLeaseConflict('issue-process')
       recordRecoveryAction('issue-process-idle-timeout', 'recoverable')
+      recordTransientLoopError('startup-recovery')
       recordWorkerIdleTimeout('pr-review')
 
       const metrics = await getMetrics()
@@ -173,6 +176,8 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_recovery_actions_total')
       expect(metrics).toContain('kind="issue-process-idle-timeout"')
       expect(metrics).toContain('outcome="recoverable"')
+      expect(metrics).toContain('agent_loop_transient_loop_errors_total')
+      expect(metrics).toContain('kind="startup-recovery"')
       expect(metrics).toContain('agent_loop_worker_idle_timeouts_total')
       expect(metrics).toContain('scope="pr-review"')
     })
@@ -204,6 +209,7 @@ describe('metrics', () => {
       setBlockedIssueResumeAgeSeconds(45)
       setBlockedIssueResumeEscalations(1)
       setBlockedIssueResumeEscalationAgeSeconds(15)
+      setLastTransientLoopErrorAgeSeconds(12)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
@@ -218,6 +224,7 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_blocked_issue_resume_age_seconds')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalations')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalation_age_seconds')
+      expect(metrics).toContain('agent_loop_last_transient_loop_error_age_seconds')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')

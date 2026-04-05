@@ -33,6 +33,7 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
 ] as const
 const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
+const RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS = 5 * 60
 export interface DaemonHealthPayload extends DaemonStatus {
   status: 'running' | 'stopped'
   mode: string
@@ -45,7 +46,9 @@ export interface DaemonMetricSummary {
   autoFixes: Record<string, number>
   mergeRecovery: Record<string, number>
   recoveryActions: Record<string, Record<string, number>>
+  transientLoopErrors: Record<string, number>
   workerIdleTimeouts: Record<string, number>
+  lastTransientLoopErrorAgeSeconds: number | null
   activeLeases: number | null
   leaseHeartbeatAgeSeconds: number | null
   stalledWorkers: number | null
@@ -274,6 +277,8 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   const blockedIssueResumeDetails = health.runtime.blockedIssueResumeDetails ?? []
   const oldestBlockedIssueResumeAgeSeconds = health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
   const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
+  const transientLoopErrorCount = health.runtime.transientLoopErrorCount ?? 0
+  const startupRecoveryDeferredCount = health.runtime.startupRecoveryDeferredCount ?? 0
   const lines = [
     `daemon: ${health.status} v${health.version} (${health.mode})`,
     `repo: ${health.repo}`,
@@ -282,6 +287,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `concurrency: ${formatConcurrencyPolicy(health.concurrencyPolicy)}`,
     `runtime: active ${health.runtime.effectiveActiveTasks}/${health.concurrency} | worktrees ${health.activeWorktrees.length} | pr reviews ${health.runtime.activePrReviews} | issue loop ${formatBoolean(health.runtime.inFlightIssueProcess)} | review loop ${formatBoolean(health.runtime.inFlightPrReview)}`,
     `recovery: heartbeat ${health.recovery.heartbeatIntervalMs}ms | ttl ${health.recovery.leaseTtlMs}ms | idle ${health.recovery.workerIdleTimeoutMs}ms | adopt backoff ${health.recovery.leaseAdoptionBackoffMs}ms`,
+    `connectivity: transient ${transientLoopErrorCount} | startup deferred ${startupRecoveryDeferredCount} | last transient ${formatTransientLoopError(health.runtime.lastTransientLoopErrorKind, health.runtime.lastTransientLoopErrorAgeSeconds)}`,
     `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)} | escalated ${blockedIssueResumeEscalationCount} | oldest escalation ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'}`,
@@ -378,6 +384,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         ...REVIEW_STAGE_ORDER.map((stage) => `reviews.${stage}: ${formatOrderedMap(snapshot.metrics?.prReviews[stage] ?? {}, REVIEW_OUTCOME_ORDER)}`),
         `auto-fix: ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)}`,
         `merge-recovery: ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
+        `transient-loop-errors: ${formatInlineKeyValue(snapshot.metrics.transientLoopErrors) || 'none'}`,
+        `last-transient-loop-error-age-seconds: ${snapshot.metrics.lastTransientLoopErrorAgeSeconds ?? 0}`,
         `lease-conflicts: ${snapshot.metrics.leaseConflicts}`,
         `worker-idle-timeouts: ${formatInlineKeyValue(snapshot.metrics.workerIdleTimeouts) || 'none'}`,
         `blocked-issue-resumes: ${snapshot.metrics.blockedIssueResumes ?? 0}`,
@@ -415,6 +423,9 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `last poll: ${health.lastPollAt ?? 'never'}`,
     `last claimed: ${health.lastClaimedAt ?? 'never'}`,
     `startup recovery pending: ${formatBoolean(health.runtime.startupRecoveryPending)}`,
+    `transient loop errors: ${health.runtime.transientLoopErrorCount ?? 0}`,
+    `startup recovery deferred count: ${health.runtime.startupRecoveryDeferredCount ?? 0}`,
+    `last transient loop error: ${formatTransientLoopErrorWithMessage(health.runtime.lastTransientLoopErrorKind, health.runtime.lastTransientLoopErrorAgeSeconds, health.runtime.lastTransientLoopErrorMessage)}`,
     `active worktrees: ${health.activeWorktrees.length}`,
     `active pr reviews: ${health.runtime.activePrReviews}`,
     `in-flight issue loop: ${formatBoolean(health.runtime.inFlightIssueProcess)}`,
@@ -466,7 +477,9 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     autoFixes: {},
     mergeRecovery: {},
     recoveryActions: {},
+    transientLoopErrors: {},
     workerIdleTimeouts: {},
+    lastTransientLoopErrorAgeSeconds: null,
     activeLeases: null,
     leaseHeartbeatAgeSeconds: null,
     stalledWorkers: null,
@@ -499,8 +512,14 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         summary.recoveryActions[sample.labels.kind] ??= {}
         summary.recoveryActions[sample.labels.kind]![sample.labels.outcome] = sample.value
         break
+      case 'agent_loop_transient_loop_errors_total':
+        if (sample.labels.kind) summary.transientLoopErrors[sample.labels.kind] = sample.value
+        break
       case 'agent_loop_worker_idle_timeouts_total':
         if (sample.labels.scope) summary.workerIdleTimeouts[sample.labels.scope] = sample.value
+        break
+      case 'agent_loop_last_transient_loop_error_age_seconds':
+        summary.lastTransientLoopErrorAgeSeconds = sample.value
         break
       case 'agent_loop_active_leases':
         summary.activeLeases = sample.value
@@ -590,6 +609,12 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   const oldestBlockedIssueResumeAgeSeconds = snapshot.health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
   if (snapshot.health.runtime.startupRecoveryPending) {
     warnings.push('startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile')
+  }
+  if ((snapshot.health.runtime.startupRecoveryDeferredCount ?? 0) > 0) {
+    warnings.push(`startup recovery has been deferred ${snapshot.health.runtime.startupRecoveryDeferredCount} time(s) by transient GitHub/network errors`)
+  }
+  if ((snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? null) !== null && (snapshot.health.runtime.lastTransientLoopErrorAgeSeconds ?? 0) <= RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS) {
+    warnings.push(`recent transient loop error: ${formatTransientLoopErrorWithMessage(snapshot.health.runtime.lastTransientLoopErrorKind, snapshot.health.runtime.lastTransientLoopErrorAgeSeconds, snapshot.health.runtime.lastTransientLoopErrorMessage)}`)
   }
   if (snapshot.metricsError) {
     warnings.push(`metrics endpoint is unavailable: ${snapshot.metricsError}`)
@@ -785,6 +810,20 @@ function formatNullableSeconds(seconds: number | null): string {
 function formatLastRecovery(kind: string | null, at: string | null): string {
   if (!kind || !at) return 'none'
   return `${kind} @ ${at}`
+}
+
+function formatTransientLoopError(kind: string | null, ageSeconds: number | null): string {
+  if (!kind || ageSeconds === null) return 'none'
+  return `${kind} ${formatNullableSeconds(ageSeconds)} ago`
+}
+
+function formatTransientLoopErrorWithMessage(
+  kind: string | null,
+  ageSeconds: number | null,
+  message: string | null,
+): string {
+  if (!kind || ageSeconds === null) return 'none'
+  return `${kind} ${formatNullableSeconds(ageSeconds)} ago${message ? ` | ${message}` : ''}`
 }
 
 function formatInlineKeyValue(values: Record<string, number>): string {

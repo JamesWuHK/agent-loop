@@ -46,12 +46,14 @@ import {
   setProjectInfo,
   recordLeaseConflict,
   recordRecoveryAction,
+  recordTransientLoopError,
   recordWorkerIdleTimeout,
   setStalledWorkers,
   setBlockedIssueResumes,
   setBlockedIssueResumeAgeSeconds,
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
+  setLastTransientLoopErrorAgeSeconds,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -150,6 +152,11 @@ export class AgentDaemon {
   private recoveryActionHistory: RecoveryActionRuntimeDetail[] = []
   private lastRecoveryActionAt: string | null = null
   private lastRecoveryActionKind: string | null = null
+  private transientLoopErrorCount = 0
+  private startupRecoveryDeferredCount = 0
+  private lastTransientLoopErrorAt: string | null = null
+  private lastTransientLoopErrorKind: 'startup-recovery' | 'poll-cycle' | null = null
+  private lastTransientLoopErrorMessage: string | null = null
   private startedAt = Date.now()
   private lastPollAt: string | null = null
   private lastClaimedAt: string | null = null
@@ -323,6 +330,21 @@ export class AgentDaemon {
       this.recoveryActionHistory.length = 10
     }
     recordRecoveryAction(kind, outcome)
+    this.syncRuntimeMetrics()
+  }
+
+  private noteTransientLoopError(
+    kind: 'startup-recovery' | 'poll-cycle',
+    error: unknown,
+  ): void {
+    this.transientLoopErrorCount += 1
+    if (kind === 'startup-recovery') {
+      this.startupRecoveryDeferredCount += 1
+    }
+    this.lastTransientLoopErrorAt = new Date().toISOString()
+    this.lastTransientLoopErrorKind = kind
+    this.lastTransientLoopErrorMessage = formatDaemonError(error)
+    recordTransientLoopError(kind)
     this.syncRuntimeMetrics()
   }
 
@@ -682,6 +704,7 @@ export class AgentDaemon {
     } catch (err) {
       const formatted = formatDaemonError(err)
       if (isRetryableDaemonLoopError(err)) {
+        this.noteTransientLoopError('poll-cycle', err)
         this.logger.warn(`[daemon] transient loop error; will retry on next poll: ${formatted}`)
       } else {
         this.logger.error(`[daemon] poll cycle failed; will retry on next poll: ${formatted}`)
@@ -709,6 +732,7 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
       const formatted = formatDaemonError(err)
       if (isRetryableDaemonLoopError(err)) {
+        this.noteTransientLoopError('startup-recovery', err)
         this.logger.warn(`[daemon] startup recovery deferred until connectivity recovers: ${formatted}`)
         return
       }
@@ -2281,6 +2305,12 @@ export class AgentDaemon {
       hasInFlightProcess: this._inFlightProcess !== null,
       hasInFlightPrReview: this._inFlightPrReview !== null,
       startupRecoveryPending: this.startupRecoveryPending,
+      transientLoopErrorCount: this.transientLoopErrorCount,
+      startupRecoveryDeferredCount: this.startupRecoveryDeferredCount,
+      lastTransientLoopErrorAt: this.lastTransientLoopErrorAt,
+      lastTransientLoopErrorKind: this.lastTransientLoopErrorKind,
+      lastTransientLoopErrorMessage: this.lastTransientLoopErrorMessage,
+      lastTransientLoopErrorAgeSeconds: this.getLastTransientLoopErrorAgeSeconds(),
       failedIssueResumeAttemptCount: this.failedIssueResumeAttempts.size,
       failedIssueResumeCooldownCount: this.failedIssueResumeCooldownUntil.size,
       oldestBlockedIssueResumeAgeSeconds: this.getOldestBlockedIssueResumeAgeSeconds(),
@@ -2307,6 +2337,7 @@ export class AgentDaemon {
     setInFlightPrReviews(runtime.inFlightPrReview)
     setStartupRecoveryPending(runtime.startupRecoveryPending)
     setEffectiveActiveTasks(runtime.effectiveActiveTasks)
+    setLastTransientLoopErrorAgeSeconds(runtime.lastTransientLoopErrorAgeSeconds ?? 0)
     setActiveLeases(runtime.activeLeaseCount)
     setLeaseHeartbeatAgeSeconds(runtime.oldestLeaseHeartbeatAgeSeconds)
     setStalledWorkers(runtime.stalledWorkerCount)
@@ -2323,6 +2354,11 @@ export class AgentDaemon {
 
     if (ages.length === 0) return 0
     return Math.max(...ages)
+  }
+
+  private getLastTransientLoopErrorAgeSeconds(now = Date.now()): number | null {
+    if (!this.lastTransientLoopErrorAt) return null
+    return getIsoAgeSeconds(this.lastTransientLoopErrorAt, now)
   }
 
   private getOldestBlockedIssueResumeAgeSeconds(now = Date.now()): number {
@@ -2670,6 +2706,12 @@ export function buildDaemonRuntimeStatus(input: {
   hasInFlightProcess: boolean
   hasInFlightPrReview: boolean
   startupRecoveryPending: boolean
+  transientLoopErrorCount: number
+  startupRecoveryDeferredCount: number
+  lastTransientLoopErrorAt: string | null
+  lastTransientLoopErrorKind: string | null
+  lastTransientLoopErrorMessage: string | null
+  lastTransientLoopErrorAgeSeconds: number | null
   failedIssueResumeAttemptCount: number
   failedIssueResumeCooldownCount: number
   oldestBlockedIssueResumeAgeSeconds: number
@@ -2691,6 +2733,12 @@ export function buildDaemonRuntimeStatus(input: {
     inFlightIssueProcess: input.hasInFlightProcess,
     inFlightPrReview: input.hasInFlightPrReview,
     startupRecoveryPending: input.startupRecoveryPending,
+    transientLoopErrorCount: input.transientLoopErrorCount,
+    startupRecoveryDeferredCount: input.startupRecoveryDeferredCount,
+    lastTransientLoopErrorAt: input.lastTransientLoopErrorAt,
+    lastTransientLoopErrorKind: input.lastTransientLoopErrorKind,
+    lastTransientLoopErrorMessage: input.lastTransientLoopErrorMessage,
+    lastTransientLoopErrorAgeSeconds: input.lastTransientLoopErrorAgeSeconds,
     effectiveActiveTasks: getEffectiveActiveTaskCount({
       activeWorktreeCount: input.activeWorktreeCount,
       hasInFlightProcess: input.hasInFlightProcess,

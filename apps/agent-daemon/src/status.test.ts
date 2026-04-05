@@ -64,6 +64,12 @@ const baseHealth: DaemonStatus & {
     inFlightIssueProcess: true,
     inFlightPrReview: false,
     startupRecoveryPending: true,
+    transientLoopErrorCount: 2,
+    startupRecoveryDeferredCount: 1,
+    lastTransientLoopErrorAt: '2026-04-05T08:09:30.000Z',
+    lastTransientLoopErrorKind: 'startup-recovery',
+    lastTransientLoopErrorMessage: 'Could not resolve host: api.github.com',
+    lastTransientLoopErrorAgeSeconds: 15,
     effectiveActiveTasks: 2,
     failedIssueResumeAttemptsTracked: 1,
     failedIssueResumeCooldownsTracked: 1,
@@ -186,6 +192,9 @@ agent_loop_review_auto_fixes_total{outcome="push_failed"} 1
 agent_loop_pr_merge_recovery_total{outcome="merged_initial"} 1
 agent_loop_pr_merge_recovery_total{outcome="refresh_push_failed"} 1
 agent_loop_recovery_actions_total{kind="issue-process-idle-timeout",outcome="recoverable"} 2
+agent_loop_transient_loop_errors_total{kind="startup-recovery"} 1
+agent_loop_transient_loop_errors_total{kind="poll-cycle"} 1
+agent_loop_last_transient_loop_error_age_seconds 15
 agent_loop_worker_idle_timeouts_total{scope="issue-process"} 2
 agent_loop_active_leases 2
 agent_loop_lease_heartbeat_age_seconds 75
@@ -263,9 +272,14 @@ describe('status helpers', () => {
           recoverable: 2,
         },
       },
+      transientLoopErrors: {
+        'startup-recovery': 1,
+        'poll-cycle': 1,
+      },
       workerIdleTimeouts: {
         'issue-process': 2,
       },
+      lastTransientLoopErrorAgeSeconds: 15,
       activeLeases: 2,
       leaseHeartbeatAgeSeconds: 75,
       stalledWorkers: 1,
@@ -297,6 +311,7 @@ describe('status helpers', () => {
     expect(report).toContain('repo: JamesWuHK/digital-employee')
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
+    expect(report).toContain('connectivity: transient 2 | startup deferred 1 | last transient startup-recovery 15s ago')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
     expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
@@ -397,9 +412,13 @@ describe('status helpers', () => {
       const report = formatDoctorReport(snapshot)
 
       expect(snapshot.warnings).toContain('failed issue resumes blocked by linked PR state: issue#91<-pr#110')
+      expect(snapshot.warnings).toContain('startup recovery has been deferred 1 time(s) by transient GitHub/network errors')
+      expect(snapshot.warnings).toContain('recent transient loop error: startup-recovery 15s ago | Could not resolve host: api.github.com')
       expect(snapshot.warnings).toContain('adoptable leases detected: issue-process#77')
       expect(snapshot.warnings).toContain('same target recovered multiple times recently: issue-process#77=2')
       expect(report).toContain('- failed issue resumes blocked by linked PR state: issue#91<-pr#110')
+      expect(report).toContain('- startup recovery has been deferred 1 time(s) by transient GitHub/network errors')
+      expect(report).toContain('- recent transient loop error: startup-recovery 15s ago | Could not resolve host: api.github.com')
       expect(report).toContain('- adoptable leases detected: issue-process#77')
       expect(report).toContain('- same target recovered multiple times recently: issue-process#77=2')
     } finally {
