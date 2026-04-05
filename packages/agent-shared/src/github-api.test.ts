@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
   applyDependencyClaimability,
+  buildListOpenIssuesQuery,
   buildManagedLeaseComment,
   buildGhEnv,
   canDaemonAdoptManagedLease,
   deriveIssueStateFromRaw,
+  extractOpenIssueConnectionPage,
   extractManagedLeaseComment,
   getActiveManagedLease,
   getLatestManagedLease,
@@ -73,6 +75,64 @@ describe('deriveIssueStateFromRaw', () => {
 
   test('still infers state from labels for open issues', () => {
     expect(deriveIssueStateFromRaw(['agent:failed'], 'open')).toBe('failed')
+  })
+})
+
+describe('open issue pagination helpers', () => {
+  test('builds an open-issues query with cursor pagination metadata', () => {
+    const query = buildListOpenIssuesQuery('JamesWuHK', 'digital-employee')
+
+    expect(query).toContain('query($cursor: String)')
+    expect(query).toContain('after: $cursor')
+    expect(query).toContain('pageInfo {')
+    expect(query).toContain('hasNextPage')
+    expect(query).toContain('endCursor')
+  })
+
+  test('extracts paginated open issue nodes and pageInfo from GraphQL responses', () => {
+    expect(extractOpenIssueConnectionPage({
+      data: {
+        repository: {
+          issues: {
+            nodes: [
+              {
+                number: 92,
+                title: '[CI-C1] 固定会话入口 smoke tests',
+                body: 'body',
+                state: 'OPEN',
+                updatedAt: '2026-04-05T08:57:45Z',
+                labels: { nodes: [{ name: 'agent:failed' }] },
+                assignees: { nodes: [] },
+              },
+            ],
+            pageInfo: {
+              hasNextPage: true,
+              endCursor: 'cursor-2',
+            },
+          },
+        },
+      },
+    })).toEqual({
+      nodes: [
+        {
+          number: 92,
+          title: '[CI-C1] 固定会话入口 smoke tests',
+          body: 'body',
+          state: 'OPEN',
+          updatedAt: '2026-04-05T08:57:45Z',
+          labels: { nodes: [{ name: 'agent:failed' }] },
+          assignees: { nodes: [] },
+        },
+      ],
+      hasNextPage: true,
+      endCursor: 'cursor-2',
+    })
+
+    expect(extractOpenIssueConnectionPage({})).toEqual({
+      nodes: [],
+      hasNextPage: false,
+      endCursor: null,
+    })
   })
 })
 

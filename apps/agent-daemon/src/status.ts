@@ -17,7 +17,7 @@ import {
   METRICS_PATH,
   METRICS_PORT_DEFAULT,
 } from './metrics'
-import { canResumeAutomatedPrReview } from './pr-reviewer'
+import { canResumeHumanNeededPrReview } from './pr-reviewer'
 import type { BackgroundRuntimeSnapshot } from './background'
 import {
   buildLaunchdServicePaths,
@@ -184,11 +184,13 @@ interface GitHubListLabel {
 interface GitHubIssueListItem {
   number?: unknown
   state?: unknown
+  updatedAt?: unknown
   labels?: GitHubListLabel[]
 }
 
 interface GitHubPrListItem extends GitHubIssueListItem {
   headRefName?: unknown
+  headRefOid?: unknown
 }
 
 interface GitHubAuditInput {
@@ -1385,7 +1387,7 @@ async function collectRemoteGitHubLeaseChecks(
       '--limit',
       '100',
       '--json',
-      'number,state,labels',
+      'number,state,labels,updatedAt',
     ]),
     runner([
       'pr',
@@ -1397,7 +1399,7 @@ async function collectRemoteGitHubLeaseChecks(
       '--limit',
       '100',
       '--json',
-      'number,state,labels,headRefName',
+      'number,state,labels,headRefName,headRefOid',
     ]),
   ])
 
@@ -1584,7 +1586,7 @@ function extractGitHubAuditState(data: unknown): { state: string; labels: string
   }
 }
 
-function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state: string; labels: string[] }> {
+function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state: string; labels: string[]; updatedAt: string }> {
   if (!Array.isArray(data)) return []
 
   return data
@@ -1595,14 +1597,15 @@ function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state:
         number: issue.number,
         state: typeof issue.state === 'string' ? issue.state.toLowerCase() : 'unknown',
         labels: normalizeGitHubLabels(issue.labels),
+        updatedAt: typeof issue.updatedAt === 'string' ? issue.updatedAt : '',
       }
     })
-    .filter((item): item is { number: number; state: string; labels: string[] } => item !== null)
+    .filter((item): item is { number: number; state: string; labels: string[]; updatedAt: string } => item !== null)
 }
 
 function normalizeGitHubPrList(
   data: unknown,
-): Array<{ number: number; state: string; labels: string[]; headRefName: string }> {
+): Array<{ number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null }> {
   if (!Array.isArray(data)) return []
 
   return data
@@ -1614,9 +1617,12 @@ function normalizeGitHubPrList(
         state: typeof pr.state === 'string' ? pr.state.toLowerCase() : 'unknown',
         labels: normalizeGitHubLabels(pr.labels),
         headRefName: pr.headRefName,
+        headRefOid: typeof pr.headRefOid === 'string' && pr.headRefOid.length > 0
+          ? pr.headRefOid
+          : null,
       }
     })
-    .filter((item): item is { number: number; state: string; labels: string[]; headRefName: string } => item !== null)
+    .filter((item): item is { number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null } => item !== null)
 }
 
 function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): string[] {
@@ -1628,12 +1634,12 @@ function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): s
 }
 
 function collectRemoteBlockedIssueResumeChecks(
-  issues: Array<{ number: number; state: string; labels: string[] }>,
-  prs: Array<{ number: number; state: string; labels: string[]; headRefName: string }>,
+  issues: Array<{ number: number; state: string; labels: string[]; updatedAt: string }>,
+  prs: Array<{ number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null }>,
   prCommentsByNumber: Map<number, IssueComment[]>,
 ): GitHubLeaseAuditCheck[] {
   const checks: GitHubLeaseAuditCheck[] = []
-  const prsByIssueNumber = new Map<number, Array<{ number: number; state: string; labels: string[]; headRefName: string }>>()
+  const prsByIssueNumber = new Map<number, Array<{ number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null }>>()
 
   for (const pr of prs) {
     const issueNumber = parseIssueNumberFromManagedBranch(pr.headRefName)
@@ -1652,9 +1658,11 @@ function collectRemoteBlockedIssueResumeChecks(
     for (const pr of linkedPrs) {
       const prComments = prCommentsByNumber.get(pr.number) ?? []
       const canResumeHumanNeededReview = new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-        ? canResumeAutomatedPrReview(
+        ? canResumeHumanNeededPrReview(
             prComments,
             GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+            pr.headRefOid,
+            issue.updatedAt,
           )
         : false
       const blocked = getFailedIssueResumeBlock({

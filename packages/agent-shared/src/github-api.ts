@@ -119,6 +119,14 @@ interface RawGitHubIssueNode {
   assignees: { nodes: Array<{ login: string }> }
 }
 
+interface RawGitHubIssueConnection {
+  nodes?: RawGitHubIssueNode[]
+  pageInfo?: {
+    hasNextPage?: boolean
+    endCursor?: string | null
+  }
+}
+
 export function deriveIssueStateFromRaw(
   labels: string[],
   issueState?: string,
@@ -263,16 +271,13 @@ async function enrichClaimability(
   return applyDependencyClaimability(issues, fetchedDeps)
 }
 
-export async function listOpenAgentIssues(
-  config: AgentConfig,
-): Promise<AgentIssue[]> {
-  const [owner, repoName] = config.repo.split('/')
-
-  const query = [
-    `query {`,
+export function buildListOpenIssuesQuery(owner: string, repoName: string): string {
+  return [
+    `query($cursor: String) {`,
     `  repository(owner: "${owner}", name: "${repoName}") {`,
     `    issues(`,
     `      first: 100`,
+    `      after: $cursor`,
     `      orderBy: { field: UPDATED_AT, direction: ASC }`,
     `      states: OPEN`,
     `    ) {`,
@@ -286,19 +291,73 @@ export async function listOpenAgentIssues(
     `        updatedAt`,
     `        url`,
     `      }`,
+    `      pageInfo {`,
+    `        hasNextPage`,
+    `        endCursor`,
+    `      }`,
     `    }`,
     `  }`,
     `}`,
   ].join('\n')
+}
 
-  const result = await $`gh api graphql --raw-field query=${query}`
-    .env(buildGhEnv(config))
-    .quiet()
+export function extractOpenIssueConnectionPage(data: unknown): {
+  nodes: RawGitHubIssueNode[]
+  hasNextPage: boolean
+  endCursor: string | null
+} {
+  const connection = (data as {
+    data?: {
+      repository?: {
+        issues?: RawGitHubIssueConnection
+      }
+    }
+  })?.data?.repository?.issues
 
-  const stdout = await new Response(result.stdout).text()
-  const data = JSON.parse(stdout)
+  return {
+    nodes: Array.isArray(connection?.nodes) ? connection.nodes : [],
+    hasNextPage: connection?.pageInfo?.hasNextPage === true,
+    endCursor: typeof connection?.pageInfo?.endCursor === 'string'
+      ? connection.pageInfo.endCursor
+      : null,
+  }
+}
 
-  const issues = (data.data?.repository?.issues?.nodes ?? []) as RawGitHubIssueNode[]
+export async function listOpenAgentIssues(
+  config: AgentConfig,
+): Promise<AgentIssue[]> {
+  const [owner, repoName] = config.repo.split('/')
+  if (!owner || !repoName) {
+    throw new Error(`Invalid repo slug: ${config.repo}`)
+  }
+  const query = buildListOpenIssuesQuery(owner, repoName)
+  const issues: RawGitHubIssueNode[] = []
+  let cursor: string | null = null
+
+  for (;;) {
+    const args = [
+      'graphql',
+      '--raw-field',
+      `query=${query}`,
+    ]
+    if (cursor) {
+      args.push('--raw-field', `cursor=${cursor}`)
+    }
+
+    const { stdout, exitCode, stderr } = await ghApiRaw(args, config)
+    if (exitCode !== 0) {
+      throw new GhError('api graphql open issues', exitCode, stderr)
+    }
+
+    const page = extractOpenIssueConnectionPage(JSON.parse(stdout))
+    issues.push(...page.nodes)
+
+    if (!page.hasNextPage || !page.endCursor) {
+      break
+    }
+
+    cursor = page.endCursor
+  }
 
   const mapped = issues
     .map(mapRawIssueNode)
@@ -453,6 +512,7 @@ interface RawPullRequestListItem {
   title: string
   url: string
   headRefName: string
+  headRefOid?: string
   isDraft?: boolean
   labels?: Array<{ name: string }>
 }
@@ -662,7 +722,7 @@ export async function listOpenAgentPullRequests(
   config: AgentConfig,
 ): Promise<ManagedPullRequest[]> {
   const { stdout, exitCode, stderr } = await ghRaw(
-    'pr list --state open --json number,title,url,headRefName,isDraft,labels',
+    'pr list --state open --limit 200 --json number,title,url,headRefName,headRefOid,isDraft,labels',
     config,
   )
 
@@ -678,6 +738,9 @@ export async function listOpenAgentPullRequests(
       title: pr.title,
       url: pr.url,
       headRefName: pr.headRefName,
+      headRefOid: typeof pr.headRefOid === 'string' && pr.headRefOid.length > 0
+        ? pr.headRefOid
+        : null,
       isDraft: pr.isDraft === true,
       labels: (pr.labels ?? []).map((label) => label.name),
     }))

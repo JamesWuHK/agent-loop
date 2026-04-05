@@ -38,6 +38,11 @@ import {
   uninstallLaunchdService,
 } from './launchd'
 import { formatJoinProjectResult, joinProjectMachine } from './join-project'
+import {
+  DEFAULT_DASHBOARD_HOST,
+  DEFAULT_DASHBOARD_PORT,
+  startDashboardServer,
+} from './dashboard'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -120,6 +125,9 @@ async function main() {
       'machine-id': { type: 'string' },
       'dry-run': { type: 'boolean' },
       'metrics-port': { type: 'string' },
+      dashboard: { type: 'boolean' },
+      'dashboard-host': { type: 'string' },
+      'dashboard-port': { type: 'string' },
       daemonize: { type: 'boolean' },
       'join-project': { type: 'boolean' },
       'repo-cap': { type: 'string' },
@@ -144,6 +152,9 @@ async function main() {
   const metricsPort = args['metrics-port']
     ? parseInt(args['metrics-port'] as string)
     : undefined
+  const dashboardPort = args['dashboard-port']
+    ? parseInt(args['dashboard-port'] as string)
+    : DEFAULT_DASHBOARD_PORT
 
   if (args.help) {
     printHelp()
@@ -156,6 +167,10 @@ async function main() {
 
   if (args['join-project'] && (args.daemonize || args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once || args.runtimes || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
     throw new Error('--join-project cannot be combined with daemon control, status, or launchd management flags')
+  }
+
+  if (args.dashboard && (args.daemonize || args['join-project'] || args.runtimes || args.start || args.logs || args.reconcile || args.restart || args.stop || args.once || args.status || args.doctor || args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status'])) {
+    throw new Error('--dashboard cannot be combined with daemon control, status, runtime listing, or launchd management flags')
   }
 
   if (args.daemonize && (args.start || args.logs || args.reconcile || args.restart || args.stop || args.status || args.doctor || args.once)) {
@@ -287,6 +302,19 @@ async function main() {
   if (cliArgs.healthPort) healthServerConfig.port = cliArgs.healthPort
 
   try {
+    if (args.dashboard) {
+      const config = loadConfig(cliArgs)
+      const server = startDashboardServer({
+        config,
+        host: (args['dashboard-host'] as string | undefined) ?? DEFAULT_DASHBOARD_HOST,
+        port: dashboardPort,
+        healthHost: cliArgs.healthHost,
+      })
+      console.log(`[agent-loop] dashboard listening on http://${server.hostname}:${server.port}`)
+      process.exitCode = 0
+      return
+    }
+
     if (args['launchd-install'] || args['launchd-uninstall'] || args['launchd-status']) {
       ensureLaunchdSupported()
       const managedIdentity = resolveLocalDaemonIdentity(
@@ -493,6 +521,7 @@ Usage:
   agent-loop --join-project [options]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
+  agent-loop --dashboard [--dashboard-port 9388]
   agent-loop --logs [--health-port 9310]
   agent-loop --restart [--health-port 9310]
   agent-loop --status [--health-port 9310]
@@ -513,6 +542,9 @@ Options:
       --health-host <host>    Health check server host (default: 127.0.0.1)
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
+      --dashboard             Start the local monitoring page for the current repo
+      --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
+      --dashboard-port <port> Dashboard server port (default: 9388)
       --daemonize             Start the daemon detached from the current terminal
       --join-project          Persist local machine config for the current repo and start a managed daemon (launchd on macOS, detached elsewhere)
       --repo-cap <n>          When used with --join-project, persist a repo-level concurrency cap for this repo in ~/.agent-loop/config.json
@@ -548,6 +580,8 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --dashboard
+  agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
   agent-loop --runtimes
   agent-loop --start --health-port 9311

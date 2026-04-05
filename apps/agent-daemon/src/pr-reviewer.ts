@@ -61,9 +61,17 @@ interface AutomatedPrReviewMetadata {
   headRefOid?: string
 }
 
+interface AutomatedPrReviewCommentLike {
+  body: string
+  createdAt?: string
+  updatedAt?: string
+}
+
 export interface LatestAutomatedPrReviewState {
   metadata: AutomatedPrReviewMetadata
   feedback: StructuredReviewFeedbackPayload | null
+  commentCreatedAt: string | null
+  commentUpdatedAt: string | null
 }
 
 export interface ReviewAgentResponse {
@@ -479,7 +487,7 @@ export function extractAutomatedReviewReasons(
 }
 
 export function extractLatestAutomatedPrReviewState(
-  comments: Array<{ body: string }>,
+  comments: AutomatedPrReviewCommentLike[],
 ): LatestAutomatedPrReviewState | null {
   for (let index = comments.length - 1; index >= 0; index--) {
     const metadata = extractAutomatedPrReviewMetadata(comments[index]?.body ?? '')
@@ -488,6 +496,8 @@ export function extractLatestAutomatedPrReviewState(
     return {
       metadata,
       feedback: extractStructuredReviewFeedback(comments[index]?.body ?? ''),
+      commentCreatedAt: comments[index]?.createdAt ?? null,
+      commentUpdatedAt: comments[index]?.updatedAt ?? comments[index]?.createdAt ?? null,
     }
   }
 
@@ -495,14 +505,14 @@ export function extractLatestAutomatedPrReviewState(
 }
 
 export function getNextAutomatedPrReviewAttempt(
-  comments: Array<{ body: string }>,
+  comments: AutomatedPrReviewCommentLike[],
 ): number {
   const latest = extractLatestAutomatedPrReviewState(comments)
   return latest ? latest.metadata.attempt + 1 : 1
 }
 
 export function canResumeAutomatedPrReview(
-  comments: Array<{ body: string }>,
+  comments: AutomatedPrReviewCommentLike[],
   maxAttempt: number,
 ): boolean {
   const latest = extractLatestAutomatedPrReviewState(comments)
@@ -516,8 +526,55 @@ export function canResumeAutomatedPrReview(
   )
 }
 
+export function shouldRestartAutomatedPrReviewOnNewHead(
+  comments: AutomatedPrReviewCommentLike[],
+  currentHeadRefOid: string | null | undefined,
+): boolean {
+  if (!currentHeadRefOid) return false
+
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return false
+  if (latest.metadata.approved || latest.metadata.canMerge) return false
+  if (!latest.metadata.headRefOid) return false
+
+  return latest.metadata.headRefOid !== currentHeadRefOid
+}
+
+export function shouldRestartAutomatedPrReviewOnIssueUpdate(
+  comments: AutomatedPrReviewCommentLike[],
+  issueUpdatedAt: string | null | undefined,
+): boolean {
+  if (!issueUpdatedAt) return false
+
+  const issueUpdatedAtMs = Date.parse(issueUpdatedAt)
+  if (!Number.isFinite(issueUpdatedAtMs)) return false
+
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return false
+  if (latest.metadata.approved || latest.metadata.canMerge) return false
+
+  const latestReviewAt = latest.commentUpdatedAt ?? latest.commentCreatedAt
+  const latestReviewAtMs = Date.parse(latestReviewAt ?? '')
+  if (!Number.isFinite(latestReviewAtMs)) return false
+
+  return issueUpdatedAtMs > latestReviewAtMs
+}
+
+export function canResumeHumanNeededPrReview(
+  comments: AutomatedPrReviewCommentLike[],
+  maxAttempt: number,
+  currentHeadRefOid: string | null | undefined,
+  issueUpdatedAt: string | null | undefined,
+): boolean {
+  return (
+    canResumeAutomatedPrReview(comments, maxAttempt)
+    || shouldRestartAutomatedPrReviewOnNewHead(comments, currentHeadRefOid)
+    || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueUpdatedAt)
+  )
+}
+
 export function getReusableAutomatedPrReviewFeedback(
-  comments: Array<{ body: string }>,
+  comments: AutomatedPrReviewCommentLike[],
   currentHeadRefOid: string,
   maxAttempt: number,
 ): { attempt: number; feedback: StructuredReviewFeedbackPayload } | null {

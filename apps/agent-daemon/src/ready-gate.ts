@@ -1,4 +1,6 @@
 import { parseIssueContract, validateIssueContract, ISSUE_LABELS, buildGhEnv, commentOnIssue, type AgentConfig } from '@agent/shared'
+import { existsSync } from 'node:fs'
+import { isAbsolute, posix, resolve } from 'node:path'
 import { loadConfig, type CliArgs } from './config'
 
 interface ReadyGateIssueSnapshot {
@@ -15,7 +17,83 @@ export interface ReadyGateEvaluation {
   errors: string[]
 }
 
-export function evaluateReadyGate(issue: ReadyGateIssueSnapshot): ReadyGateEvaluation {
+interface ReadyGateOptions {
+  repoRoot?: string
+}
+
+function normalizeValidationEntry(entry: string): string {
+  const trimmed = entry.trim()
+  if (trimmed.startsWith('`') && trimmed.endsWith('`')) {
+    return trimmed.slice(1, -1).trim()
+  }
+
+  return trimmed
+}
+
+function tokenizeCommand(command: string): string[] {
+  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, '')) ?? []
+}
+
+function looksLikeFilePathToken(token: string): boolean {
+  if (!token || token.startsWith('-')) return false
+  if (token.includes('...')) return false
+  if (/^[A-Za-z0-9_.-]+$/.test(token) && !token.includes('.')) return false
+  return /[\\/]/.test(token) || /\.[A-Za-z0-9]+$/.test(token)
+}
+
+function extractValidationFileCandidates(entry: string): string[] {
+  const tokens = tokenizeCommand(normalizeValidationEntry(entry))
+  const candidates = new Set<string>()
+  let commandCwd = '.'
+
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index] ?? ''
+    if ((token === '--cwd' || token === '-C') && tokens[index + 1]) {
+      commandCwd = tokens[index + 1]!
+      index++
+      continue
+    }
+
+    if (token === 'cd' && tokens[index + 1]) {
+      commandCwd = tokens[index + 1]!
+      index++
+      continue
+    }
+
+    if (!looksLikeFilePathToken(token)) continue
+    if (token === '.' || token === '..') continue
+
+    const resolved = token.startsWith('/')
+      ? token
+      : posix.normalize(commandCwd === '.' ? token : posix.join(commandCwd, token))
+    candidates.add(resolved.replace(/\\/g, '/'))
+  }
+
+  return [...candidates]
+}
+
+function validateValidationTargets(body: string, repoRoot?: string): string[] {
+  if (!repoRoot) return []
+
+  const contract = parseIssueContract(body)
+  const missingTargets = new Set<string>()
+
+  for (const entry of contract.validation) {
+    for (const candidate of extractValidationFileCandidates(entry)) {
+      const absolutePath = isAbsolute(candidate) ? candidate : resolve(repoRoot, candidate)
+      if (!existsSync(absolutePath)) {
+        missingTargets.add(candidate)
+      }
+    }
+  }
+
+  return [...missingTargets].map((target) => `validation references missing repo path: ${target}`)
+}
+
+export function evaluateReadyGate(
+  issue: ReadyGateIssueSnapshot,
+  options: ReadyGateOptions = {},
+): ReadyGateEvaluation {
   if (issue.state === 'closed') {
     return {
       shouldEnforce: false,
@@ -33,10 +111,13 @@ export function evaluateReadyGate(issue: ReadyGateIssueSnapshot): ReadyGateEvalu
   }
 
   const validation = validateIssueContract(parseIssueContract(issue.body))
+  const targetErrors = validateValidationTargets(issue.body, options.repoRoot)
+  const errors = [...validation.errors, ...targetErrors]
+
   return {
     shouldEnforce: true,
-    valid: validation.valid,
-    errors: validation.errors,
+    valid: errors.length === 0,
+    errors,
   }
 }
 
@@ -128,7 +209,7 @@ export async function enforceReadyGate(
   logger = console,
 ): Promise<ReadyGateEvaluation> {
   const issue = await fetchIssueSnapshot(issueNumber, config)
-  const evaluation = evaluateReadyGate(issue)
+  const evaluation = evaluateReadyGate(issue, { repoRoot: process.cwd() })
 
   if (!evaluation.shouldEnforce) {
     logger.log(`[ready-gate] issue #${issueNumber} does not currently require enforcement`)

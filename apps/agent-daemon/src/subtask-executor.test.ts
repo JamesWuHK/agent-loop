@@ -8,6 +8,7 @@ import {
   buildReviewAutoFixPrompt,
   salvageDirtyWorktree,
   shouldTreatCleanNoCommitSubtaskAsSuccess,
+  validateReviewAutoFixScope,
 } from './subtask-executor'
 
 const TEST_CONFIG: AgentConfig = {
@@ -185,6 +186,11 @@ describe('buildReviewAutoFixPrompt', () => {
       61,
       'https://example.com/pr/61',
       'Fix the unauthenticated login route regression.',
+      `## Context
+### AllowedFiles
+- apps/desktop/src/App.tsx
+### ForbiddenFiles
+- apps/desktop/src/context/AppContext.tsx`,
       TEST_CONFIG.project,
     )
 
@@ -193,6 +199,11 @@ describe('buildReviewAutoFixPrompt', () => {
     expect(prompt).toContain('Vitest loads `vite.config.ts` and the `jsdom` environment')
     expect(prompt).toContain('Preserve the linked issue\'s explicit acceptance contract')
     expect(prompt).toContain('Do not introduce new API calls, persistence, gateway actions, or unrelated refactors')
+    expect(prompt).toContain('Linked issue contract:')
+    expect(prompt).toContain('Allowed files')
+    expect(prompt).toContain('Forbidden files')
+    expect(prompt).toContain('Never modify files listed under `ForbiddenFiles`')
+    expect(prompt).toContain('git diff --name-only origin/main...HEAD')
   })
 
   it('falls back to generic toolchain guidance when no project profile is provided', () => {
@@ -201,9 +212,56 @@ describe('buildReviewAutoFixPrompt', () => {
       61,
       'https://example.com/pr/61',
       'Fix the unauthenticated login route regression.',
+      '',
     )
 
     expect(prompt).toContain('Validate fixes with the repository\'s existing commands')
     expect(prompt).not.toContain('Vitest loads `vite.config.ts` and the `jsdom` environment')
+  })
+})
+
+describe('validateReviewAutoFixScope', () => {
+  it('accepts changed files that stay within AllowedFiles', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const result = await validateReviewAutoFixScope(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### ForbiddenFiles
+- blocked.txt`,
+      TEST_CONFIG.git.defaultBranch,
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.violations).toEqual([])
+    expect(result.changedFiles).toEqual(['demo.txt'])
+  })
+
+  it('rejects branches that touch ForbiddenFiles or files outside AllowedFiles', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    writeFileSync(join(dir, 'blocked.txt'), 'blocked\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt blocked.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: invalid scope"`.quiet()
+
+    const result = await validateReviewAutoFixScope(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### ForbiddenFiles
+- blocked.txt`,
+      TEST_CONFIG.git.defaultBranch,
+    )
+
+    expect(result.valid).toBe(false)
+    expect(result.violations).toContain('changed forbidden files: blocked.txt')
   })
 })

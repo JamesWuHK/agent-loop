@@ -21,7 +21,7 @@ import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeAutomatedPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
+import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeHumanNeededPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, shouldRestartAutomatedPrReviewOnIssueUpdate, shouldRestartAutomatedPrReviewOnNewHead, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
 import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
 import type { TaskExecutionMonitor } from './cli-agent'
 import {
@@ -974,10 +974,15 @@ export class AgentDaemon {
     if (!linkedPr) return false
 
     const labels = new Set(linkedPr.labels)
+    const linkedPrComments = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? await listIssueComments(linkedPr.number, this.config)
+      : []
     const canResumeHumanNeededReview = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-      ? canResumeAutomatedPrReview(
-          await listIssueComments(linkedPr.number, this.config),
+      ? canResumeHumanNeededPrReview(
+          linkedPrComments,
           AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          linkedPr.headRefOid,
+          candidate.issue.updatedAt,
         )
       : false
     const hasSyncedBranchState = candidate.requiresRemoteAdoption
@@ -1078,10 +1083,15 @@ export class AgentDaemon {
       const latestLease = getLatestManagedLease(comments, 'issue-process')
       const branch = latestLease?.lease.branch ?? `agent/${issue.number}/${this.config.machineId}`
       const linkedPr = findLinkedManagedPr(prs, issue.number, branch)
+      const linkedPrComments = linkedPr && new Set(linkedPr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+        ? await listIssueComments(linkedPr.number, this.config)
+        : []
       const linkedPrCanResumeHumanNeededReview = linkedPr && new Set(linkedPr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-        ? canResumeAutomatedPrReview(
-            await listIssueComments(linkedPr.number, this.config),
+        ? canResumeHumanNeededPrReview(
+            linkedPrComments,
             AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+            linkedPr.headRefOid,
+            issue.updatedAt,
           )
         : false
       const canAdoptLease = canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId, now)
@@ -1195,7 +1205,14 @@ export class AgentDaemon {
       if (!new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)) continue
 
       const comments = await listIssueComments(pr.number, this.config)
-      if (canResumeAutomatedPrReview(comments, AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS)) {
+      const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+      const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
+      if (canResumeHumanNeededPrReview(
+        comments,
+        AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+        pr.headRefOid,
+        linkedIssue?.updatedAt ?? null,
+      )) {
         return pr
       }
     }
@@ -1209,8 +1226,14 @@ export class AgentDaemon {
     const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
     const reviewLabels = new Set(pr.labels)
     const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+    const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
     const resumableHumanNeededReview = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-      && canResumeAutomatedPrReview(priorComments, AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS)
+      && canResumeHumanNeededPrReview(
+        priorComments,
+        AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+        pr.headRefOid,
+        linkedIssue?.updatedAt ?? null,
+      )
     const lease = await this.acquireLeaseForScope({
       targetNumber: pr.number,
       scope: 'pr-review',
@@ -1229,7 +1252,17 @@ export class AgentDaemon {
     try {
       const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
       const currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      const restartReviewOnUpdatedHead = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+        && shouldRestartAutomatedPrReviewOnNewHead(priorComments, currentHeadRefOid)
+      const restartReviewOnUpdatedIssue = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+        && shouldRestartAutomatedPrReviewOnIssueUpdate(priorComments, linkedIssue?.updatedAt ?? null)
+      const canReuseHumanNeededFeedback = (
+        resumableHumanNeededReview
+        && !restartReviewOnUpdatedHead
+        && !restartReviewOnUpdatedIssue
+      )
       const reusableFeedback = resumableHumanNeededReview
+        && canReuseHumanNeededFeedback
         ? getReusableAutomatedPrReviewFeedback(
             priorComments,
             currentHeadRefOid,
@@ -1261,6 +1294,30 @@ export class AgentDaemon {
           `[pr-review-subagent] reusing structured review feedback from attempt ${reusableFeedback.attempt} for PR #${pr.number} on unchanged head ${currentHeadRefOid.slice(0, 7)}`,
         )
       } else {
+        if (restartReviewOnUpdatedHead || restartReviewOnUpdatedIssue) {
+          const restartReason = restartReviewOnUpdatedHead && restartReviewOnUpdatedIssue
+            ? `the head advanced to ${currentHeadRefOid.slice(0, 7)} and linked issue #${issueNumber ?? 'unknown'} was updated`
+            : restartReviewOnUpdatedHead
+              ? `the head advanced to ${currentHeadRefOid.slice(0, 7)}`
+              : `linked issue #${issueNumber ?? 'unknown'} was updated after the latest automated review`
+          if (issueNumber !== null) {
+            await this.transitionStandaloneIssue(
+              issueNumber,
+              ISSUE_LABELS.WORKING,
+              restartReviewOnUpdatedHead
+                ? restartReviewOnUpdatedIssue
+                  ? `Detected new commits on PR #${pr.number} and a refreshed linked issue contract; restarting automated review on head ${currentHeadRefOid.slice(0, 7)}`
+                  : `Detected new commits on PR #${pr.number}; restarting automated review on updated head ${currentHeadRefOid.slice(0, 7)}`
+                : `Detected linked issue contract updates for PR #${pr.number}; restarting automated review on unchanged head ${currentHeadRefOid.slice(0, 7)}`,
+              pr.number,
+            )
+          }
+          await setManagedPrReviewLabels(pr.number, 'retry', this.config)
+          this.logger.log(
+            `[pr-review-subagent] restarting automated review for PR #${pr.number} because ${restartReason}`,
+          )
+        }
+
         const firstReview = await reviewPr(
           pr.number,
           pr.url,

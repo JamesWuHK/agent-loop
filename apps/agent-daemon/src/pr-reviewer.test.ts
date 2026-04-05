@@ -7,6 +7,7 @@ import {
   buildReviewRepairPrompt,
   buildReviewPrompt,
   canResumeAutomatedPrReview,
+  canResumeHumanNeededPrReview,
   classifyPrReviewOutcome,
   buildReviewFeedback,
   collectDependencyDirectories,
@@ -20,6 +21,8 @@ import {
   normalizeWorktreePath,
   parsePrReviewResponse,
   reviewPrAgainstContext,
+  shouldRestartAutomatedPrReviewOnIssueUpdate,
+  shouldRestartAutomatedPrReviewOnNewHead,
   validateRejectedReviewFindings,
 } from './pr-reviewer'
 import type { AgentConfig } from '@agent/shared'
@@ -300,6 +303,8 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
   test('extracts the latest automated PR review attempt metadata', () => {
     expect(extractLatestAutomatedPrReviewState([
       {
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
         body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
 <!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"First blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
 ## Automated review found blocking issues — starting one auto-fix retry`,
@@ -328,6 +333,8 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
           },
         ],
       },
+      commentCreatedAt: '2026-04-05T08:00:00.000Z',
+      commentUpdatedAt: '2026-04-05T08:10:00.000Z',
     })
   })
 
@@ -355,6 +362,37 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
 
     expect(canResumeAutomatedPrReview(comments, 3)).toBe(false)
     expect(getNextAutomatedPrReviewAttempt(comments)).toBe(3)
+  })
+
+  test('restarts standalone review when a terminal human-needed PR has a new head commit', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":9,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Final blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"scope violation","mustFix":["remove forbidden diff"],"mustNotDo":["do not broaden scope"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.sessions-sidebar.test.tsx"],"scopeRationale":"issue #91 limits allowed files"}]} -->
+## Automated review still failing — human intervention required`,
+      },
+    ]
+
+    expect(canResumeAutomatedPrReview(comments, 3)).toBe(false)
+    expect(shouldRestartAutomatedPrReviewOnNewHead(comments, 'def456')).toBe(true)
+    expect(shouldRestartAutomatedPrReviewOnNewHead(comments, 'abc123')).toBe(false)
+  })
+
+  test('restarts standalone review when the linked issue contract is updated after the latest automated review', () => {
+    const comments = [
+      {
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":9,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Final blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"scope violation","mustFix":["remove forbidden diff"],"mustNotDo":["do not broaden scope"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.sessions-sidebar.test.tsx"],"scopeRationale":"issue #91 limits allowed files"}]} -->
+## Automated review still failing — human intervention required`,
+      },
+    ]
+
+    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:01.000Z')).toBe(true)
+    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:00.000Z')).toBe(false)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', '2026-04-05T08:10:01.000Z')).toBe(true)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', '2026-04-05T08:09:59.000Z')).toBe(false)
   })
 
   test('reuses the latest structured review feedback when the PR head sha is unchanged', () => {

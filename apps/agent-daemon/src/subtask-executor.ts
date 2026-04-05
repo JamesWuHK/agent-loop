@@ -1,10 +1,15 @@
 import { $ } from 'bun'
-import { getProjectPromptGuidance, type AgentConfig, type Subtask } from '@agent/shared'
 import {
   buildPlanningPrompt,
-  parsePlanningOutput,
-  findNextSubtask,
   buildSubtaskPrompt,
+  findNextSubtask,
+  getAgentIssueByNumber,
+  getProjectPromptGuidance,
+  parseIssueContract,
+  parsePlanningOutput,
+  renderIssueContractForPrompt,
+  type AgentConfig,
+  type Subtask,
 } from '@agent/shared'
 import { runConfiguredAgent, type AgentFailureKind, type TaskExecutionMonitor } from './cli-agent'
 
@@ -177,6 +182,12 @@ export interface ReviewAutoFixResult {
   error?: string
   commitSha?: string
   failureKind?: AgentFailureKind
+}
+
+export interface ReviewAutoFixScopeValidationResult {
+  valid: boolean
+  changedFiles: string[]
+  violations: string[]
 }
 
 export interface IssueRecoveryResult {
@@ -369,11 +380,14 @@ export async function runReviewAutoFix(
   monitor?: TaskExecutionMonitor,
 ): Promise<ReviewAutoFixResult> {
   const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
+  const linkedIssue = await getAgentIssueByNumber(issueNumber, config)
+  const issueBody = linkedIssue?.body ?? ''
   const prompt = buildReviewAutoFixPrompt(
     issueNumber,
     prNumber,
     prUrl,
     reviewReason,
+    issueBody,
     config.project,
   )
   monitor?.setPhase?.('review-auto-fix')
@@ -396,12 +410,15 @@ export async function runReviewAutoFix(
     )
     if (salvagedCommit) {
       logger.warn(`[review-fix] agent exited ${result.exitCode} but left recoverable changes — continuing with salvaged commit ${salvagedCommit.slice(0, 7)}`)
-      return {
-        success: true,
-        exitCode: 0,
-        outcome: 'salvaged',
-        commitSha: salvagedCommit,
-      }
+      return finalizeReviewAutoFixResult(
+        worktreePath,
+        issueBody,
+        config.git.defaultBranch,
+        logger,
+        prNumber,
+        salvagedCommit,
+        'salvaged',
+      )
     }
 
     return {
@@ -423,12 +440,15 @@ export async function runReviewAutoFix(
     )
     if (salvagedCommit) {
       logger.log(`[review-fix] salvaged commit ${salvagedCommit.slice(0, 7)} for PR #${prNumber}`)
-      return {
-        success: true,
-        exitCode: 0,
-        outcome: 'salvaged',
-        commitSha: salvagedCommit,
-      }
+      return finalizeReviewAutoFixResult(
+        worktreePath,
+        issueBody,
+        config.git.defaultBranch,
+        logger,
+        prNumber,
+        salvagedCommit,
+        'salvaged',
+      )
     }
 
     return {
@@ -439,13 +459,15 @@ export async function runReviewAutoFix(
     }
   }
 
-  logger.log(`[review-fix] created commit ${afterHead.slice(0, 7)} for PR #${prNumber}`)
-  return {
-    success: true,
-    exitCode: 0,
-    outcome: 'committed',
-    commitSha: afterHead,
-  }
+  return finalizeReviewAutoFixResult(
+    worktreePath,
+    issueBody,
+    config.git.defaultBranch,
+    logger,
+    prNumber,
+    afterHead,
+    'committed',
+  )
 }
 
 export function buildReviewAutoFixPrompt(
@@ -453,9 +475,13 @@ export function buildReviewAutoFixPrompt(
   prNumber: number,
   prUrl: string,
   reviewReason: string,
+  issueBody = '',
   project: AgentConfig['project'] = { profile: 'generic' },
 ): string {
   const projectGuidance = getProjectPromptGuidance(project, 'reviewFix')
+  const issueContractBlock = issueBody.trim().length > 0
+    ? renderIssueContractForPrompt(issueBody)
+    : 'Parsed issue contract: unavailable because the linked issue body could not be loaded.'
 
   return `You are fixing review-blocking issues on an existing branch.
 
@@ -466,21 +492,127 @@ PR URL: ${prUrl}
 Review feedback to fix:
 ${reviewReason}
 
+Linked issue contract:
+${issueContractBlock}
+
 Requirements:
 - Fix only the blocking issues described above.
 - The review feedback may include a structured JSON block. Treat its fields as authoritative, especially \`mustFix\`, \`mustNotDo\`, \`validation\`, and \`scopeRationale\`.
 - Preserve the linked issue's explicit acceptance contract; do not change semantics that the issue explicitly requires just to satisfy a different interpretation.
+- Treat the linked issue's \`AllowedFiles\`, \`ForbiddenFiles\`, \`MustPreserve\`, \`OutOfScope\`, and \`RequiredSemantics\` as hard boundaries, even if the review feedback is incomplete.
+- Never modify files listed under \`ForbiddenFiles\`. If a requested repair would require touching them, stop and leave the branch unchanged instead of expanding scope.
 - Do not introduce new API calls, persistence, gateway actions, or unrelated refactors unless the review feedback proves they are required by the linked issue.
 - Keep the touched file set as small as possible. If you find unrelated drift on the branch, prefer removing or reverting that drift rather than adding more code around it.
 - Stay on the current branch and in the current worktree.
 - Do not create a new branch.
 - Do not create or modify PR metadata.
 - Make the minimal code changes necessary.
+- Before committing, run \`git diff --name-only origin/main...HEAD\` and confirm the changed file set stays inside \`AllowedFiles\` and outside \`ForbiddenFiles\`.
 - Commit your changes if you make any fixes.
 - If no code change is needed, do not fake a commit.
 ${projectGuidance.length > 0 ? `${projectGuidance.map((line) => `- ${line}`).join('\n')}
 ` : ''}
 `
+}
+
+export async function validateReviewAutoFixScope(
+  worktreePath: string,
+  issueBody: string,
+  defaultBranch: string,
+): Promise<ReviewAutoFixScopeValidationResult> {
+  if (!issueBody.trim()) {
+    return {
+      valid: true,
+      changedFiles: [],
+      violations: [],
+    }
+  }
+
+  const contract = parseIssueContract(issueBody)
+  const changedFiles = await readChangedFilesAgainstDefaultBranch(worktreePath, defaultBranch)
+  const violations: string[] = []
+
+  if (contract.allowedFiles.length > 0) {
+    const outsideAllowed = changedFiles.filter((file) => !contract.allowedFiles.some((pattern) => matchesContractFilePattern(file, pattern)))
+    if (outsideAllowed.length > 0) {
+      violations.push(`changed files outside AllowedFiles: ${outsideAllowed.join(', ')}`)
+    }
+  }
+
+  const forbiddenTouched = changedFiles.filter((file) => contract.forbiddenFiles.some((pattern) => matchesContractFilePattern(file, pattern)))
+  if (forbiddenTouched.length > 0) {
+    violations.push(`changed forbidden files: ${forbiddenTouched.join(', ')}`)
+  }
+
+  return {
+    valid: violations.length === 0,
+    changedFiles,
+    violations,
+  }
+}
+
+async function finalizeReviewAutoFixResult(
+  worktreePath: string,
+  issueBody: string,
+  defaultBranch: string,
+  logger: typeof console,
+  prNumber: number,
+  commitSha: string,
+  outcome: 'committed' | 'salvaged',
+): Promise<ReviewAutoFixResult> {
+  const scopeValidation = await validateReviewAutoFixScope(worktreePath, issueBody, defaultBranch)
+  if (!scopeValidation.valid) {
+    logger.warn(
+      `[review-fix] auto-fix commit ${commitSha.slice(0, 7)} for PR #${prNumber} violates the linked issue contract: ${scopeValidation.violations.join('; ')}`,
+    )
+    return {
+      success: false,
+      exitCode: 1,
+      outcome: 'agent_failed',
+      error: `Issue contract violation after auto-fix: ${scopeValidation.violations.join('; ')}`,
+      commitSha,
+    }
+  }
+
+  logger.log(`[review-fix] created commit ${commitSha.slice(0, 7)} for PR #${prNumber}`)
+  return {
+    success: true,
+    exitCode: 0,
+    outcome,
+    commitSha,
+  }
+}
+
+async function readChangedFilesAgainstDefaultBranch(
+  worktreePath: string,
+  defaultBranch: string,
+): Promise<string[]> {
+  let raw = ''
+
+  try {
+    raw = await $`git -C ${worktreePath} diff --name-only origin/${defaultBranch}...HEAD`.quiet().text()
+  } catch {
+    raw = await $`git -C ${worktreePath} diff --name-only ${defaultBranch}...HEAD`.quiet().text()
+  }
+
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function matchesContractFilePattern(path: string, pattern: string): boolean {
+  const normalizedPath = path.trim().replace(/^\.\//, '')
+  const normalizedPattern = pattern.trim().replace(/^\.\//, '')
+  if (!normalizedPattern) return false
+
+  const escaped = normalizedPattern
+    .replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
+    .replace(/\*\*/g, '::DOUBLE_STAR::')
+    .replace(/\*/g, '[^/]*')
+    .replace(/::DOUBLE_STAR::/g, '.*')
+
+  return new RegExp(`^${escaped}$`).test(normalizedPath)
 }
 
 export function buildIssueRecoveryPrompt(

@@ -22,6 +22,11 @@ interface PushBranchDependencies {
 
 const MAX_PUSH_ATTEMPTS = 3
 
+interface ManagedBranchPushPlan {
+  pushArgs: string[] | null
+  detachedHead: boolean
+}
+
 export async function pushBranch(
   worktreePath: string,
   branch: string,
@@ -31,7 +36,14 @@ export async function pushBranch(
   let lastError = `Failed to push ${branch}`
 
   for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
-    const pushArgs = await syncBranchWithRemote(worktreePath, branch, logger, dependencies.runGit)
+    const { pushArgs, detachedHead } = await syncBranchWithRemote(worktreePath, branch, logger, dependencies.runGit)
+    if (pushArgs === null) {
+      logger.log(detachedHead
+        ? `[pr] remote branch ${branch} is already ahead of detached HEAD; no push needed`
+        : `[pr] branch ${branch} is already in sync with origin`)
+      return
+    }
+
     await dependencies.beforePushAttempt?.({ worktreePath, branch, attempt, pushArgs })
 
     const push = await dependencies.runGit(worktreePath, pushArgs)
@@ -58,11 +70,16 @@ async function syncBranchWithRemote(
   branch: string,
   logger = console,
   gitRunner: PushBranchDependencies['runGit'] = runGit,
-): Promise<string[]> {
+): Promise<ManagedBranchPushPlan> {
+  const detachedHead = await isDetachedHead(worktreePath, gitRunner)
+  const pushRef = detachedHead ? `HEAD:refs/heads/${branch}` : branch
+
   await gitRunner(worktreePath, ['fetch', 'origin', branch])
 
   const remoteExists = await gitRunner(worktreePath, ['rev-parse', '--verify', `origin/${branch}`])
-  if (remoteExists.exitCode !== 0) return ['push', '-u', 'origin', branch]
+  if (remoteExists.exitCode !== 0) {
+    return { pushArgs: ['push', '-u', 'origin', pushRef], detachedHead }
+  }
 
   const counts = await gitRunner(worktreePath, ['rev-list', '--left-right', '--count', `origin/${branch}...HEAD`])
   if (counts.exitCode !== 0) {
@@ -74,24 +91,36 @@ async function syncBranchWithRemote(
   const ahead = Number.parseInt(aheadText ?? '0', 10)
 
   if (behind === 0 && ahead === 0) {
-    return ['push', '-u', 'origin', branch]
+    return { pushArgs: ['push', '-u', 'origin', pushRef], detachedHead }
   }
 
   if (behind > 0 && ahead === 0) {
+    if (detachedHead) {
+      return { pushArgs: null, detachedHead }
+    }
+
     logger.log(`[pr] fast-forwarding ${branch} to origin/${branch} before push`)
     const ff = await gitRunner(worktreePath, ['merge', '--ff-only', `origin/${branch}`])
     if (ff.exitCode !== 0) {
       throw new Error(ff.stderr || ff.stdout || `Failed to fast-forward ${branch} to origin/${branch}`)
     }
-    return ['push', '-u', 'origin', branch]
+    return { pushArgs: ['push', '-u', 'origin', pushRef], detachedHead }
   }
 
   if (behind > 0 && ahead > 0) {
     logger.warn(`[pr] ${branch} diverged from origin/${branch}; using --force-with-lease for managed branch`)
-    return ['push', '--force-with-lease', '-u', 'origin', branch]
+    return { pushArgs: ['push', '--force-with-lease', '-u', 'origin', pushRef], detachedHead }
   }
 
-  return ['push', '-u', 'origin', branch]
+  return { pushArgs: ['push', '-u', 'origin', pushRef], detachedHead }
+}
+
+async function isDetachedHead(
+  worktreePath: string,
+  gitRunner: PushBranchDependencies['runGit'] = runGit,
+): Promise<boolean> {
+  const currentBranch = await gitRunner(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  return currentBranch.exitCode !== 0
 }
 
 export function isRetryableManagedBranchPushFailure(output: string): boolean {

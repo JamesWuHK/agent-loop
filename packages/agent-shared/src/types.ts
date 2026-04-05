@@ -57,6 +57,7 @@ export interface ManagedPullRequest {
   title: string
   url: string
   headRefName: string
+  headRefOid: string | null
   isDraft: boolean
   labels: string[]
 }

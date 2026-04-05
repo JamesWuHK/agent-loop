@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ISSUE_LABELS } from '@agent/shared'
 import { buildReadyGateFailureComment, evaluateReadyGate } from './ready-gate'
 
@@ -39,43 +42,114 @@ describe('ready-gate', () => {
   })
 
   test('accepts ready issues with executable contracts', () => {
-    expect(evaluateReadyGate({
-      number: 49,
-      title: 'example',
-      body: [
-        '## 用户故事',
-        '作为用户，我希望 happy path 可提交。',
-        '',
-        '## Context',
-        '### Dependencies',
-        '```json',
-        '{ "dependsOn": [48] }',
-        '```',
-        '### AllowedFiles',
-        '- apps/desktop/src/pages/LoginPage.tsx',
-        '### RequiredSemantics',
-        '- 合法提交时调用登录接口',
-        '### Validation',
-        '- bun --cwd apps/desktop test src/pages/LoginPage.test.tsx',
-        '',
-        '## RED 测试',
-        '```tsx',
-        'expect(true).toBe(false)',
-        '```',
-        '',
-        '## 实现步骤',
-        '1. 添加 happy path 提交',
-        '',
-        '## 验收',
-        '- 调用 login 后导航到 /main',
-      ].join('\n'),
-      state: 'open',
-      labels: [ISSUE_LABELS.READY],
-    })).toEqual({
-      shouldEnforce: true,
-      valid: true,
-      errors: [],
-    })
+    const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-valid-'))
+
+    try {
+      mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
+      writeFileSync(join(tempDir, 'apps', 'desktop', 'src', 'pages', 'LoginPage.test.tsx'), 'test', 'utf-8')
+
+      expect(evaluateReadyGate({
+        number: 49,
+        title: 'example',
+        body: [
+          '## 用户故事',
+          '作为用户，我希望 happy path 可提交。',
+          '',
+          '## Context',
+          '### Dependencies',
+          '```json',
+          '{ "dependsOn": [48] }',
+          '```',
+          '### AllowedFiles',
+          '- apps/desktop/src/pages/LoginPage.tsx',
+          '### RequiredSemantics',
+          '- 合法提交时调用登录接口',
+          '### Validation',
+          '- bun --cwd apps/desktop test src/pages/LoginPage.test.tsx',
+          '',
+          '## RED 测试',
+          '```tsx',
+          'expect(true).toBe(false)',
+          '```',
+          '',
+          '## 实现步骤',
+          '1. 添加 happy path 提交',
+          '',
+          '## 验收',
+          '- 调用 login 后导航到 /main',
+        ].join('\n'),
+        state: 'open',
+        labels: [ISSUE_LABELS.READY],
+      }, {
+        repoRoot: tempDir,
+      })).toEqual({
+        shouldEnforce: true,
+        valid: true,
+        errors: [],
+      })
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects ready issues when validation references repo paths that do not exist', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-missing-'))
+
+    try {
+      mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
+      writeFileSync(join(tempDir, 'apps', 'desktop', 'src', 'pages', 'MainPage.sprint-c.smoke.test.tsx'), 'test', 'utf-8')
+
+      expect(evaluateReadyGate({
+        number: 92,
+        title: 'example',
+        body: [
+          '## 用户故事',
+          '作为用户，我希望 smoke 能跑通。',
+          '',
+          '## Context',
+          '### Dependencies',
+          '```json',
+          '{ "dependsOn": [90, 91] }',
+          '```',
+          '### AllowedFiles',
+          '- apps/desktop/src/pages/MainPage.sprint-c.smoke.test.tsx',
+          '### ForbiddenFiles',
+          '- apps/desktop/src/pages/MainPage.sessions-sidebar.test.tsx',
+          '### MustPreserve',
+          '- 既有 feature tests 不改写',
+          '### OutOfScope',
+          '- 新业务功能',
+          '### RequiredSemantics',
+          '- 保持主路径 happy path',
+          '### Validation',
+          '- bun --cwd apps/desktop test src/pages/MainPage.sprint-c.smoke.test.tsx',
+          '- bun --cwd apps/desktop test src/pages/MainPage.sessions-sidebar.test.tsx',
+          '',
+          '## RED 测试',
+          '```tsx',
+          'expect(true).toBe(false)',
+          '```',
+          '',
+          '## 实现步骤',
+          '1. 添加 smoke',
+          '',
+          '## 验收',
+          '- 只改 AllowedFiles',
+        ].join('\n'),
+        state: 'open',
+        labels: [ISSUE_LABELS.READY],
+      }, {
+        repoRoot: tempDir,
+      })).toEqual({
+        shouldEnforce: true,
+        valid: false,
+        errors: [
+          'validation references missing repo path: apps/desktop/src/pages/MainPage.sessions-sidebar.test.tsx',
+        ],
+      })
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   test('renders a repair-oriented failure comment', () => {
