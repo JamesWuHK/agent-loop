@@ -43,6 +43,9 @@ agent-loop
 # Run detached so it survives closing the current terminal/Codex window
 agent-loop --daemonize --health-port 9311 --metrics-port 9091
 
+# Re-open a fresh Codex/terminal session and rediscover local daemons
+agent-loop --runtimes
+
 # 或一次性验证模式
 agent-loop --once
 ```
@@ -189,10 +192,14 @@ cd /path/to/product-repo
 agent-loop --daemonize --health-port 9311 --metrics-port 9091
 
 # 查看本地控制面
+agent-loop --runtimes
+agent-loop --status
+agent-loop --doctor
 agent-loop --status --health-port 9311 --metrics-port 9091
 agent-loop --doctor --health-port 9311 --metrics-port 9091
 
 # 停止同一个 repo/machine-id/health-port 对应的后台 daemon
+agent-loop --stop
 agent-loop --stop --health-port 9311
 ```
 
@@ -207,6 +214,7 @@ agent-loop --stop --health-port 9311
 | `--machine-id` | Override machine ID |
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
 | `--daemonize` | Start the daemon detached from the current terminal |
+| `--runtimes` | List local background daemon runtime records found on this machine |
 | `--stop` | Stop the detached daemon matching repo/machine-id/health-port |
 | `--status` | Query the local daemon health + metrics summary and exit |
 | `--doctor` | Query the local daemon and print a detailed diagnostic report |
@@ -275,6 +283,8 @@ agent-loop --doctor
 
 - `~/.agent-loop/runtime/*.json`：运行实例记录，便于本地 stop / 排障
 - `~/.agent-loop/runtime/*.log`：daemon 标准输出与错误日志
+- 从目标 repo 根目录执行 `agent-loop --status` / `agent-loop --doctor` / `agent-loop --stop` 时，如果本机只有一个匹配的 runtime record，CLI 会自动发现对应 health/metrics 端口，不必手动再记一次端口号
+- `agent-loop --runtimes` 可以让新打开的 Codex/终端会话快速找回当前机器上正在运行的 daemon 实例
 
 ## Key Design Decisions
 

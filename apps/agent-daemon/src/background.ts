@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -24,6 +24,12 @@ export interface BackgroundRuntimeRecord extends BackgroundRuntimeIdentity {
   startedAt: string
   command: string[]
   logPath: string
+}
+
+export interface BackgroundRuntimeSnapshot {
+  recordPath: string
+  record: BackgroundRuntimeRecord
+  alive: boolean
 }
 
 export function buildBackgroundRuntimePaths(
@@ -63,6 +69,55 @@ export function readBackgroundRuntimeRecord(path: string): BackgroundRuntimeReco
   } catch {
     return null
   }
+}
+
+export function listBackgroundRuntimeRecords(homeDir = homedir()): BackgroundRuntimeSnapshot[] {
+  const runtimeDir = resolve(homeDir, RUNTIME_DIR_NAME)
+  if (!existsSync(runtimeDir)) return []
+
+  return readdirSync(runtimeDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => {
+      const recordPath = resolve(runtimeDir, entry.name)
+      const record = readBackgroundRuntimeRecord(recordPath)
+      if (!record) return null
+
+      return {
+        recordPath,
+        record,
+        alive: isProcessAlive(record.pid),
+      } satisfies BackgroundRuntimeSnapshot
+    })
+    .filter((snapshot): snapshot is BackgroundRuntimeSnapshot => snapshot !== null)
+    .sort((left, right) => Date.parse(right.record.startedAt) - Date.parse(left.record.startedAt))
+}
+
+export function resolveBackgroundRuntimeRecord(input: {
+  repo?: string
+  machineId?: string
+  healthPort?: number
+  homeDir?: string
+  preferAlive?: boolean
+}): BackgroundRuntimeSnapshot | null {
+  const matches = listBackgroundRuntimeRecords(input.homeDir).filter((snapshot) => {
+    if (input.repo && snapshot.record.repo !== input.repo) return false
+    if (input.machineId && snapshot.record.machineId !== input.machineId) return false
+    if (input.healthPort && snapshot.record.healthPort !== input.healthPort) return false
+    return true
+  })
+
+  if (matches.length === 0) return null
+
+  const preferredMatches = input.preferAlive === false
+    ? matches
+    : matches.filter((snapshot) => snapshot.alive)
+  const effectiveMatches = preferredMatches.length > 0 ? preferredMatches : matches
+
+  if (effectiveMatches.length === 1) {
+    return effectiveMatches[0] ?? null
+  }
+
+  throw new Error(buildAmbiguousBackgroundRuntimeMessage(effectiveMatches))
 }
 
 export function isProcessAlive(pid: number): boolean {
@@ -160,4 +215,17 @@ function sanitizeBackgroundSegment(value: string): string {
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase()
+}
+
+function buildAmbiguousBackgroundRuntimeMessage(
+  matches: BackgroundRuntimeSnapshot[],
+): string {
+  const details = matches
+    .map((snapshot) => {
+      const state = snapshot.alive ? 'alive' : 'stale'
+      return `${snapshot.record.repo} machine=${snapshot.record.machineId} health=${snapshot.record.healthPort} pid=${snapshot.record.pid} ${state}`
+    })
+    .join('; ')
+
+  return `Multiple background daemon records matched. Refine with --machine-id or --health-port. Matches: ${details}`
 }

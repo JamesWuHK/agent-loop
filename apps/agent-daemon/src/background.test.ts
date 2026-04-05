@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildBackgroundRuntimePaths,
+  listBackgroundRuntimeRecords,
   readBackgroundRuntimeRecord,
   removeBackgroundRuntimeRecord,
+  resolveBackgroundRuntimeRecord,
   sanitizeDaemonBackgroundArgs,
   stopBackgroundRuntime,
 } from './background'
@@ -77,5 +79,125 @@ describe('background helpers', () => {
     expect(existsSync(path)).toBe(false)
     removeBackgroundRuntimeRecord(path)
     expect(existsSync(path)).toBe(false)
+  })
+
+  test('lists runtime records and marks alive processes', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-background-list-test-'))
+    const runtimeDir = join(homeDir, '.agent-loop', 'runtime')
+    const firstPath = join(runtimeDir, 'first.json')
+    const secondPath = join(runtimeDir, 'second.json')
+    mkdirSync(runtimeDir, { recursive: true })
+    writeFileSync(firstPath, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'alive-machine',
+      healthPort: 9311,
+      pid: process.pid,
+      metricsPort: 9091,
+      cwd: '/tmp/alive',
+      startedAt: '2026-04-05T03:05:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/alive.log',
+    }))
+    writeFileSync(secondPath, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'stale-machine',
+      healthPort: 9312,
+      pid: 999999,
+      metricsPort: 9092,
+      cwd: '/tmp/stale',
+      startedAt: '2026-04-05T03:04:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/stale.log',
+    }))
+
+    const snapshots = listBackgroundRuntimeRecords(homeDir)
+
+    expect(snapshots).toHaveLength(2)
+    expect(snapshots[0]).toMatchObject({
+      alive: true,
+      record: {
+        machineId: 'alive-machine',
+      },
+    })
+    expect(snapshots[1]).toMatchObject({
+      alive: false,
+      record: {
+        machineId: 'stale-machine',
+      },
+    })
+  })
+
+  test('resolves a unique runtime record by repo and prefers alive records', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-background-resolve-test-'))
+    const runtimeDir = join(homeDir, '.agent-loop', 'runtime')
+    const stalePath = join(runtimeDir, 'stale.json')
+    const alivePath = join(runtimeDir, 'alive.json')
+    mkdirSync(runtimeDir, { recursive: true })
+    writeFileSync(stalePath, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-stale',
+      healthPort: 9311,
+      pid: 999999,
+      metricsPort: 9091,
+      cwd: '/tmp/stale',
+      startedAt: '2026-04-05T03:00:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/stale.log',
+    }))
+    writeFileSync(alivePath, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-alive',
+      healthPort: 9312,
+      pid: process.pid,
+      metricsPort: 9092,
+      cwd: '/tmp/alive',
+      startedAt: '2026-04-05T03:06:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/alive.log',
+    }))
+
+    expect(resolveBackgroundRuntimeRecord({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-alive',
+      homeDir,
+    })).toMatchObject({
+      alive: true,
+      record: {
+        healthPort: 9312,
+      },
+    })
+  })
+
+  test('throws when multiple runtime records match ambiguously', () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-background-ambiguous-test-'))
+    const runtimeDir = join(homeDir, '.agent-loop', 'runtime')
+    mkdirSync(runtimeDir, { recursive: true })
+    writeFileSync(join(runtimeDir, 'first.json'), JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-a',
+      healthPort: 9311,
+      pid: process.pid,
+      metricsPort: 9091,
+      cwd: '/tmp/first',
+      startedAt: '2026-04-05T03:01:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/first.log',
+    }))
+    writeFileSync(join(runtimeDir, 'second.json'), JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-b',
+      healthPort: 9312,
+      pid: process.pid,
+      metricsPort: 9092,
+      cwd: '/tmp/second',
+      startedAt: '2026-04-05T03:02:00.000Z',
+      command: ['bun', 'agent-loop'],
+      logPath: '/tmp/second.log',
+    }))
+
+    expect(() => resolveBackgroundRuntimeRecord({
+      repo: 'JamesWuHK/digital-employee',
+      homeDir,
+    })).toThrow('Multiple background daemon records matched')
   })
 })

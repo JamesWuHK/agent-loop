@@ -16,8 +16,11 @@ import { collectDaemonObservability, formatDoctorReport, formatStatusReport } fr
 import {
   buildBackgroundRuntimePaths,
   launchBackgroundRuntime,
+  listBackgroundRuntimeRecords,
   removeBackgroundRuntimeRecord,
+  resolveBackgroundRuntimeRecord,
   stopBackgroundRuntime,
+  type BackgroundRuntimeSnapshot,
 } from './background'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
@@ -33,6 +36,7 @@ async function main() {
       'dry-run': { type: 'boolean' },
       'metrics-port': { type: 'string' },
       daemonize: { type: 'boolean' },
+      runtimes: { type: 'boolean' },
       stop: { type: 'boolean' },
       once: { type: 'boolean' },
       status: { type: 'boolean' },
@@ -56,25 +60,47 @@ async function main() {
     throw new Error('--daemonize cannot be combined with --stop, --status, --doctor, or --once')
   }
 
+  if (args.runtimes && (args.daemonize || args.stop || args.status || args.doctor || args.once)) {
+    throw new Error('--runtimes cannot be combined with --daemonize, --stop, --status, --doctor, or --once')
+  }
+
   if (args.stop && (args.status || args.doctor || args.once)) {
     throw new Error('--stop cannot be combined with --status, --doctor, or --once')
+  }
+
+  const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
+  const runtimeMachineIdHint = args['machine-id'] as string | undefined
+  const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
+  const discoveredRuntime = args.status || args.doctor || args.stop
+    ? resolveDiscoveredRuntime({
+      repo: runtimeRepoHint,
+      machineId: runtimeMachineIdHint,
+      healthPort: runtimeHealthPortHint,
+    })
+    : null
+
+  if (args.runtimes) {
+    const runtimeRecords = listBackgroundRuntimeRecords()
+    console.log(formatRuntimeListing(runtimeRecords, runtimeRepoHint))
+    process.exit(0)
   }
 
   if (args.status || args.doctor) {
     let fallbackRepo: string | undefined
     try {
-      fallbackRepo = resolveLocalDaemonIdentity({
+      fallbackRepo = discoveredRuntime?.record.repo ?? resolveLocalDaemonIdentity({
         repo: args.repo as string | undefined,
-        machineId: args['machine-id'] as string | undefined,
+      }, {
+        persistGeneratedMachineId: false,
       }).repo
     } catch {
-      fallbackRepo = args.repo as string | undefined
+      fallbackRepo = discoveredRuntime?.record.repo ?? args.repo as string | undefined
     }
 
     const snapshot = await collectDaemonObservability({
       healthHost: (args['health-host'] as string | undefined) ?? DEFAULT_HEALTH_SERVER_HOST,
-      healthPort: args['health-port'] ? parseInt(args['health-port'] as string) : DEFAULT_HEALTH_SERVER_PORT,
-      metricsPort,
+      healthPort: runtimeHealthPortHint ?? discoveredRuntime?.record.healthPort ?? DEFAULT_HEALTH_SERVER_PORT,
+      metricsPort: metricsPort ?? discoveredRuntime?.record.metricsPort,
       includeGitHubAudit: Boolean(args.doctor),
       fallbackRepo,
     })
@@ -101,21 +127,13 @@ async function main() {
 
   try {
     if (args.stop) {
-      const identity = resolveLocalDaemonIdentity(
-        {
+      const result = discoveredRuntime
+        ? stopBackgroundRuntime(discoveredRuntime.recordPath)
+        : stopBackgroundRuntime(resolveFallbackRuntimeRecordPath({
           repo: cliArgs.repo,
           machineId: cliArgs.machineId,
-        },
-        {
-          persistGeneratedMachineId: false,
-        },
-      )
-      const runtimePaths = buildBackgroundRuntimePaths({
-        repo: identity.repo,
-        machineId: identity.machineId,
-        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
-      })
-      const result = stopBackgroundRuntime(runtimePaths.recordPath)
+          healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+        }))
       console.log(`[agent-loop] ${result.message}`)
       process.exit(result.stopped ? 0 : 1)
     }
@@ -196,6 +214,7 @@ Usage:
   agent-loop [options]
   agent-loop --status [--health-port 9310]
   agent-loop --doctor [--health-port 9310]
+  agent-loop --runtimes
   agent-loop --daemonize [options]
   agent-loop --stop [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
 
@@ -209,6 +228,7 @@ Options:
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
       --daemonize             Start the daemon detached from the current terminal
+      --runtimes              List local background daemon records discovered on this machine
       --stop                  Stop the detached daemon instance matching repo/machine-id/health-port
       --status                Print a compact local daemon status report and exit
       --doctor                Print a detailed local daemon diagnostic report and exit
@@ -233,6 +253,7 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --runtimes
   agent-loop --daemonize --repo owner/repo --health-port 9311 --metrics-port 9091
   agent-loop --stop --repo owner/repo --health-port 9311
   agent-loop --status
@@ -245,3 +266,76 @@ main().catch((err) => {
   console.error('[agent-loop] fatal error:', err)
   process.exit(1)
 })
+
+function resolveRepoHint(repo: string | undefined): string | undefined {
+  try {
+    return resolveLocalDaemonIdentity(
+      {
+        repo,
+      },
+      {
+        persistGeneratedMachineId: false,
+      },
+    ).repo
+  } catch {
+    return repo
+  }
+}
+
+function resolveDiscoveredRuntime(input: {
+  repo?: string
+  machineId?: string
+  healthPort?: number
+}): BackgroundRuntimeSnapshot | null {
+  try {
+    return resolveBackgroundRuntimeRecord(input)
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`[agent-loop] ${error.message}`)
+    }
+    throw error
+  }
+}
+
+function resolveFallbackRuntimeRecordPath(input: {
+  repo?: string
+  machineId?: string
+  healthPort: number
+}): string {
+  const identity = resolveLocalDaemonIdentity(
+    {
+      repo: input.repo,
+      machineId: input.machineId,
+    },
+    {
+      persistGeneratedMachineId: false,
+    },
+  )
+
+  return buildBackgroundRuntimePaths({
+    repo: identity.repo,
+    machineId: identity.machineId,
+    healthPort: input.healthPort,
+  }).recordPath
+}
+
+function formatRuntimeListing(
+  runtimes: BackgroundRuntimeSnapshot[],
+  repoHint?: string,
+): string {
+  if (runtimes.length === 0) {
+    return 'No local background daemon runtime records found.'
+  }
+
+  const lines = ['Local background daemons:']
+
+  for (const runtime of runtimes) {
+    const state = runtime.alive ? 'alive' : 'stale'
+    const match = repoHint && runtime.record.repo === repoHint ? ' current-repo' : ''
+    lines.push(
+      `- ${state}${match} repo=${runtime.record.repo} machine=${runtime.record.machineId} pid=${runtime.record.pid} health=${runtime.record.healthPort} metrics=${runtime.record.metricsPort} started=${runtime.record.startedAt} cwd=${runtime.record.cwd}`,
+    )
+  }
+
+  return lines.join('\n')
+}
