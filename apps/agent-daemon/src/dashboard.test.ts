@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { AgentConfig } from '@agent/shared'
 import {
   buildDashboardMachineCards,
   buildDashboardSummary,
@@ -6,6 +7,7 @@ import {
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
   type DashboardPullRequestView,
+  startDashboardServer,
 } from './dashboard'
 
 function buildLease(overrides: Partial<DashboardLeaseView> = {}): DashboardLeaseView {
@@ -70,6 +72,50 @@ function buildLocalSnapshot(overrides: Partial<DashboardLocalMachineSnapshot> = 
     activeLeases: [buildLease()],
     warnings: ['local warning'],
     ...overrides,
+  }
+}
+
+function buildAgentConfig(): AgentConfig {
+  return {
+    machineId: 'codex-20260403',
+    repo: 'JamesWuHK/digital-employee',
+    pat: 'test-token',
+    pollIntervalMs: 60_000,
+    concurrency: 1,
+    requestedConcurrency: 1,
+    concurrencyPolicy: {
+      requested: 1,
+      limits: [],
+      effective: 1,
+    },
+    scheduling: {
+      concurrencyByRepo: {},
+      concurrencyByProfile: {},
+    },
+    recovery: {
+      heartbeatIntervalMs: 30_000,
+      leaseTtlMs: 60_000,
+      workerIdleTimeoutMs: 300_000,
+      leaseAdoptionBackoffMs: 5_000,
+    },
+    worktreesBase: '/tmp/agent-worktrees',
+    project: {
+      profile: 'generic',
+      promptGuidance: {},
+      maxConcurrency: undefined,
+    },
+    agent: {
+      primary: 'codex',
+      fallback: 'claude',
+      claudePath: 'claude',
+      codexPath: 'codex',
+      timeoutMs: 30 * 60 * 1000,
+    },
+    git: {
+      defaultBranch: 'main',
+      authorName: 'agent-loop',
+      authorEmail: 'agent-loop@local',
+    },
   }
 }
 
@@ -219,5 +265,39 @@ describe('dashboard machine aggregation', () => {
       failedIssueCount: 1,
       openPrCount: 1,
     })
+  })
+})
+
+describe('dashboard localization', () => {
+  test('serves Chinese copy for the dashboard shell and client script', async () => {
+    const server = startDashboardServer({
+      config: buildAgentConfig(),
+      host: '127.0.0.1',
+      port: 0,
+    })
+
+    try {
+      const baseUrl = `http://127.0.0.1:${server.port}`
+      const [html, script] = await Promise.all([
+        fetch(baseUrl + '/').then((response) => response.text()),
+        fetch(baseUrl + '/app.js').then((response) => response.text()),
+      ])
+
+      expect(html).toContain('<title>Agent Loop 监控台</title>')
+      expect(html).toContain('分布式开发监控台')
+      expect(html).toContain('立即刷新')
+      expect(html).toContain('机器状态')
+      expect(html).toContain('问题队列')
+      expect(html).toContain('日志')
+
+      expect(script).toContain('仪表盘快照加载失败')
+      expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
+      expect(script).toContain('机器数')
+      expect(script).toContain('本地运行时')
+      expect(script).toContain('可认领')
+      expect(script).toContain('无本地运行时')
+    } finally {
+      server.stop(true)
+    }
   })
 })

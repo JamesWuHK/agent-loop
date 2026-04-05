@@ -187,8 +187,8 @@ export async function collectDashboardSnapshot(
   const generatedAt = new Date().toISOString()
   const errors: string[] = []
   const notes = [
-    'Remote machines only appear when GitHub has an active managed lease comment for this repo.',
-    'Remote logs are not available in the MVP; the log panel only tails local managed daemon logs.',
+    '远程机器只会在 GitHub 上存在当前仓库的活跃受管租约评论时显示。',
+    'MVP 阶段不提供远程日志；日志面板目前只追踪本地受管 daemon 日志。',
   ]
 
   const localSnapshots = await collectLocalMachineSnapshots({
@@ -218,7 +218,7 @@ export async function collectDashboardSnapshot(
     prs = githubCollection.prs
     remoteLeases = githubCollection.remoteLeases
   } catch (error) {
-    errors.push(`GitHub snapshot unavailable: ${formatError(error)}`)
+    errors.push(`GitHub 快照不可用：${formatError(error)}`)
   }
 
   const machines = buildDashboardMachineCards(localSnapshots, remoteLeases)
@@ -345,7 +345,7 @@ export function readDashboardLog(
       content: '',
       truncated: false,
       lineCount: 0,
-      message: `No local runtime matched ${runtimeKey} for ${repo}`,
+      message: `仓库 ${repo} 中未找到匹配 ${runtimeKey} 的本地运行时`,
     }
   }
 
@@ -359,7 +359,7 @@ export function readDashboardLog(
       content: '',
       truncated: false,
       lineCount: 0,
-      message: `No local log file found at ${path}`,
+      message: `未找到本地日志文件：${path}`,
     }
   }
 
@@ -373,8 +373,8 @@ export function readDashboardLog(
     truncated: tailed.truncated,
     lineCount: tailed.lineCount,
     message: tailed.truncated
-      ? `Showing last ${tailed.lineCount} lines from ${path}`
-      : `Showing log contents from ${path}`,
+      ? `显示 ${path} 的最后 ${tailed.lineCount} 行`
+      : `显示 ${path} 的日志内容`,
   }
 }
 
@@ -436,7 +436,7 @@ export function startDashboardServer(options: DashboardServerOptions): Bun.Serve
         const runtimeKey = url.searchParams.get('runtimeKey')?.trim() ?? ''
         if (runtimeKey.length === 0) {
           return jsonResponse({
-            error: 'runtimeKey query parameter is required',
+            error: '必须提供 runtimeKey 查询参数',
           }, 400)
         }
 
@@ -828,24 +828,24 @@ function formatError(error: unknown): string {
 
 function renderDashboardHtml(): string {
   return `<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Loop Monitor</title>
+    <title>Agent Loop 监控台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">agent-loop local monitor</p>
-          <h1>Distributed Development Dashboard</h1>
-          <p class="subtitle">Local runtime detail, GitHub-derived machine activity, and live log tail for the current repo.</p>
+          <p class="eyebrow">agent-loop 本地监控</p>
+          <h1>分布式开发监控台</h1>
+          <p class="subtitle">展示当前仓库的本地运行时细节、基于 GitHub 推导的机器活动，以及实时日志尾部。</p>
         </div>
         <div class="hero-actions">
-          <button id="refresh-button" class="primary-button" type="button">Refresh now</button>
-          <div class="timestamp" id="updated-at">Waiting for first snapshot...</div>
+          <button id="refresh-button" class="primary-button" type="button">立即刷新</button>
+          <div class="timestamp" id="updated-at">等待首次快照...</div>
         </div>
       </header>
 
@@ -854,10 +854,10 @@ function renderDashboardHtml(): string {
       <section class="panel">
         <div class="section-header">
           <div>
-            <p class="section-eyebrow">Machines</p>
-            <h2>Who is active right now</h2>
+            <p class="section-eyebrow">机器状态</p>
+            <h2>当前有哪些机器在工作</h2>
           </div>
-          <p class="section-note">Remote machines appear from GitHub managed lease state. Idle remote machines have no shared heartbeat in the MVP.</p>
+          <p class="section-note">远程机器依据 GitHub 上的受管租约状态展示。MVP 阶段不会为闲置远程机器提供共享心跳。</p>
         </div>
         <div id="machines" class="machine-grid"></div>
       </section>
@@ -866,8 +866,8 @@ function renderDashboardHtml(): string {
         <div class="panel">
           <div class="section-header compact">
             <div>
-              <p class="section-eyebrow">Issue Queue</p>
-              <h2>Open agent issues</h2>
+              <p class="section-eyebrow">问题队列</p>
+              <h2>开放的 Agent Issue</h2>
             </div>
           </div>
           <div class="table-shell">
@@ -875,10 +875,10 @@ function renderDashboardHtml(): string {
               <thead>
                 <tr>
                   <th>Issue</th>
-                  <th>State</th>
-                  <th>Claimability</th>
-                  <th>Lease</th>
-                  <th>Updated</th>
+                  <th>状态</th>
+                  <th>可认领</th>
+                  <th>租约</th>
+                  <th>更新时间</th>
                 </tr>
               </thead>
               <tbody id="issues-body"></tbody>
@@ -889,8 +889,8 @@ function renderDashboardHtml(): string {
         <div class="panel">
           <div class="section-header compact">
             <div>
-              <p class="section-eyebrow">Pull Requests</p>
-              <h2>Managed PR activity</h2>
+              <p class="section-eyebrow">拉取请求</p>
+              <h2>受管 PR 活动</h2>
             </div>
           </div>
           <div class="table-shell">
@@ -898,9 +898,9 @@ function renderDashboardHtml(): string {
               <thead>
                 <tr>
                   <th>PR</th>
-                  <th>Branch</th>
-                  <th>Review lease</th>
-                  <th>Merge lease</th>
+                  <th>分支</th>
+                  <th>Review 租约</th>
+                  <th>Merge 租约</th>
                 </tr>
               </thead>
               <tbody id="prs-body"></tbody>
@@ -912,17 +912,17 @@ function renderDashboardHtml(): string {
       <section class="panel">
         <div class="section-header">
           <div>
-            <p class="section-eyebrow">Logs</p>
-            <h2>Local daemon runtime log</h2>
+            <p class="section-eyebrow">日志</p>
+            <h2>本地 daemon 运行日志</h2>
           </div>
           <div class="log-controls">
-            <label for="runtime-select">Runtime</label>
+            <label for="runtime-select">运行时</label>
             <select id="runtime-select"></select>
-            <button id="reload-log" class="secondary-button" type="button">Reload log</button>
+            <button id="reload-log" class="secondary-button" type="button">重新加载日志</button>
           </div>
         </div>
-        <p class="section-note">The log panel can only read local managed daemon files. Remote machine logs need a separate aggregation channel.</p>
-        <pre id="log-output" class="log-output">Waiting for local runtime selection...</pre>
+        <p class="section-note">日志面板只能读取本机受管 daemon 文件。远程机器日志需要单独的聚合通道。</p>
+        <pre id="log-output" class="log-output">等待选择本地运行时...</pre>
       </section>
     </main>
     <script type="module" src="/app.js"></script>
@@ -1407,7 +1407,7 @@ async function refreshSnapshot() {
     const response = await fetch('/api/snapshot', { cache: 'no-store' });
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.error || 'Snapshot request failed');
+      throw new Error(payload.error || '快照请求失败');
     }
 
     state.snapshot = payload;
@@ -1420,13 +1420,13 @@ async function refreshSnapshot() {
     renderRuntimeOptions(runtimeOptions);
     await refreshLog();
   } catch (error) {
-    alertsEl.innerHTML = renderAlert('error', 'Dashboard snapshot failed', escapeHtml(formatError(error)));
+    alertsEl.innerHTML = renderAlert('error', '仪表盘快照加载失败', escapeHtml(formatError(error)));
   }
 }
 
 async function refreshLog() {
   if (!state.selectedRuntimeKey) {
-    logOutputEl.textContent = 'No local managed daemon runtime found for this repo.';
+    logOutputEl.textContent = '未发现本仓库的本地受管 daemon 运行时。';
     return;
   }
 
@@ -1434,19 +1434,19 @@ async function refreshLog() {
     const response = await fetch('/api/log?runtimeKey=' + encodeURIComponent(state.selectedRuntimeKey), { cache: 'no-store' });
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.error || 'Log request failed');
+      throw new Error(payload.error || '日志请求失败');
     }
 
     logOutputEl.textContent = payload.found
-      ? payload.message + '\\n\\n' + (payload.content || '(log file is empty)')
+      ? payload.message + '\\n\\n' + (payload.content || '（日志文件为空）')
       : payload.message;
   } catch (error) {
-    logOutputEl.textContent = 'Failed to load log: ' + formatError(error);
+    logOutputEl.textContent = '日志加载失败：' + formatError(error);
   }
 }
 
 function renderSnapshot(snapshot) {
-  updatedAtEl.textContent = 'Repo ' + snapshot.repo + ' | updated ' + formatTimestamp(snapshot.generatedAt) + ' | auto refresh ' + Math.round(refreshIntervalMs / 1000) + 's';
+  updatedAtEl.textContent = '仓库 ' + snapshot.repo + ' | 更新于 ' + formatTimestamp(snapshot.generatedAt) + ' | 自动刷新 ' + Math.round(refreshIntervalMs / 1000) + ' 秒';
   renderAlerts(snapshot);
   renderSummary(snapshot);
   renderMachines(snapshot.machines);
@@ -1458,12 +1458,12 @@ function renderAlerts(snapshot) {
   const blocks = [];
   if (Array.isArray(snapshot.errors)) {
     snapshot.errors.forEach((error) => {
-      blocks.push(renderAlert('error', 'Error', escapeHtml(error)));
+      blocks.push(renderAlert('error', '错误', escapeHtml(error)));
     });
   }
   if (Array.isArray(snapshot.notes)) {
     snapshot.notes.forEach((note) => {
-      blocks.push(renderAlert('note', 'Note', escapeHtml(note)));
+      blocks.push(renderAlert('note', '提示', escapeHtml(note)));
     });
   }
   alertsEl.innerHTML = blocks.join('');
@@ -1471,13 +1471,13 @@ function renderAlerts(snapshot) {
 
 function renderSummary(snapshot) {
   const stats = [
-    { label: 'Machines', value: snapshot.summary.machineCount, tone: 'accent' },
-    { label: 'Local runtimes', value: snapshot.summary.localRuntimeCount, tone: '' },
-    { label: 'Active leases', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
-    { label: 'Ready issues', value: snapshot.summary.readyIssueCount, tone: '' },
-    { label: 'Working issues', value: snapshot.summary.workingIssueCount, tone: 'accent' },
-    { label: 'Failed issues', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },
-    { label: 'Open PRs', value: snapshot.summary.openPrCount, tone: '' },
+    { label: '机器数', value: snapshot.summary.machineCount, tone: 'accent' },
+    { label: '本地运行时', value: snapshot.summary.localRuntimeCount, tone: '' },
+    { label: '活跃租约', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
+    { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
+    { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
+    { label: '失败 Issue', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },
+    { label: '开放 PR', value: snapshot.summary.openPrCount, tone: '' },
   ];
 
   summaryEl.innerHTML = stats.map((stat) => {
@@ -1487,20 +1487,20 @@ function renderSummary(snapshot) {
 
 function renderMachines(machines) {
   if (!Array.isArray(machines) || machines.length === 0) {
-    machinesEl.innerHTML = '<div class="empty-state">No local runtime or remote managed lease was found for this repo.</div>';
+    machinesEl.innerHTML = '<div class="empty-state">当前仓库未发现本地运行时或远程受管租约。</div>';
     return;
   }
 
   machinesEl.innerHTML = machines.map((machine) => {
     const runtimeList = machine.localRuntimes.length > 0
       ? '<div class="runtime-list">' + machine.localRuntimes.map(renderRuntimeItem).join('') + '</div>'
-      : '<div class="empty-state">No local runtime discovered on this machine.</div>';
+      : '<div class="empty-state">这台机器上未发现本地运行时。</div>';
     const observability = machine.observability.length > 0
       ? '<div class="metric-grid">' + machine.observability.map(renderObservabilityTile).join('') + '</div>'
-      : '<div class="empty-state">No local daemon endpoint available.</div>';
+      : '<div class="empty-state">未发现本地 daemon 端点。</div>';
     const leaseList = machine.activeLeases.length > 0
       ? '<div class="lease-list">' + machine.activeLeases.map(renderLeaseItem).join('') + '</div>'
-      : '<div class="empty-state">No active managed lease detected.</div>';
+      : '<div class="empty-state">未检测到活跃受管租约。</div>';
     const warnings = machine.warnings.length > 0
       ? '<div class="warning-list">' + machine.warnings.map((warning) => '<div class="warning-item">' + escapeHtml(warning) + '</div>').join('') + '</div>'
       : '';
@@ -1511,13 +1511,13 @@ function renderMachines(machines) {
       '<div>',
       '<h3 class="machine-title">' + escapeHtml(machine.machineId) + '</h3>',
       '<div class="chip-row">',
-      renderChip(machine.source, machine.source === 'mixed' ? 'accent' : machine.source === 'local' ? 'gold' : ''),
+      renderChip(localizeMachineSource(machine.source), machine.source === 'mixed' ? 'accent' : machine.source === 'local' ? 'gold' : ''),
       machine.daemonInstanceIds.map((daemonId) => renderChip(shortDaemonId(daemonId), '')).join(''),
       '</div>',
       '</div>',
       '<div class="chip-row">',
-      renderChip('leases ' + machine.activeLeases.length, machine.activeLeases.length > 0 ? 'accent' : ''),
-      renderChip('local ' + machine.localRuntimes.length, machine.localRuntimes.length > 0 ? 'gold' : ''),
+      renderChip('租约 ' + machine.activeLeases.length, machine.activeLeases.length > 0 ? 'accent' : ''),
+      renderChip('本地 ' + machine.localRuntimes.length, machine.localRuntimes.length > 0 ? 'gold' : ''),
       '</div>',
       '</div>',
       observability,
@@ -1531,23 +1531,23 @@ function renderMachines(machines) {
 
 function renderIssues(issues) {
   if (!Array.isArray(issues) || issues.length === 0) {
-    issuesBodyEl.innerHTML = '<tr><td colspan="5"><div class="empty-state">No open agent issues were returned for this repo.</div></td></tr>';
+    issuesBodyEl.innerHTML = '<tr><td colspan="5"><div class="empty-state">当前仓库没有返回开放的 Agent Issue。</div></td></tr>';
     return;
   }
 
   issuesBodyEl.innerHTML = issues.map((issue) => {
     const claimability = issue.isClaimable
-      ? renderChip('claimable', 'accent')
-      : renderChip('blocked', issue.state === 'failed' ? 'error' : 'gold');
+      ? renderChip('可认领', 'accent')
+      : renderChip('阻塞', issue.state === 'failed' ? 'error' : 'gold');
     const deps = issue.claimBlockedBy.length > 0
-      ? 'blocked by #' + issue.claimBlockedBy.join(', #')
+      ? '被 #' + issue.claimBlockedBy.join(', #') + ' 阻塞'
       : issue.dependencyIssueNumbers.length > 0
-        ? 'deps #' + issue.dependencyIssueNumbers.join(', #')
-        : 'no deps';
+        ? '依赖 #' + issue.dependencyIssueNumbers.join(', #')
+        : '无依赖';
     const contract = issue.hasExecutableContract
-      ? 'contract ok'
-      : 'contract invalid: ' + issue.contractValidationErrors.join('; ');
-    const lease = issue.activeLease ? renderInlineLease(issue.activeLease) : '<span class="muted">none</span>';
+      ? '合约通过'
+      : '合约无效：' + issue.contractValidationErrors.join('; ');
+    const lease = issue.activeLease ? renderInlineLease(issue.activeLease) : '<span class="muted">无</span>';
     const linkedPrs = issue.linkedPrNumbers.length > 0
       ? '<div class="chip-row">' + issue.linkedPrNumbers.map((number) => renderChip('PR #' + number, '')).join('') + '</div>'
       : '';
@@ -1559,7 +1559,7 @@ function renderIssues(issues) {
       '<div class="chip-row">' + issue.labels.map((label) => renderChip(label, '')).join('') + '</div>',
       linkedPrs,
       '</td>',
-      '<td>' + renderChip(issue.state, issue.state === 'working' ? 'accent' : issue.state === 'failed' ? 'error' : issue.state === 'ready' ? 'gold' : '') + '</td>',
+      '<td>' + renderChip(localizeIssueState(issue.state), issue.state === 'working' ? 'accent' : issue.state === 'failed' ? 'error' : issue.state === 'ready' ? 'gold' : '') + '</td>',
       '<td>' + claimability + '<div class="muted" style="margin-top:8px">' + escapeHtml(deps) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(contract) + '</div></td>',
       '<td>' + lease + '</td>',
       '<td><div>' + escapeHtml(formatTimestamp(issue.updatedAt)) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(formatRelative(issue.updatedAt)) + '</div></td>',
@@ -1570,15 +1570,15 @@ function renderIssues(issues) {
 
 function renderPullRequests(prs) {
   if (!Array.isArray(prs) || prs.length === 0) {
-    prsBodyEl.innerHTML = '<tr><td colspan="4"><div class="empty-state">No open managed PRs were returned for this repo.</div></td></tr>';
+    prsBodyEl.innerHTML = '<tr><td colspan="4"><div class="empty-state">当前仓库没有返回开放的受管 PR。</div></td></tr>';
     return;
   }
 
   prsBodyEl.innerHTML = prs.map((pr) => {
-    const linkedIssue = pr.linkedIssueNumber === null ? '<span class="muted">no linked issue</span>' : renderChip('issue #' + pr.linkedIssueNumber, 'gold');
-    const draft = pr.isDraft ? renderChip('draft', 'gold') : '';
-    const reviewLease = pr.reviewLease ? renderInlineLease(pr.reviewLease) : '<span class="muted">none</span>';
-    const mergeLease = pr.mergeLease ? renderInlineLease(pr.mergeLease) : '<span class="muted">none</span>';
+    const linkedIssue = pr.linkedIssueNumber === null ? '<span class="muted">未关联 Issue</span>' : renderChip('Issue #' + pr.linkedIssueNumber, 'gold');
+    const draft = pr.isDraft ? renderChip('草稿', 'gold') : '';
+    const reviewLease = pr.reviewLease ? renderInlineLease(pr.reviewLease) : '<span class="muted">无</span>';
+    const mergeLease = pr.mergeLease ? renderInlineLease(pr.mergeLease) : '<span class="muted">无</span>';
 
     return [
       '<tr>',
@@ -1600,7 +1600,7 @@ function renderPullRequests(prs) {
 
 function renderRuntimeOptions(options) {
   runtimeSelectEl.innerHTML = options.length === 0
-    ? '<option value="">No local runtime</option>'
+    ? '<option value="">无本地运行时</option>'
     : options.map((option) => {
       const selected = option.runtimeKey === state.selectedRuntimeKey ? ' selected' : '';
       return '<option value="' + escapeAttribute(option.runtimeKey) + '"' + selected + '>' + escapeHtml(option.label) + '</option>';
@@ -1614,7 +1614,7 @@ function collectLocalRuntimeOptions(snapshot) {
   return snapshot.machines.flatMap((machine) => {
     return machine.localRuntimes.map((runtime) => ({
       runtimeKey: runtime.runtimeKey,
-      label: machine.machineId + ' @ ' + runtime.healthPort + ' (' + runtime.supervisor + ')',
+      label: machine.machineId + ' @ ' + runtime.healthPort + '（' + runtime.supervisor + '）',
     }));
   });
 }
@@ -1623,23 +1623,23 @@ function renderRuntimeItem(runtime) {
   return [
     '<div class="runtime-item">',
     '<div class="chip-row">',
-    renderChip(runtime.alive ? 'alive' : 'stale', runtime.alive ? 'accent' : 'error'),
+    renderChip(runtime.alive ? '在线' : '失联', runtime.alive ? 'accent' : 'error'),
     renderChip(runtime.supervisor, ''),
-    renderChip('health ' + runtime.healthPort, ''),
-    renderChip('metrics ' + runtime.metricsPort, ''),
+    renderChip('健康端口 ' + runtime.healthPort, ''),
+    renderChip('指标端口 ' + runtime.metricsPort, ''),
     '</div>',
-    '<div style="margin-top:8px"><strong>pid ' + escapeHtml(String(runtime.pid)) + '</strong> <span class="muted">started ' + escapeHtml(formatTimestamp(runtime.startedAt)) + '</span></div>',
+    '<div style="margin-top:8px"><strong>PID ' + escapeHtml(String(runtime.pid)) + '</strong> <span class="muted">启动于 ' + escapeHtml(formatTimestamp(runtime.startedAt)) + '</span></div>',
     '<div class="muted" style="margin-top:6px">' + escapeHtml(runtime.cwd) + '</div>',
     '</div>',
   ].join('');
 }
 
 function renderObservabilityTile(observability) {
-  const status = observability.ok ? 'running' : 'unreachable';
+  const status = observability.ok ? '运行中' : '不可达';
   const tone = observability.ok ? 'accent' : 'error';
   const nextPoll = observability.nextPollAt
     ? formatRelative(observability.nextPollAt)
-    : 'unscheduled';
+    : '未计划';
 
   return [
     '<div class="metric-tile">',
@@ -1647,11 +1647,11 @@ function renderObservabilityTile(observability) {
     renderChip(status, tone),
     observability.daemonInstanceId ? renderChip(shortDaemonId(observability.daemonInstanceId), '') : '',
     '</div>',
-    '<span class="label">Worktrees / Leases</span>',
+    '<span class="label">工作树 / 租约</span>',
     '<span class="value">' + escapeHtml(String(observability.activeWorktreeCount)) + ' / ' + escapeHtml(String(observability.activeLeaseCount)) + '</span>',
-    '<span class="label" style="margin-top:8px">Next poll</span>',
+    '<span class="label" style="margin-top:8px">下次轮询</span>',
     '<span class="value">' + escapeHtml(nextPoll) + '</span>',
-    '<span class="label" style="margin-top:8px">Blocked resumes / stalled workers</span>',
+    '<span class="label" style="margin-top:8px">阻塞恢复 / 卡住 worker</span>',
     '<span class="value">' + escapeHtml(String(observability.blockedIssueResumeCount)) + ' / ' + escapeHtml(String(observability.stalledWorkerCount)) + '</span>',
     '</div>',
   ].join('');
@@ -1663,24 +1663,82 @@ function renderLeaseItem(lease) {
 
 function renderInlineLease(lease) {
   const target = lease.scope === 'issue-process'
-    ? 'issue #' + lease.targetNumber
+    ? 'Issue #' + lease.targetNumber
     : 'PR #' + lease.targetNumber;
   const timing = [
-    lease.heartbeatAgeSeconds === null ? null : 'hb ' + lease.heartbeatAgeSeconds + 's',
-    lease.progressAgeSeconds === null ? null : 'progress ' + lease.progressAgeSeconds + 's',
-    lease.expiresInSeconds === null ? null : 'ttl ' + lease.expiresInSeconds + 's',
+    lease.heartbeatAgeSeconds === null ? null : '心跳 ' + lease.heartbeatAgeSeconds + ' 秒',
+    lease.progressAgeSeconds === null ? null : '进度 ' + lease.progressAgeSeconds + ' 秒',
+    lease.expiresInSeconds === null ? null : 'TTL ' + lease.expiresInSeconds + ' 秒',
   ].filter(Boolean).join(' | ');
 
   return [
-    '<div><strong>' + escapeHtml(target) + '</strong> <span class="muted">' + escapeHtml(lease.scope) + '</span></div>',
+    '<div><strong>' + escapeHtml(target) + '</strong> <span class="muted">' + escapeHtml(localizeLeaseScope(lease.scope)) + '</span></div>',
     '<div class="chip-row" style="margin-top:8px">',
     renderChip(lease.phase, 'accent'),
-    renderChip(lease.source, lease.source === 'local' ? 'gold' : ''),
-    renderChip('machine ' + lease.machineId, ''),
-    renderChip('attempt ' + lease.attempt, ''),
+    renderChip(localizeLeaseSource(lease.source), lease.source === 'local' ? 'gold' : ''),
+    renderChip('机器 ' + lease.machineId, ''),
+    renderChip('尝试 ' + lease.attempt, ''),
     '</div>',
     timing ? '<div class="muted" style="margin-top:8px">' + escapeHtml(timing) + '</div>' : '',
   ].join('');
+}
+
+function localizeMachineSource(source) {
+  switch (source) {
+    case 'local':
+      return '本地';
+    case 'github':
+      return 'GitHub';
+    case 'mixed':
+      return '混合';
+    default:
+      return source || '未知';
+  }
+}
+
+function localizeIssueState(state) {
+  switch (state) {
+    case 'ready':
+      return '就绪';
+    case 'working':
+      return '处理中';
+    case 'claimed':
+      return '已认领';
+    case 'failed':
+      return '失败';
+    case 'stale':
+      return '陈旧';
+    case 'done':
+      return '完成';
+    case 'unknown':
+      return '未知';
+    default:
+      return state || '未知';
+  }
+}
+
+function localizeLeaseSource(source) {
+  switch (source) {
+    case 'local':
+      return '本地';
+    case 'github':
+      return 'GitHub';
+    default:
+      return source || '未知';
+  }
+}
+
+function localizeLeaseScope(scope) {
+  switch (scope) {
+    case 'issue-process':
+      return 'Issue 处理';
+    case 'pr-review':
+      return 'PR Review';
+    case 'pr-merge':
+      return 'PR Merge';
+    default:
+      return scope || '未知';
+  }
 }
 
 function renderChip(label, tone) {
@@ -1700,8 +1758,8 @@ function shortDaemonId(daemonId) {
 
 function formatTimestamp(value) {
   const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return value || 'unknown';
-  return new Intl.DateTimeFormat(undefined, {
+  if (!Number.isFinite(parsed)) return value || '未知';
+  return new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -1713,15 +1771,17 @@ function formatTimestamp(value) {
 
 function formatRelative(value) {
   const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return 'unknown';
-  const seconds = Math.max(0, Math.floor((Date.now() - parsed) / 1000));
-  if (seconds < 60) return seconds + 's ago';
+  if (!Number.isFinite(parsed)) return '未知';
+  const diffSeconds = Math.floor((Date.now() - parsed) / 1000);
+  const future = diffSeconds < 0;
+  const seconds = Math.abs(diffSeconds);
+  if (seconds < 60) return seconds + ' 秒' + (future ? '后' : '前');
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return minutes + 'm ago';
+  if (minutes < 60) return minutes + ' 分钟' + (future ? '后' : '前');
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return hours + 'h ago';
+  if (hours < 48) return hours + ' 小时' + (future ? '后' : '前');
   const days = Math.floor(hours / 24);
-  return days + 'd ago';
+  return days + ' 天' + (future ? '后' : '前');
 }
 
 function escapeHtml(value) {
