@@ -301,6 +301,11 @@ export class AgentDaemon {
     this.syncRuntimeMetrics()
   }
 
+  private refreshObservability(): void {
+    this.syncRuntimeMetrics()
+    setDaemonUptime((Date.now() - this.startedAt) / 1000)
+  }
+
   private async sleepWithLeaseBackoff(): Promise<void> {
     const jitterMs = Math.min(250, Math.max(50, Math.floor(this.config.recovery.leaseAdoptionBackoffMs / 10)))
     const delayMs = this.config.recovery.leaseAdoptionBackoffMs + Math.floor(Math.random() * jitterMs)
@@ -433,7 +438,9 @@ export class AgentDaemon {
     this.syncRuntimeMetrics()
 
     // Start metrics server
-    this.metricsServer = await startMetricsServer(this.metricsPort, this.logger)
+    this.metricsServer = await startMetricsServer(this.metricsPort, this.logger, () => {
+      this.refreshObservability()
+    })
 
     // Start HTTP health check server
     this.startHealthServer()
@@ -514,6 +521,7 @@ export class AgentDaemon {
         const url = new URL(request.url)
 
         if (request.method === 'GET' && url.pathname === HEALTH_PATH) {
+          this.refreshObservability()
           return Response.json({
             status: this.running ? 'running' : 'stopped',
             mode: 'agent-loop-daemon',
@@ -689,11 +697,8 @@ export class AgentDaemon {
 
     const pollStartTime = Date.now()
     this.lastPollAt = new Date().toISOString()
-    this.syncRuntimeMetrics()
+    this.refreshObservability()
     this.logger.log(`[daemon] poll cycle at ${this.lastPollAt}`)
-
-    // Update uptime metric
-    setDaemonUptime((Date.now() - this.startedAt) / 1000)
 
     // Check concurrency limit
     const activeTaskCount = getEffectiveActiveTaskCount({

@@ -663,6 +663,7 @@ export function recordWorktreeCreationDuration(durationMs: number): void {
 // ─── HTTP Server ───────────────────────────────────────────────────────────────
 
 export interface MetricsServer {
+  port: number
   stop: () => void
 }
 
@@ -673,6 +674,7 @@ export interface MetricsServer {
 export async function startMetricsServer(
   port: number = METRICS_PORT_DEFAULT,
   logger: typeof console = console,
+  onBeforeCollect?: () => void | Promise<void>,
 ): Promise<MetricsServer> {
   const server = Bun.serve({
     port,
@@ -680,6 +682,9 @@ export async function startMetricsServer(
       const url = new URL(req.url)
 
       if (url.pathname === METRICS_PATH) {
+        if (onBeforeCollect) {
+          await onBeforeCollect()
+        }
         const metrics = await getMetrics()
         return new Response(metrics, {
           headers: {
@@ -703,6 +708,7 @@ export async function startMetricsServer(
   logger.log(`[metrics] server listening on http://${server.hostname}:${server.port}${METRICS_PATH}`)
 
   return {
+    port: server.port ?? port,
     stop: () => {
       server.stop()
       logger.log('[metrics] server stopped')

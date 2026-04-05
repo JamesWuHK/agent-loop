@@ -14,6 +14,8 @@ import {
   setActiveWorktrees,
   setActivePrReviews,
   setActiveLeases,
+  setBlockedIssueResumes,
+  setBlockedIssueResumeAgeSeconds,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -29,6 +31,7 @@ import {
   getMetrics,
   getContentType,
   registry,
+  startMetricsServer,
 } from './metrics'
 
 describe('metrics', () => {
@@ -195,6 +198,8 @@ describe('metrics', () => {
     test('tracks active PR reviews and in-flight task gauges', async () => {
       setActivePrReviews(2)
       setActiveLeases(3)
+      setBlockedIssueResumes(1)
+      setBlockedIssueResumeAgeSeconds(45)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
@@ -205,6 +210,8 @@ describe('metrics', () => {
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_active_pr_reviews')
       expect(metrics).toContain('agent_loop_active_leases')
+      expect(metrics).toContain('agent_loop_blocked_issue_resumes')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_age_seconds')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')
@@ -299,6 +306,25 @@ describe('metrics', () => {
     test('returns correct content type for Prometheus', () => {
       const contentType = getContentType()
       expect(contentType).toContain('text/plain')
+    })
+  })
+
+  describe('startMetricsServer', () => {
+    test('refreshes gauges before serving metrics', async () => {
+      let refreshed = false
+      const server = await startMetricsServer(0, console, () => {
+        refreshed = true
+        setBlockedIssueResumeAgeSeconds(21)
+      })
+
+      try {
+        const body = await Bun.$`curl --noproxy '*' -s http://127.0.0.1:${server.port}/metrics`.quiet().text()
+
+        expect(refreshed).toBe(true)
+        expect(body).toContain('agent_loop_blocked_issue_resume_age_seconds 21')
+      } finally {
+        server.stop()
+      }
     })
   })
 
