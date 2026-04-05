@@ -118,6 +118,16 @@ const baseHealth: DaemonStatus & {
         reason: 'worker idle timeout',
       },
     ],
+    blockedIssueResumeCount: 1,
+    blockedIssueResumeDetails: [
+      {
+        issueNumber: 91,
+        prNumber: 110,
+        since: '2026-04-05T08:07:45.000Z',
+        durationSeconds: 45,
+        reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+      },
+    ],
     lastRecoveryActionAt: '2026-04-05T08:08:30.000Z',
     lastRecoveryActionKind: 'issue-process-idle-timeout',
     recentRecoveryActions: [
@@ -248,6 +258,7 @@ describe('status helpers', () => {
       activeLeases: 2,
       leaseHeartbeatAgeSeconds: 75,
       stalledWorkers: 1,
+      blockedIssueResumes: null,
       leaseConflicts: 1,
       rateLimitHits: 0,
     })
@@ -274,7 +285,9 @@ describe('status helpers', () => {
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
+    expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
+    expect(report).toContain('blocked resumes: issue#91<-pr#110 45s')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -321,12 +334,15 @@ describe('status helpers', () => {
     expect(report).toContain('pr-review#108 comment=18')
     expect(report).toContain('Stalled Workers')
     expect(report).toContain('issue-process#77 stuck 75s')
+    expect(report).toContain('Blocked Issue Resumes')
+    expect(report).toContain('issue#91<-pr#110 | blocked 45s')
     expect(report).toContain('Recent Recovery Actions')
     expect(report).toContain('issue-process-idle-timeout/recoverable | target=issue-process#77')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#77 | state=open | labels=agent:stale | warning=issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(report).toContain('merge-recovery: merged_initial=1')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
+    expect(report).toContain('blocked-issue-resumes: 0')
     expect(report).toContain('- review auto-fix push failures observed: 1')
   })
 
@@ -364,8 +380,10 @@ describe('status helpers', () => {
       })
       const report = formatDoctorReport(snapshot)
 
+      expect(snapshot.warnings).toContain('failed issue resumes blocked by linked PR state: issue#91<-pr#110')
       expect(snapshot.warnings).toContain('adoptable leases detected: issue-process#77')
       expect(snapshot.warnings).toContain('same target recovered multiple times recently: issue-process#77=2')
+      expect(report).toContain('- failed issue resumes blocked by linked PR state: issue#91<-pr#110')
       expect(report).toContain('- adoptable leases detected: issue-process#77')
       expect(report).toContain('- same target recovered multiple times recently: issue-process#77=2')
     } finally {

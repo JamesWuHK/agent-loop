@@ -9,6 +9,7 @@ import {
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
   getResumableIssueLinkedPrHandoff,
+  getFailedIssueResumeBlock,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
@@ -169,6 +170,16 @@ describe('daemon merge recovery helpers', () => {
           reason: 'idle timeout',
         },
       ],
+      blockedIssueResumeCount: 1,
+      blockedIssueResumeDetails: [
+        {
+          issueNumber: 91,
+          prNumber: 110,
+          since: '2026-04-05T08:09:45.000Z',
+          durationSeconds: 12,
+          reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+        },
+      ],
       lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
       lastRecoveryActionKind: 'issue-process-idle-timeout',
       recentRecoveryActions: [
@@ -220,6 +231,16 @@ describe('daemon merge recovery helpers', () => {
           since: '2026-04-05T08:10:30.000Z',
           durationSeconds: 30,
           reason: 'idle timeout',
+        },
+      ],
+      blockedIssueResumeCount: 1,
+      blockedIssueResumeDetails: [
+        {
+          issueNumber: 91,
+          prNumber: 110,
+          since: '2026-04-05T08:09:45.000Z',
+          durationSeconds: 12,
+          reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
         },
       ],
       lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
@@ -403,22 +424,41 @@ describe('daemon merge recovery helpers', () => {
 
   test('does not resume failed issues behind terminal human-needed PRs', () => {
     expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
       labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
     }, false)).toBe(false)
 
     expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
       labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
     }, true)).toBe(true)
 
     expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
       labels: [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.RETRY],
     }, false)).toBe(true)
 
     expect(shouldResumeFailedIssueWithLinkedPr({
+      number: 110,
       labels: [PR_REVIEW_LABELS.APPROVED],
     }, false)).toBe(true)
 
     expect(shouldResumeFailedIssueWithLinkedPr(null, false)).toBe(true)
+  })
+
+  test('describes blocked failed-issue resumes for terminal human-needed PRs', () => {
+    expect(getFailedIssueResumeBlock({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+    }, false)).toEqual({
+      prNumber: 110,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+    })
+
+    expect(getFailedIssueResumeBlock({
+      number: 110,
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }, true)).toBeNull()
   })
 
   test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {

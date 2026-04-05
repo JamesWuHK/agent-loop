@@ -19,6 +19,10 @@
  * - agent_loop_project_info: Gauge carrying project/runtime configuration labels
  * - agent_loop_concurrency_limit: Gauge of configured concurrency limit
  * - agent_loop_concurrency_policy: Gauge carrying requested/effective/cap concurrency values
+ * - agent_loop_active_leases: Gauge of active managed leases
+ * - agent_loop_lease_heartbeat_age_seconds: Gauge of oldest held lease heartbeat age
+ * - agent_loop_stalled_workers: Gauge of stalled workers tracked by the daemon
+ * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
@@ -325,6 +329,15 @@ export const stalledWorkers = new Gauge({
   registers: [registry],
 })
 
+/**
+ * Current number of failed issue resumes blocked by linked PR state.
+ */
+export const blockedIssueResumes = new Gauge({
+  name: 'agent_loop_blocked_issue_resumes',
+  help: 'Current number of failed issues that will not be auto-resumed because their linked PR is terminal or otherwise not resumable',
+  registers: [registry],
+})
+
 // ─── Histograms ────────────────────────────────────────────────────────────────
 
 /**
@@ -600,6 +613,13 @@ export function setLeaseHeartbeatAgeSeconds(ageSeconds: number): void {
  */
 export function setStalledWorkers(count: number): void {
   stalledWorkers.set(count)
+}
+
+/**
+ * Update blocked failed issue resume gauge.
+ */
+export function setBlockedIssueResumes(count: number): void {
+  blockedIssueResumes.set(count)
 }
 
 /**

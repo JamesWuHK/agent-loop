@@ -5,6 +5,7 @@ import type {
   ActiveLeaseRuntimeDetail,
   AgentConfig,
   AgentIssue,
+  BlockedIssueResumeRuntimeDetail,
   DaemonStatus,
   ManagedLease,
   ManagedLeaseComment,
@@ -46,6 +47,7 @@ import {
   recordRecoveryAction,
   recordWorkerIdleTimeout,
   setStalledWorkers,
+  setBlockedIssueResumes,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -105,6 +107,13 @@ interface StalledWorkerState {
   reason: string
 }
 
+interface BlockedIssueResumeState {
+  issueNumber: number
+  prNumber: number | null
+  since: string
+  reason: string
+}
+
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
@@ -113,6 +122,7 @@ export class AgentDaemon {
   private activeWorktrees = new Map<number, WorktreeInfo>()
   private activeLeaseReaders = new Map<string, ActiveLeaseRuntimeReader>()
   private stalledWorkers = new Map<string, StalledWorkerState>()
+  private blockedIssueResumes = new Map<number, BlockedIssueResumeState>()
   private recoveryActionHistory: RecoveryActionRuntimeDetail[] = []
   private lastRecoveryActionAt: string | null = null
   private lastRecoveryActionKind: string | null = null
@@ -218,6 +228,49 @@ export class AgentDaemon {
     this.lastRecoveryActionAt = now
     this.lastRecoveryActionKind = recoveryKind
     this.syncRuntimeMetrics()
+  }
+
+  private noteBlockedIssueResume(
+    issueNumber: number,
+    prNumber: number | null,
+    reason: string,
+  ): void {
+    const existing = this.blockedIssueResumes.get(issueNumber)
+    if (existing && existing.prNumber === prNumber && existing.reason === reason) {
+      return
+    }
+
+    const since = new Date().toISOString()
+    this.blockedIssueResumes.set(issueNumber, {
+      issueNumber,
+      prNumber,
+      since,
+      reason,
+    })
+    this.noteRecoveryAction('issue-resume-blocked', 'blocked', {
+      scope: 'issue-process',
+      targetNumber: issueNumber,
+      reason,
+    })
+  }
+
+  private clearBlockedIssueResume(issueNumber: number): void {
+    if (this.blockedIssueResumes.delete(issueNumber)) {
+      this.syncRuntimeMetrics()
+    }
+  }
+
+  private reconcileBlockedIssueResumes(issueNumbers: Set<number>): void {
+    let changed = false
+    for (const issueNumber of this.blockedIssueResumes.keys()) {
+      if (issueNumbers.has(issueNumber)) continue
+      this.blockedIssueResumes.delete(issueNumber)
+      changed = true
+    }
+
+    if (changed) {
+      this.syncRuntimeMetrics()
+    }
   }
 
   private noteRecoveryAction(
@@ -889,6 +942,8 @@ export class AgentDaemon {
     const issues = await listOpenAgentIssues(this.config)
     const prs = await listOpenAgentPullRequests(this.config)
     const now = Date.now()
+    const blockedIssueNumbers = new Set<number>()
+    let candidate: ResumableIssueCandidate | null = null
 
     for (const issue of issues) {
       const attempts = this.failedIssueResumeAttempts.get(issue.number) ?? 0
@@ -920,23 +975,32 @@ export class AgentDaemon {
         now,
         AgentDaemon.MAX_FAILED_ISSUE_RESUMES,
       )
-      if (!resumable) continue
-      if (
-        issue.state === 'failed'
-        && !shouldResumeFailedIssueWithLinkedPr(linkedPr, linkedPrCanResumeHumanNeededReview)
-      ) {
+      if (!resumable) {
+        this.clearBlockedIssueResume(issue.number)
         continue
       }
+      const blockedResume = issue.state === 'failed'
+        ? getFailedIssueResumeBlock(linkedPr, linkedPrCanResumeHumanNeededReview)
+        : null
+      if (blockedResume) {
+        blockedIssueNumbers.add(issue.number)
+        this.noteBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason)
+        continue
+      }
+      this.clearBlockedIssueResume(issue.number)
       if (!canAdoptLease) continue
 
-      return {
-        issue,
-        priorLease: latestLease,
-        requiresRemoteAdoption: !hasLocalWorktree,
+      if (!candidate) {
+        candidate = {
+          issue,
+          priorLease: latestLease,
+          requiresRemoteAdoption: !hasLocalWorktree,
+        }
       }
     }
 
-    return null
+    this.reconcileBlockedIssueResumes(blockedIssueNumbers)
+    return candidate
   }
 
   private async getActiveClaimMachine(issueNumber: number): Promise<string | null> {
@@ -2192,6 +2256,8 @@ export class AgentDaemon {
       activeLeaseDetails: this.getActiveLeaseDetails(),
       stalledWorkerCount: this.stalledWorkers.size,
       stalledWorkerDetails: this.getStalledWorkerDetails(),
+      blockedIssueResumeCount: this.blockedIssueResumes.size,
+      blockedIssueResumeDetails: this.getBlockedIssueResumeDetails(),
       lastRecoveryActionAt: this.lastRecoveryActionAt,
       lastRecoveryActionKind: this.lastRecoveryActionKind,
       recentRecoveryActions: [...this.recoveryActionHistory],
@@ -2209,6 +2275,7 @@ export class AgentDaemon {
     setActiveLeases(runtime.activeLeaseCount)
     setLeaseHeartbeatAgeSeconds(runtime.oldestLeaseHeartbeatAgeSeconds)
     setStalledWorkers(runtime.stalledWorkerCount)
+    setBlockedIssueResumes(runtime.blockedIssueResumeCount)
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {
@@ -2262,6 +2329,15 @@ export class AgentDaemon {
       }))
       .sort((left, right) => left.scope.localeCompare(right.scope) || left.targetNumber - right.targetNumber)
   }
+
+  private getBlockedIssueResumeDetails(now = Date.now()): BlockedIssueResumeRuntimeDetail[] {
+    return [...this.blockedIssueResumes.values()]
+      .map((blocked) => ({
+        ...blocked,
+        durationSeconds: getIsoAgeSeconds(blocked.since, now),
+      }))
+      .sort((left, right) => left.issueNumber - right.issueNumber)
+  }
 }
 
 function shouldReviewManagedPr(pr: Pick<ManagedPullRequest, 'labels'>): boolean {
@@ -2293,19 +2369,33 @@ export function getResumableIssueLinkedPrHandoff(
 }
 
 export function shouldResumeFailedIssueWithLinkedPr(
-  pr: Pick<ManagedPullRequest, 'labels'> | null,
+  pr: Pick<ManagedPullRequest, 'number' | 'labels'> | null,
   canResumeHumanNeededReview: boolean,
 ): boolean {
-  if (!pr) return true
-  if (shouldMergeManagedPr(pr)) return true
-  if (shouldReviewManagedPr(pr)) return true
+  return getFailedIssueResumeBlock(pr, canResumeHumanNeededReview) === null
+}
+
+export function getFailedIssueResumeBlock(
+  pr: Pick<ManagedPullRequest, 'number' | 'labels'> | null,
+  canResumeHumanNeededReview: boolean,
+): { prNumber: number | null; reason: string } | null {
+  if (!pr) return null
+  if (shouldMergeManagedPr(pr)) return null
+  if (shouldReviewManagedPr(pr)) return null
 
   const labels = new Set(pr.labels)
   if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) {
-    return canResumeHumanNeededReview
+    if (canResumeHumanNeededReview) return null
+    return {
+      prNumber: pr.number,
+      reason: `linked PR #${pr.number} is in terminal ${PR_REVIEW_LABELS.HUMAN_NEEDED}; automated review has no remaining structured retry path`,
+    }
   }
 
-  return false
+  return {
+    prNumber: pr.number,
+    reason: `linked PR #${pr.number} is not in a resumable automated state (${pr.labels.join(', ') || 'no agent labels'})`,
+  }
 }
 
 export function shouldClearFailedIssueResumeTrackingAfterFinalize(
@@ -2339,6 +2429,8 @@ export function buildDaemonRuntimeStatus(input: {
   activeLeaseDetails: ActiveLeaseRuntimeDetail[]
   stalledWorkerCount: number
   stalledWorkerDetails: StalledWorkerRuntimeDetail[]
+  blockedIssueResumeCount: number
+  blockedIssueResumeDetails: BlockedIssueResumeRuntimeDetail[]
   lastRecoveryActionAt: string | null
   lastRecoveryActionKind: string | null
   recentRecoveryActions: RecoveryActionRuntimeDetail[]
@@ -2361,6 +2453,8 @@ export function buildDaemonRuntimeStatus(input: {
     activeLeaseDetails: input.activeLeaseDetails,
     stalledWorkerCount: input.stalledWorkerCount,
     stalledWorkerDetails: input.stalledWorkerDetails,
+    blockedIssueResumeCount: input.blockedIssueResumeCount,
+    blockedIssueResumeDetails: input.blockedIssueResumeDetails,
     lastRecoveryActionAt: input.lastRecoveryActionAt,
     lastRecoveryActionKind: input.lastRecoveryActionKind,
     recentRecoveryActions: input.recentRecoveryActions,

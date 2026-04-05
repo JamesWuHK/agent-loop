@@ -192,6 +192,14 @@ export interface StalledWorkerRuntimeDetail {
   reason: string
 }
 
+export interface BlockedIssueResumeRuntimeDetail {
+  issueNumber: number
+  prNumber: number | null
+  since: string
+  durationSeconds: number
+  reason: string
+}
+
 export interface RecoveryActionRuntimeDetail {
   at: string
   kind: string
@@ -324,6 +332,8 @@ export interface DaemonStatus {
     activeLeaseDetails: ActiveLeaseRuntimeDetail[]
     stalledWorkerCount: number
     stalledWorkerDetails: StalledWorkerRuntimeDetail[]
+    blockedIssueResumeCount: number
+    blockedIssueResumeDetails: BlockedIssueResumeRuntimeDetail[]
     lastRecoveryActionAt: string | null
     lastRecoveryActionKind: string | null
     recentRecoveryActions: RecoveryActionRuntimeDetail[]
