@@ -137,6 +137,7 @@ describe('daemon merge recovery helpers', () => {
       startupRecoveryPending: true,
       failedIssueResumeAttemptCount: 3,
       failedIssueResumeCooldownCount: 2,
+      oldestBlockedIssueResumeAgeSeconds: 12,
       activeLeaseCount: 2,
       oldestLeaseHeartbeatAgeSeconds: 47,
       activeLeaseDetails: [
@@ -200,6 +201,7 @@ describe('daemon merge recovery helpers', () => {
       effectiveActiveTasks: 3,
       failedIssueResumeAttemptsTracked: 3,
       failedIssueResumeCooldownsTracked: 2,
+      oldestBlockedIssueResumeAgeSeconds: 12,
       activeLeaseCount: 2,
       oldestLeaseHeartbeatAgeSeconds: 47,
       activeLeaseDetails: [

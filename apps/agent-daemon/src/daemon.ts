@@ -48,6 +48,7 @@ import {
   recordWorkerIdleTimeout,
   setStalledWorkers,
   setBlockedIssueResumes,
+  setBlockedIssueResumeAgeSeconds,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -2251,6 +2252,7 @@ export class AgentDaemon {
       startupRecoveryPending: this.startupRecoveryPending,
       failedIssueResumeAttemptCount: this.failedIssueResumeAttempts.size,
       failedIssueResumeCooldownCount: this.failedIssueResumeCooldownUntil.size,
+      oldestBlockedIssueResumeAgeSeconds: this.getOldestBlockedIssueResumeAgeSeconds(),
       activeLeaseCount: this.activeLeaseReaders.size,
       oldestLeaseHeartbeatAgeSeconds: this.getOldestLeaseHeartbeatAgeSeconds(),
       activeLeaseDetails: this.getActiveLeaseDetails(),
@@ -2276,11 +2278,21 @@ export class AgentDaemon {
     setLeaseHeartbeatAgeSeconds(runtime.oldestLeaseHeartbeatAgeSeconds)
     setStalledWorkers(runtime.stalledWorkerCount)
     setBlockedIssueResumes(runtime.blockedIssueResumeCount)
+    setBlockedIssueResumeAgeSeconds(runtime.oldestBlockedIssueResumeAgeSeconds)
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {
     const ages = [...this.activeLeaseReaders.values()]
       .map((reader) => reader.readHeartbeatAgeSeconds())
+      .filter((age) => Number.isFinite(age))
+
+    if (ages.length === 0) return 0
+    return Math.max(...ages)
+  }
+
+  private getOldestBlockedIssueResumeAgeSeconds(now = Date.now()): number {
+    const ages = [...this.blockedIssueResumes.values()]
+      .map((blocked) => getIsoAgeSeconds(blocked.since, now))
       .filter((age) => Number.isFinite(age))
 
     if (ages.length === 0) return 0
@@ -2424,6 +2436,7 @@ export function buildDaemonRuntimeStatus(input: {
   startupRecoveryPending: boolean
   failedIssueResumeAttemptCount: number
   failedIssueResumeCooldownCount: number
+  oldestBlockedIssueResumeAgeSeconds: number
   activeLeaseCount: number
   oldestLeaseHeartbeatAgeSeconds: number
   activeLeaseDetails: ActiveLeaseRuntimeDetail[]
@@ -2448,6 +2461,7 @@ export function buildDaemonRuntimeStatus(input: {
     }),
     failedIssueResumeAttemptsTracked: input.failedIssueResumeAttemptCount,
     failedIssueResumeCooldownsTracked: input.failedIssueResumeCooldownCount,
+    oldestBlockedIssueResumeAgeSeconds: input.oldestBlockedIssueResumeAgeSeconds,
     activeLeaseCount: input.activeLeaseCount,
     oldestLeaseHeartbeatAgeSeconds: input.oldestLeaseHeartbeatAgeSeconds,
     activeLeaseDetails: input.activeLeaseDetails,

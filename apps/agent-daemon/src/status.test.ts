@@ -67,6 +67,7 @@ const baseHealth: DaemonStatus & {
     effectiveActiveTasks: 2,
     failedIssueResumeAttemptsTracked: 1,
     failedIssueResumeCooldownsTracked: 1,
+    oldestBlockedIssueResumeAgeSeconds: 45,
     activeLeaseCount: 2,
     oldestLeaseHeartbeatAgeSeconds: 75,
     activeLeaseDetails: [
@@ -184,6 +185,8 @@ agent_loop_worker_idle_timeouts_total{scope="issue-process"} 2
 agent_loop_active_leases 2
 agent_loop_lease_heartbeat_age_seconds 75
 agent_loop_stalled_workers 1
+agent_loop_blocked_issue_resumes 1
+agent_loop_blocked_issue_resume_age_seconds 45
 agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
@@ -259,7 +262,8 @@ describe('status helpers', () => {
       activeLeases: 2,
       leaseHeartbeatAgeSeconds: 75,
       stalledWorkers: 1,
-      blockedIssueResumes: null,
+      blockedIssueResumes: 1,
+      blockedIssueResumeAgeSeconds: 45,
       leaseConflicts: 1,
       rateLimitHits: 0,
     })
@@ -286,7 +290,7 @@ describe('status helpers', () => {
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
-    expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1')
+    expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
@@ -343,7 +347,9 @@ describe('status helpers', () => {
     expect(report).toContain('issue-process#77 | state=open | labels=agent:stale | warning=issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(report).toContain('merge-recovery: merged_initial=1')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
-    expect(report).toContain('blocked-issue-resumes: 0')
+    expect(report).toContain('blocked-issue-resumes: 1')
+    expect(report).toContain('blocked-issue-resume-age-seconds: 45')
+    expect(report).toContain('oldest blocked issue resume age: 45s')
     expect(report).toContain('- review auto-fix push failures observed: 1')
   })
 
@@ -387,6 +393,81 @@ describe('status helpers', () => {
       expect(report).toContain('- failed issue resumes blocked by linked PR state: issue#91<-pr#110')
       expect(report).toContain('- adoptable leases detected: issue-process#77')
       expect(report).toContain('- same target recovered multiple times recently: issue-process#77=2')
+    } finally {
+      healthServer.stop(true)
+      metricsServer.stop(true)
+    }
+  })
+
+  test('doctor warnings escalate long-lived and repeatedly blocked issue resumes', async () => {
+    const metricsServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => new Response(metricsText, {
+        headers: { 'content-type': 'text/plain' },
+      }),
+    })
+
+    const healthPayload = {
+      ...baseHealth,
+      runtime: {
+        ...baseHealth.runtime,
+        oldestBlockedIssueResumeAgeSeconds: 601,
+        blockedIssueResumeDetails: [
+          {
+            issueNumber: 91,
+            prNumber: 110,
+            since: '2026-04-05T08:00:00.000Z',
+            durationSeconds: 601,
+            reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          },
+        ],
+        recentRecoveryActions: [
+          {
+            at: '2026-04-05T08:10:00.000Z',
+            kind: 'issue-resume-blocked',
+            outcome: 'blocked',
+            scope: 'issue-process',
+            targetNumber: 91,
+            reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          },
+          {
+            at: '2026-04-05T08:05:00.000Z',
+            kind: 'issue-resume-blocked',
+            outcome: 'blocked',
+            scope: 'issue-process',
+            targetNumber: 91,
+            reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          },
+        ],
+      },
+      endpoints: {
+        ...baseHealth.endpoints,
+        metrics: {
+          host: '127.0.0.1',
+          port: metricsServer.port,
+          path: '/metrics',
+        },
+      },
+    }
+
+    const healthServer = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch: () => Response.json(healthPayload),
+    })
+
+    try {
+      const snapshot = await collectDaemonObservability({
+        healthHost: '127.0.0.1',
+        healthPort: healthServer.port,
+      })
+      const report = formatDoctorReport(snapshot)
+
+      expect(snapshot.warnings).toContain('blocked issue resumes older than 300s: issue#91<-pr#110=601s')
+      expect(snapshot.warnings).toContain('same failed issue blocked multiple times recently: issue-process#91=2')
+      expect(report).toContain('- blocked issue resumes older than 300s: issue#91<-pr#110=601s')
+      expect(report).toContain('- same failed issue blocked multiple times recently: issue-process#91=2')
     } finally {
       healthServer.stop(true)
       metricsServer.stop(true)

@@ -327,6 +327,7 @@ export interface DaemonStatus {
     effectiveActiveTasks: number
     failedIssueResumeAttemptsTracked: number
     failedIssueResumeCooldownsTracked: number
+    oldestBlockedIssueResumeAgeSeconds: number
     activeLeaseCount: number
     oldestLeaseHeartbeatAgeSeconds: number
     activeLeaseDetails: ActiveLeaseRuntimeDetail[]

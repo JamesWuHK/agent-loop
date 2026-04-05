@@ -23,6 +23,7 @@
  * - agent_loop_lease_heartbeat_age_seconds: Gauge of oldest held lease heartbeat age
  * - agent_loop_stalled_workers: Gauge of stalled workers tracked by the daemon
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
+ * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
@@ -338,6 +339,15 @@ export const blockedIssueResumes = new Gauge({
   registers: [registry],
 })
 
+/**
+ * Age in seconds of the oldest blocked failed issue resume.
+ */
+export const blockedIssueResumeAgeSeconds = new Gauge({
+  name: 'agent_loop_blocked_issue_resume_age_seconds',
+  help: 'Age in seconds of the oldest failed issue resume blocked by linked PR state',
+  registers: [registry],
+})
+
 // ─── Histograms ────────────────────────────────────────────────────────────────
 
 /**
@@ -620,6 +630,13 @@ export function setStalledWorkers(count: number): void {
  */
 export function setBlockedIssueResumes(count: number): void {
   blockedIssueResumes.set(count)
+}
+
+/**
+ * Update oldest blocked failed issue resume age gauge.
+ */
+export function setBlockedIssueResumeAgeSeconds(ageSeconds: number): void {
+  blockedIssueResumeAgeSeconds.set(ageSeconds)
 }
 
 /**
