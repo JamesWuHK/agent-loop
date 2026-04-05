@@ -198,6 +198,9 @@ export interface BlockedIssueResumeRuntimeDetail {
   since: string
   durationSeconds: number
   reason: string
+  escalationCount: number
+  lastEscalatedAt: string | null
+  lastEscalationAgeSeconds: number | null
 }
 
 export interface RecoveryActionRuntimeDetail {
@@ -334,10 +337,12 @@ export interface DaemonStatus {
     stalledWorkerCount: number
     stalledWorkerDetails: StalledWorkerRuntimeDetail[]
     blockedIssueResumeCount: number
+    blockedIssueResumeEscalationCount: number
     blockedIssueResumeDetails: BlockedIssueResumeRuntimeDetail[]
     lastRecoveryActionAt: string | null
     lastRecoveryActionKind: string | null
     recentRecoveryActions: RecoveryActionRuntimeDetail[]
+    oldestBlockedIssueResumeEscalationAgeSeconds: number
   }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null

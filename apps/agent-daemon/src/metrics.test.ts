@@ -16,6 +16,8 @@ import {
   setActiveLeases,
   setBlockedIssueResumes,
   setBlockedIssueResumeAgeSeconds,
+  setBlockedIssueResumeEscalations,
+  setBlockedIssueResumeEscalationAgeSeconds,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -200,6 +202,8 @@ describe('metrics', () => {
       setActiveLeases(3)
       setBlockedIssueResumes(1)
       setBlockedIssueResumeAgeSeconds(45)
+      setBlockedIssueResumeEscalations(1)
+      setBlockedIssueResumeEscalationAgeSeconds(15)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
@@ -212,6 +216,8 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_active_leases')
       expect(metrics).toContain('agent_loop_blocked_issue_resumes')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_age_seconds')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_escalations')
+      expect(metrics).toContain('agent_loop_blocked_issue_resume_escalation_age_seconds')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')

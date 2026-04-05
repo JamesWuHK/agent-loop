@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_HEALTH_SERVER_HOST,
   DEFAULT_HEALTH_SERVER_PORT,
+  BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS,
   HEALTH_PATH,
   getFailedIssueResumeBlock,
 } from './daemon'
@@ -32,8 +33,6 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
 ] as const
 const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
-const BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS = 5 * 60
-
 export interface DaemonHealthPayload extends DaemonStatus {
   status: 'running' | 'stopped'
   mode: string
@@ -52,6 +51,8 @@ export interface DaemonMetricSummary {
   stalledWorkers: number | null
   blockedIssueResumes: number | null
   blockedIssueResumeAgeSeconds: number | null
+  blockedIssueResumeEscalations: number | null
+  blockedIssueResumeEscalationAgeSeconds: number | null
   leaseConflicts: number
   rateLimitHits: number
 }
@@ -269,8 +270,10 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
 
   const { health } = snapshot
   const blockedIssueResumeCount = health.runtime.blockedIssueResumeCount ?? 0
+  const blockedIssueResumeEscalationCount = health.runtime.blockedIssueResumeEscalationCount ?? 0
   const blockedIssueResumeDetails = health.runtime.blockedIssueResumeDetails ?? []
   const oldestBlockedIssueResumeAgeSeconds = health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
+  const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
   const lines = [
     `daemon: ${health.status} v${health.version} (${health.mode})`,
     `repo: ${health.repo}`,
@@ -280,7 +283,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `runtime: active ${health.runtime.effectiveActiveTasks}/${health.concurrency} | worktrees ${health.activeWorktrees.length} | pr reviews ${health.runtime.activePrReviews} | issue loop ${formatBoolean(health.runtime.inFlightIssueProcess)} | review loop ${formatBoolean(health.runtime.inFlightPrReview)}`,
     `recovery: heartbeat ${health.recovery.heartbeatIntervalMs}ms | ttl ${health.recovery.leaseTtlMs}ms | idle ${health.recovery.workerIdleTimeoutMs}ms | adopt backoff ${health.recovery.leaseAdoptionBackoffMs}ms`,
     `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
-    `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)}`,
+    `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)} | escalated ${blockedIssueResumeEscalationCount} | oldest escalation ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'}`,
   ]
 
@@ -346,8 +349,10 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
 
   const { health } = snapshot
   const blockedIssueResumeCount = health.runtime.blockedIssueResumeCount ?? 0
+  const blockedIssueResumeEscalationCount = health.runtime.blockedIssueResumeEscalationCount ?? 0
   const blockedIssueResumeDetails = health.runtime.blockedIssueResumeDetails ?? []
   const oldestBlockedIssueResumeAgeSeconds = health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
+  const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
   const worktreeLines = health.activeWorktrees.length === 0
     ? ['none']
     : health.activeWorktrees.map((worktree) => `#${worktree.issueNumber} ${worktree.branch} ${worktree.path}`)
@@ -377,6 +382,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         `worker-idle-timeouts: ${formatInlineKeyValue(snapshot.metrics.workerIdleTimeouts) || 'none'}`,
         `blocked-issue-resumes: ${snapshot.metrics.blockedIssueResumes ?? 0}`,
         `blocked-issue-resume-age-seconds: ${snapshot.metrics.blockedIssueResumeAgeSeconds ?? 0}`,
+        `blocked-issue-resume-escalations: ${snapshot.metrics.blockedIssueResumeEscalations ?? 0}`,
+        `blocked-issue-resume-escalation-age-seconds: ${snapshot.metrics.blockedIssueResumeEscalationAgeSeconds ?? 0}`,
         `recovery-actions: ${formatRecoveryActionSummary(snapshot.metrics.recoveryActions)}`,
         `rate-limit-hits: ${snapshot.metrics.rateLimitHits}`,
       ]
@@ -418,6 +425,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `stalled workers: ${health.runtime.stalledWorkerCount}`,
     `blocked issue resumes: ${blockedIssueResumeCount}`,
     `oldest blocked issue resume age: ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)}`,
+    `blocked issue resume escalations: ${blockedIssueResumeEscalationCount}`,
+    `oldest blocked issue resume escalation age: ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
     `last recovery action: ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `failed issue resume attempts tracked: ${health.runtime.failedIssueResumeAttemptsTracked}`,
     `failed issue resume cooldowns tracked: ${health.runtime.failedIssueResumeCooldownsTracked}`,
@@ -463,6 +472,8 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     stalledWorkers: null,
     blockedIssueResumes: null,
     blockedIssueResumeAgeSeconds: null,
+    blockedIssueResumeEscalations: null,
+    blockedIssueResumeEscalationAgeSeconds: null,
     leaseConflicts: 0,
     rateLimitHits: 0,
   }
@@ -505,6 +516,12 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_blocked_issue_resume_age_seconds':
         summary.blockedIssueResumeAgeSeconds = sample.value
+        break
+      case 'agent_loop_blocked_issue_resume_escalations':
+        summary.blockedIssueResumeEscalations = sample.value
+        break
+      case 'agent_loop_blocked_issue_resume_escalation_age_seconds':
+        summary.blockedIssueResumeEscalationAgeSeconds = sample.value
         break
       case 'agent_loop_lease_conflicts_total':
         summary.leaseConflicts += sample.value
@@ -600,6 +617,12 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
         ? `blocked issue resumes older than ${formatNullableSeconds(BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS)}: ${longBlocked.join(', ')}`
         : `one or more blocked issue resumes are older than ${formatNullableSeconds(BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS)}`,
     )
+  }
+  const longBlockedWithoutEscalation = blockedIssueResumeDetails
+    .filter((blocked) => blocked.durationSeconds >= BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS && (blocked.escalationCount ?? 0) === 0)
+    .map((blocked) => formatBlockedIssueResumeIdentity(blocked))
+  if (longBlockedWithoutEscalation.length > 0) {
+    warnings.push(`long blocked issue resumes without GitHub escalation: ${longBlockedWithoutEscalation.join(', ')}`)
   }
   const adoptableLeases = snapshot.health.runtime.activeLeaseDetails.filter((lease) => lease.adoptable)
   if (adoptableLeases.length > 0) {
@@ -814,7 +837,11 @@ function formatBlockedIssueResumeInlineSummary(
 ): string {
   const rendered = details.slice(0, 3).map((blocked) => {
     const linkedPr = blocked.prNumber === null ? 'no-pr' : `pr#${blocked.prNumber}`
-    return `issue#${blocked.issueNumber}<-${linkedPr} ${formatNullableSeconds(blocked.durationSeconds)}`
+    const escalationCount = blocked.escalationCount ?? 0
+    const escalation = escalationCount > 0
+      ? ` esc=${escalationCount}/${formatNullableSeconds(blocked.lastEscalationAgeSeconds ?? null)}`
+      : ''
+    return `issue#${blocked.issueNumber}<-${linkedPr} ${formatNullableSeconds(blocked.durationSeconds)}${escalation}`
   })
 
   if (details.length > 3) {
@@ -846,7 +873,7 @@ function formatStalledWorkerLine(worker: DaemonHealthPayload['runtime']['stalled
 function formatBlockedIssueResumeDoctorLine(
   blocked: DaemonHealthPayload['runtime']['blockedIssueResumeDetails'][number],
 ): string {
-  return `${formatBlockedIssueResumeIdentity(blocked)} | blocked ${formatNullableSeconds(blocked.durationSeconds)} | since ${blocked.since} | ${blocked.reason}`
+  return `${formatBlockedIssueResumeIdentity(blocked)} | blocked ${formatNullableSeconds(blocked.durationSeconds)} | since ${blocked.since} | escalations=${blocked.escalationCount ?? 0} | last_escalation=${blocked.lastEscalatedAt ?? 'never'} | escalation_age=${formatNullableSeconds(blocked.lastEscalationAgeSeconds ?? null)} | ${blocked.reason}`
 }
 
 function formatRecoveryActionDoctorLine(action: DaemonHealthPayload['runtime']['recentRecoveryActions'][number]): string {

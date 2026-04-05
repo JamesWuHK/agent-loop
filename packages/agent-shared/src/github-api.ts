@@ -410,6 +410,30 @@ export async function transitionIssueState(
   )
 }
 
+export async function commentOnIssue(
+  issueNumber: number,
+  body: string,
+  config: AgentConfig,
+): Promise<IssueComment> {
+  const response = await withTempJsonFile(
+    'agent-loop-issue-comment',
+    { body },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/issues/${issueNumber}/comments`,
+      '-X',
+      'POST',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(`api issues/${issueNumber}/comments create`, response.exitCode, response.stderr)
+  }
+
+  return mapRawIssueComment(JSON.parse(response.stdout) as RawIssueComment)
+}
+
 // ─── PR: check existing / create ──────────────────────────────────────────────
 
 export interface PrCheckResult {

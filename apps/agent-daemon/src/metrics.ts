@@ -348,6 +348,24 @@ export const blockedIssueResumeAgeSeconds = new Gauge({
   registers: [registry],
 })
 
+/**
+ * Current number of blocked failed issue resumes that have at least one GitHub escalation comment.
+ */
+export const blockedIssueResumeEscalations = new Gauge({
+  name: 'agent_loop_blocked_issue_resume_escalations',
+  help: 'Current number of blocked failed issue resumes that have emitted at least one GitHub escalation comment',
+  registers: [registry],
+})
+
+/**
+ * Age in seconds of the oldest blocked failed issue resume escalation comment.
+ */
+export const blockedIssueResumeEscalationAgeSeconds = new Gauge({
+  name: 'agent_loop_blocked_issue_resume_escalation_age_seconds',
+  help: 'Age in seconds of the oldest GitHub escalation comment for a blocked failed issue resume',
+  registers: [registry],
+})
+
 // ─── Histograms ────────────────────────────────────────────────────────────────
 
 /**
@@ -637,6 +655,20 @@ export function setBlockedIssueResumes(count: number): void {
  */
 export function setBlockedIssueResumeAgeSeconds(ageSeconds: number): void {
   blockedIssueResumeAgeSeconds.set(ageSeconds)
+}
+
+/**
+ * Update blocked failed issue resume escalation gauge.
+ */
+export function setBlockedIssueResumeEscalations(count: number): void {
+  blockedIssueResumeEscalations.set(count)
+}
+
+/**
+ * Update oldest blocked failed issue resume escalation age gauge.
+ */
+export function setBlockedIssueResumeEscalationAgeSeconds(ageSeconds: number): void {
+  blockedIssueResumeEscalationAgeSeconds.set(ageSeconds)
 }
 
 /**

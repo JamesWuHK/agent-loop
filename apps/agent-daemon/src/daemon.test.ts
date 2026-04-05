@@ -5,12 +5,16 @@ import { join } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
 import {
   AgentDaemon,
+  buildBlockedIssueResumeEscalationComment,
   buildDaemonRuntimeStatus,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  extractBlockedIssueResumeEscalationComment,
   getResumableIssueLinkedPrHandoff,
   getFailedIssueResumeBlock,
+  listBlockedIssueResumeEscalationComments,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
+  shouldEscalateBlockedIssueResume,
   shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
   isRetryableDaemonLoopError,
@@ -172,6 +176,7 @@ describe('daemon merge recovery helpers', () => {
         },
       ],
       blockedIssueResumeCount: 1,
+      blockedIssueResumeEscalationCount: 1,
       blockedIssueResumeDetails: [
         {
           issueNumber: 91,
@@ -179,6 +184,9 @@ describe('daemon merge recovery helpers', () => {
           since: '2026-04-05T08:09:45.000Z',
           durationSeconds: 12,
           reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          escalationCount: 1,
+          lastEscalatedAt: '2026-04-05T08:10:45.000Z',
+          lastEscalationAgeSeconds: 6,
         },
       ],
       lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
@@ -193,6 +201,7 @@ describe('daemon merge recovery helpers', () => {
           reason: 'idle timeout',
         },
       ],
+      oldestBlockedIssueResumeEscalationAgeSeconds: 6,
     })).toEqual({
       activePrReviews: 2,
       inFlightIssueProcess: true,
@@ -236,6 +245,7 @@ describe('daemon merge recovery helpers', () => {
         },
       ],
       blockedIssueResumeCount: 1,
+      blockedIssueResumeEscalationCount: 1,
       blockedIssueResumeDetails: [
         {
           issueNumber: 91,
@@ -243,6 +253,9 @@ describe('daemon merge recovery helpers', () => {
           since: '2026-04-05T08:09:45.000Z',
           durationSeconds: 12,
           reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+          escalationCount: 1,
+          lastEscalatedAt: '2026-04-05T08:10:45.000Z',
+          lastEscalationAgeSeconds: 6,
         },
       ],
       lastRecoveryActionAt: '2026-04-05T08:11:00.000Z',
@@ -257,7 +270,85 @@ describe('daemon merge recovery helpers', () => {
           reason: 'idle timeout',
         },
       ],
+      oldestBlockedIssueResumeEscalationAgeSeconds: 6,
     })
+  })
+
+  test('round-trips blocked issue resume escalation comments', () => {
+    const comment = buildBlockedIssueResumeEscalationComment({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+
+    expect(extractBlockedIssueResumeEscalationComment(comment)).toEqual({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+  })
+
+  test('finds blocked issue resume escalations for the same issue and linked PR', () => {
+    const body = buildBlockedIssueResumeEscalationComment({
+      issueNumber: 91,
+      prNumber: 110,
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      escalatedAt: '2026-04-05T08:10:00.000Z',
+      thresholdSeconds: 300,
+      reason: 'blocked',
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-codex-dev-1',
+    })
+
+    const matches = listBlockedIssueResumeEscalationComments([
+      {
+        commentId: 1,
+        body,
+        createdAt: '2026-04-05T08:10:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
+      },
+      {
+        commentId: 2,
+        body: body.replace('"prNumber":110', '"prNumber":111'),
+        createdAt: '2026-04-05T08:11:00.000Z',
+        updatedAt: '2026-04-05T08:11:00.000Z',
+      },
+    ], 91, 110)
+
+    expect(matches).toHaveLength(1)
+    expect(matches[0]?.commentId).toBe(1)
+  })
+
+  test('only escalates blocked issue resumes after threshold and outside cooldown', () => {
+    const now = Date.parse('2026-04-05T08:10:00.000Z')
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:09:10.000Z',
+      lastEscalatedAt: null,
+      now,
+    })).toBe(false)
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      lastEscalatedAt: '2026-04-05T08:05:00.000Z',
+      now,
+    })).toBe(false)
+
+    expect(shouldEscalateBlockedIssueResume({
+      blockedSince: '2026-04-05T08:00:00.000Z',
+      lastEscalatedAt: '2026-04-05T07:30:00.000Z',
+      now,
+    })).toBe(true)
   })
 
   test('treats transient network-style daemon errors as retryable', () => {

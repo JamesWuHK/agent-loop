@@ -68,6 +68,7 @@ const baseHealth: DaemonStatus & {
     failedIssueResumeAttemptsTracked: 1,
     failedIssueResumeCooldownsTracked: 1,
     oldestBlockedIssueResumeAgeSeconds: 45,
+    oldestBlockedIssueResumeEscalationAgeSeconds: 15,
     activeLeaseCount: 2,
     oldestLeaseHeartbeatAgeSeconds: 75,
     activeLeaseDetails: [
@@ -121,6 +122,7 @@ const baseHealth: DaemonStatus & {
       },
     ],
     blockedIssueResumeCount: 1,
+    blockedIssueResumeEscalationCount: 1,
     blockedIssueResumeDetails: [
       {
         issueNumber: 91,
@@ -128,6 +130,9 @@ const baseHealth: DaemonStatus & {
         since: '2026-04-05T08:07:45.000Z',
         durationSeconds: 45,
         reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+        escalationCount: 1,
+        lastEscalatedAt: '2026-04-05T08:08:15.000Z',
+        lastEscalationAgeSeconds: 15,
       },
     ],
     lastRecoveryActionAt: '2026-04-05T08:08:30.000Z',
@@ -187,6 +192,8 @@ agent_loop_lease_heartbeat_age_seconds 75
 agent_loop_stalled_workers 1
 agent_loop_blocked_issue_resumes 1
 agent_loop_blocked_issue_resume_age_seconds 45
+agent_loop_blocked_issue_resume_escalations 1
+agent_loop_blocked_issue_resume_escalation_age_seconds 15
 agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
@@ -264,6 +271,8 @@ describe('status helpers', () => {
       stalledWorkers: 1,
       blockedIssueResumes: 1,
       blockedIssueResumeAgeSeconds: 45,
+      blockedIssueResumeEscalations: 1,
+      blockedIssueResumeEscalationAgeSeconds: 15,
       leaseConflicts: 1,
       rateLimitHits: 0,
     })
@@ -290,9 +299,9 @@ describe('status helpers', () => {
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
-    expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s')
+    expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
-    expect(report).toContain('blocked resumes: issue#91<-pr#110 45s')
+    expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -413,6 +422,8 @@ describe('status helpers', () => {
       runtime: {
         ...baseHealth.runtime,
         oldestBlockedIssueResumeAgeSeconds: 601,
+        oldestBlockedIssueResumeEscalationAgeSeconds: 0,
+        blockedIssueResumeEscalationCount: 0,
         blockedIssueResumeDetails: [
           {
             issueNumber: 91,
@@ -420,6 +431,9 @@ describe('status helpers', () => {
             since: '2026-04-05T08:00:00.000Z',
             durationSeconds: 601,
             reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+            escalationCount: 0,
+            lastEscalatedAt: null,
+            lastEscalationAgeSeconds: null,
           },
         ],
         recentRecoveryActions: [
@@ -466,8 +480,10 @@ describe('status helpers', () => {
 
       expect(snapshot.warnings).toContain('blocked issue resumes older than 300s: issue#91<-pr#110=601s')
       expect(snapshot.warnings).toContain('same failed issue blocked multiple times recently: issue-process#91=2')
+      expect(snapshot.warnings).toContain('long blocked issue resumes without GitHub escalation: issue#91<-pr#110')
       expect(report).toContain('- blocked issue resumes older than 300s: issue#91<-pr#110=601s')
       expect(report).toContain('- same failed issue blocked multiple times recently: issue-process#91=2')
+      expect(report).toContain('- long blocked issue resumes without GitHub escalation: issue#91<-pr#110')
     } finally {
       healthServer.stop(true)
       metricsServer.stop(true)

@@ -7,6 +7,7 @@ import type {
   AgentIssue,
   BlockedIssueResumeRuntimeDetail,
   DaemonStatus,
+  IssueComment,
   ManagedLease,
   ManagedLeaseComment,
   ManagedLeaseScope,
@@ -15,7 +16,7 @@ import type {
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
 } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
 import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
@@ -49,6 +50,8 @@ import {
   setStalledWorkers,
   setBlockedIssueResumes,
   setBlockedIssueResumeAgeSeconds,
+  setBlockedIssueResumeEscalations,
+  setBlockedIssueResumeEscalationAgeSeconds,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -82,6 +85,9 @@ const RETRYABLE_DAEMON_ERROR_PATTERNS = [
   'socket hang up',
   'no route to host',
 ] as const
+const BLOCKED_ISSUE_RESUME_ESCALATION_COOLDOWN_SECONDS = 30 * 60
+const BLOCKED_ISSUE_RESUME_ESCALATION_COMMENT_PREFIX = '<!-- agent-loop:issue-resume-blocked '
+export const BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS = 5 * 60
 
 interface ResumableIssueCandidate {
   issue: AgentIssue
@@ -113,6 +119,23 @@ interface BlockedIssueResumeState {
   prNumber: number | null
   since: string
   reason: string
+  escalationCount: number
+  lastEscalatedAt: string | null
+}
+
+export interface BlockedIssueResumeEscalationComment {
+  issueNumber: number
+  prNumber: number | null
+  blockedSince: string
+  escalatedAt: string
+  thresholdSeconds: number
+  reason: string
+  machineId: string
+  daemonInstanceId: string
+}
+
+export interface BlockedIssueResumeEscalationRecord extends IssueComment {
+  escalation: BlockedIssueResumeEscalationComment
 }
 
 export class AgentDaemon {
@@ -247,6 +270,8 @@ export class AgentDaemon {
       prNumber,
       since,
       reason,
+      escalationCount: 0,
+      lastEscalatedAt: null,
     })
     this.noteRecoveryAction('issue-resume-blocked', 'blocked', {
       scope: 'issue-process',
@@ -991,6 +1016,7 @@ export class AgentDaemon {
       if (blockedResume) {
         blockedIssueNumbers.add(issue.number)
         this.noteBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason)
+        await this.maybeEscalateBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason, comments)
         continue
       }
       this.clearBlockedIssueResume(issue.number)
@@ -2264,10 +2290,12 @@ export class AgentDaemon {
       stalledWorkerCount: this.stalledWorkers.size,
       stalledWorkerDetails: this.getStalledWorkerDetails(),
       blockedIssueResumeCount: this.blockedIssueResumes.size,
+      blockedIssueResumeEscalationCount: this.getBlockedIssueResumeEscalationCount(),
       blockedIssueResumeDetails: this.getBlockedIssueResumeDetails(),
       lastRecoveryActionAt: this.lastRecoveryActionAt,
       lastRecoveryActionKind: this.lastRecoveryActionKind,
       recentRecoveryActions: [...this.recoveryActionHistory],
+      oldestBlockedIssueResumeEscalationAgeSeconds: this.getOldestBlockedIssueResumeEscalationAgeSeconds(),
     })
   }
 
@@ -2284,6 +2312,8 @@ export class AgentDaemon {
     setStalledWorkers(runtime.stalledWorkerCount)
     setBlockedIssueResumes(runtime.blockedIssueResumeCount)
     setBlockedIssueResumeAgeSeconds(runtime.oldestBlockedIssueResumeAgeSeconds)
+    setBlockedIssueResumeEscalations(runtime.blockedIssueResumeEscalationCount)
+    setBlockedIssueResumeEscalationAgeSeconds(runtime.oldestBlockedIssueResumeEscalationAgeSeconds)
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {
@@ -2299,6 +2329,21 @@ export class AgentDaemon {
     const ages = [...this.blockedIssueResumes.values()]
       .map((blocked) => getIsoAgeSeconds(blocked.since, now))
       .filter((age) => Number.isFinite(age))
+
+    if (ages.length === 0) return 0
+    return Math.max(...ages)
+  }
+
+  private getBlockedIssueResumeEscalationCount(): number {
+    return [...this.blockedIssueResumes.values()]
+      .filter((blocked) => blocked.escalationCount > 0)
+      .length
+  }
+
+  private getOldestBlockedIssueResumeEscalationAgeSeconds(now = Date.now()): number {
+    const ages = [...this.blockedIssueResumes.values()]
+      .map((blocked) => blocked.lastEscalatedAt ? getIsoAgeSeconds(blocked.lastEscalatedAt, now) : null)
+      .filter((age): age is number => age !== null && Number.isFinite(age))
 
     if (ages.length === 0) return 0
     return Math.max(...ages)
@@ -2352,8 +2397,92 @@ export class AgentDaemon {
       .map((blocked) => ({
         ...blocked,
         durationSeconds: getIsoAgeSeconds(blocked.since, now),
+        lastEscalationAgeSeconds: blocked.lastEscalatedAt
+          ? getIsoAgeSeconds(blocked.lastEscalatedAt, now)
+          : null,
       }))
       .sort((left, right) => left.issueNumber - right.issueNumber)
+  }
+
+  private syncBlockedIssueResumeEscalationState(
+    issueNumber: number,
+    prNumber: number | null,
+    issueComments: IssueComment[],
+  ): void {
+    const existing = this.blockedIssueResumes.get(issueNumber)
+    if (!existing) return
+
+    const summary = summarizeBlockedIssueResumeEscalations(issueComments, issueNumber, prNumber)
+    if (
+      existing.escalationCount === summary.escalationCount
+      && existing.lastEscalatedAt === summary.lastEscalatedAt
+    ) {
+      return
+    }
+
+    this.blockedIssueResumes.set(issueNumber, {
+      ...existing,
+      escalationCount: summary.escalationCount,
+      lastEscalatedAt: summary.lastEscalatedAt,
+    })
+    this.syncRuntimeMetrics()
+  }
+
+  private async maybeEscalateBlockedIssueResume(
+    issueNumber: number,
+    prNumber: number | null,
+    reason: string,
+    issueComments: IssueComment[],
+  ): Promise<void> {
+    this.syncBlockedIssueResumeEscalationState(issueNumber, prNumber, issueComments)
+
+    const existing = this.blockedIssueResumes.get(issueNumber)
+    if (!existing) return
+
+    if (!shouldEscalateBlockedIssueResume({
+      blockedSince: existing.since,
+      lastEscalatedAt: existing.lastEscalatedAt,
+    })) {
+      return
+    }
+
+    const now = new Date().toISOString()
+
+    try {
+      await commentOnIssue(issueNumber, buildBlockedIssueResumeEscalationComment({
+        issueNumber,
+        prNumber,
+        blockedSince: existing.since,
+        escalatedAt: now,
+        thresholdSeconds: BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS,
+        reason,
+        machineId: this.config.machineId,
+        daemonInstanceId: this.daemonInstanceId,
+      }), this.config)
+      this.blockedIssueResumes.set(issueNumber, {
+        ...existing,
+        escalationCount: existing.escalationCount + 1,
+        lastEscalatedAt: now,
+      })
+      this.noteRecoveryAction('issue-resume-blocked-escalated', 'completed', {
+        scope: 'issue-process',
+        targetNumber: issueNumber,
+        reason,
+      })
+      this.logger.warn(
+        `[daemon] issue #${issueNumber} remains blocked from auto-resume; posted GitHub escalation comment`
+        + `${prNumber === null ? '' : ` (linked PR #${prNumber})`}`,
+      )
+    } catch (error) {
+      this.noteRecoveryAction('issue-resume-blocked-escalated', 'failed', {
+        scope: 'issue-process',
+        targetNumber: issueNumber,
+        reason: `${reason}; escalation comment failed: ${formatDaemonError(error)}`,
+      })
+      this.logger.warn(
+        `[daemon] failed to publish blocked resume escalation for issue #${issueNumber}: ${formatDaemonError(error)}`,
+      )
+    }
   }
 }
 
@@ -2421,6 +2550,108 @@ export function shouldClearFailedIssueResumeTrackingAfterFinalize(
   return status === 'failed'
 }
 
+export function buildBlockedIssueResumeEscalationComment(
+  payload: BlockedIssueResumeEscalationComment,
+): string {
+  const linkedPr = payload.prNumber === null ? 'none' : `#${payload.prNumber}`
+  return `${BLOCKED_ISSUE_RESUME_ESCALATION_COMMENT_PREFIX}${JSON.stringify(payload)} -->
+## agent-loop blocked resume escalation
+
+This issue is still blocked from automated resume and needs repo-side attention.
+
+- Issue: #${payload.issueNumber}
+- Linked PR: ${linkedPr}
+- Blocked since: ${payload.blockedSince}
+- Escalated at: ${payload.escalatedAt}
+- Threshold: ${payload.thresholdSeconds}s
+- Machine: ${payload.machineId}
+- Daemon: ${payload.daemonInstanceId}
+
+Reason:
+- ${payload.reason}
+
+Next step: clear or replace the linked PR state before expecting automatic issue resume.`
+}
+
+export function extractBlockedIssueResumeEscalationComment(
+  body: string,
+): BlockedIssueResumeEscalationComment | null {
+  const match = body.match(/<!-- agent-loop:issue-resume-blocked (\{.*\}) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<BlockedIssueResumeEscalationComment>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (!Number.isInteger(parsed.issueNumber) || typeof parsed.reason !== 'string') return null
+    if (parsed.prNumber !== null && parsed.prNumber !== undefined && !Number.isInteger(parsed.prNumber)) return null
+    if (typeof parsed.blockedSince !== 'string' || typeof parsed.escalatedAt !== 'string') return null
+    if (typeof parsed.machineId !== 'string' || typeof parsed.daemonInstanceId !== 'string') return null
+    if (!Number.isInteger(parsed.thresholdSeconds)) return null
+    const issueNumber = parsed.issueNumber as number
+    const thresholdSeconds = parsed.thresholdSeconds as number
+    return {
+      issueNumber,
+      prNumber: parsed.prNumber ?? null,
+      blockedSince: parsed.blockedSince,
+      escalatedAt: parsed.escalatedAt,
+      thresholdSeconds,
+      reason: parsed.reason,
+      machineId: parsed.machineId,
+      daemonInstanceId: parsed.daemonInstanceId,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function listBlockedIssueResumeEscalationComments(
+  comments: IssueComment[],
+  issueNumber: number,
+  prNumber: number | null,
+): BlockedIssueResumeEscalationRecord[] {
+  return comments
+    .map((comment) => {
+      const escalation = extractBlockedIssueResumeEscalationComment(comment.body)
+      if (!escalation) return null
+      if (escalation.issueNumber !== issueNumber) return null
+      if ((escalation.prNumber ?? null) !== prNumber) return null
+      return {
+        ...comment,
+        escalation,
+      } satisfies BlockedIssueResumeEscalationRecord
+    })
+    .filter((comment): comment is BlockedIssueResumeEscalationRecord => comment !== null)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+}
+
+export function summarizeBlockedIssueResumeEscalations(
+  comments: IssueComment[],
+  issueNumber: number,
+  prNumber: number | null,
+): { escalationCount: number; lastEscalatedAt: string | null } {
+  const matches = listBlockedIssueResumeEscalationComments(comments, issueNumber, prNumber)
+  return {
+    escalationCount: matches.length,
+    lastEscalatedAt: matches[0]?.updatedAt ?? matches[0]?.createdAt ?? matches[0]?.escalation.escalatedAt ?? null,
+  }
+}
+
+export function shouldEscalateBlockedIssueResume(input: {
+  blockedSince: string
+  lastEscalatedAt: string | null
+  now?: number
+  thresholdSeconds?: number
+  cooldownSeconds?: number
+}): boolean {
+  const now = input.now ?? Date.now()
+  const thresholdSeconds = input.thresholdSeconds ?? BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS
+  const cooldownSeconds = input.cooldownSeconds ?? BLOCKED_ISSUE_RESUME_ESCALATION_COOLDOWN_SECONDS
+
+  if (getIsoAgeSeconds(input.blockedSince, now) < thresholdSeconds) return false
+  if (input.lastEscalatedAt && getIsoAgeSeconds(input.lastEscalatedAt, now) < cooldownSeconds) return false
+  return true
+}
+
 export function getEffectiveActiveTaskCount(input: {
   activeWorktreeCount: number
   hasInFlightProcess: boolean
@@ -2448,10 +2679,12 @@ export function buildDaemonRuntimeStatus(input: {
   stalledWorkerCount: number
   stalledWorkerDetails: StalledWorkerRuntimeDetail[]
   blockedIssueResumeCount: number
+  blockedIssueResumeEscalationCount: number
   blockedIssueResumeDetails: BlockedIssueResumeRuntimeDetail[]
   lastRecoveryActionAt: string | null
   lastRecoveryActionKind: string | null
   recentRecoveryActions: RecoveryActionRuntimeDetail[]
+  oldestBlockedIssueResumeEscalationAgeSeconds: number
 }): DaemonStatus['runtime'] {
   return {
     activePrReviews: input.activePrReviewCount,
@@ -2473,10 +2706,12 @@ export function buildDaemonRuntimeStatus(input: {
     stalledWorkerCount: input.stalledWorkerCount,
     stalledWorkerDetails: input.stalledWorkerDetails,
     blockedIssueResumeCount: input.blockedIssueResumeCount,
+    blockedIssueResumeEscalationCount: input.blockedIssueResumeEscalationCount,
     blockedIssueResumeDetails: input.blockedIssueResumeDetails,
     lastRecoveryActionAt: input.lastRecoveryActionAt,
     lastRecoveryActionKind: input.lastRecoveryActionKind,
     recentRecoveryActions: input.recentRecoveryActions,
+    oldestBlockedIssueResumeEscalationAgeSeconds: input.oldestBlockedIssueResumeEscalationAgeSeconds,
   }
 }
 
