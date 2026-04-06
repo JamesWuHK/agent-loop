@@ -22,6 +22,9 @@ const MANAGED_DAEMON_CONTROL_FLAGS = new Set([
   '--launchd-uninstall',
   '--launchd-status',
 ])
+const BACKGROUND_RUNTIME_STOP_TIMEOUT_MS = 5_000
+const BACKGROUND_RUNTIME_STOP_POLL_MS = 50
+const BACKGROUND_RUNTIME_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4))
 
 type ManagedDaemonRuntimeSupervisor = Exclude<DaemonRuntimeSupervisor, 'direct'>
 
@@ -262,6 +265,13 @@ export function stopBackgroundRuntime(recordPath: string): {
   }
 
   process.kill(record.pid, 'SIGTERM')
+  if (!waitForProcessExit(record.pid)) {
+    return {
+      stopped: false,
+      message: `Sent SIGTERM to background daemon pid ${record.pid}, but it did not exit within ${BACKGROUND_RUNTIME_STOP_TIMEOUT_MS}ms`,
+    }
+  }
+
   removeBackgroundRuntimeRecord(recordPath)
   return {
     stopped: true,
@@ -362,4 +372,25 @@ function buildAmbiguousBackgroundRuntimeMessage(
     .join('; ')
 
   return `Multiple background daemon records matched. Refine with --machine-id or --health-port. Matches: ${details}`
+}
+
+function waitForProcessExit(
+  pid: number,
+  timeoutMs = BACKGROUND_RUNTIME_STOP_TIMEOUT_MS,
+): boolean {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) {
+      return true
+    }
+    Atomics.wait(
+      BACKGROUND_RUNTIME_SLEEP_BUFFER,
+      0,
+      0,
+      Math.min(BACKGROUND_RUNTIME_STOP_POLL_MS, Math.max(1, deadline - Date.now())),
+    )
+  }
+
+  return !isProcessAlive(pid)
 }

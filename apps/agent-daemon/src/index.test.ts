@@ -623,6 +623,63 @@ describe('index helpers', () => {
     })
   })
 
+  test('does not relaunch a detached runtime until the old pid has actually exited', () => {
+    let launched = false
+
+    const result = restartManagedRuntime({
+      discoveredRuntime: buildRuntimeSnapshot(),
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--restart'],
+    }, {
+      platform: 'linux',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'unused',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/unused',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+      }),
+      inspectLaunchdService: () => ({
+        label: 'unused',
+        serviceTarget: 'gui/501/unused',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+        installed: false,
+        loaded: false,
+        detail: null,
+        runtime: null,
+      }),
+      restartLaunchdService: () => ({
+        restarted: true,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: false,
+        message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 5000ms',
+      }),
+      launchBackgroundRuntime: () => {
+        launched = true
+        return buildRuntimeSnapshot().record
+      },
+    })
+
+    expect(result).toEqual({
+      kind: 'detached',
+      restarted: false,
+      message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 5000ms',
+    })
+    expect(launched).toBe(false)
+  })
+
   test('restarts installed launchd services even when no runtime record is currently discovered', () => {
     const calls: string[] = []
     const result = restartManagedRuntime({

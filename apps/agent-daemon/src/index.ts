@@ -1138,6 +1138,13 @@ export function restartManagedRuntime(
 
   if (runtime?.record.supervisor === 'detached') {
     const stopResult = deps.stopBackgroundRuntime(runtime.recordPath)
+    if (runtime.alive && !stopResult.stopped) {
+      return {
+        kind: 'detached',
+        restarted: false,
+        message: stopResult.message,
+      }
+    }
     const restarted = deps.launchBackgroundRuntime({
       identity: {
         repo: runtime.record.repo,
