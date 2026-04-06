@@ -14,7 +14,7 @@ const LAUNCHD_LABEL_PREFIX = 'com.agentloop'
 const DEFAULT_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 const SAFE_ENV_KEYS = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR'] as const
 const LAUNCHD_BOOTSTRAP_RETRY_ATTEMPTS = 3
-const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 250
+const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 2000
 const LAUNCHD_RETRYABLE_BOOTSTRAP_ERROR_PATTERNS = [
   'bootstrap failed: 5',
   'input/output error',

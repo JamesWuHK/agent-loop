@@ -464,6 +464,7 @@ gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
     writeFileSync(spec.plistPath, '<plist />')
 
     const calls: string[] = []
+    const sleeps: number[] = []
     let bootstrapAttempts = 0
     const result = restartLaunchdService(spec, (args) => {
       calls.push(args.join(' '))
@@ -474,13 +475,16 @@ gui/501/com.agentloop.jameswuhk-digital-employee.codex-verify-20260405.9311 = {
         }
       }
       return ''
-    }, () => {})
+    }, (ms) => {
+      sleeps.push(ms)
+    })
 
     expect(result).toEqual({
       restarted: true,
       message: `Restarted launchd service ${spec.label}`,
     })
     expect(bootstrapAttempts).toBe(2)
+    expect(sleeps).toEqual([2000])
     expect(calls).toEqual([
       `bootout ${spec.serviceTarget}`,
       `bootstrap ${spec.domain} ${spec.plistPath}`,
