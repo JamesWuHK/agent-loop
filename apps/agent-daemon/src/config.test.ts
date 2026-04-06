@@ -128,6 +128,26 @@ describe('buildConfig', () => {
     expect(config.recovery.leaseTtlMs).toBe(60_000)
   })
 
+  test('allows repo-local config to disable agent fallback explicitly', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: baseFileConfig,
+        repoConfig: {
+          agent: {
+            primary: 'codex',
+            fallback: null,
+          },
+        },
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.agent.primary).toBe('codex')
+    expect(config.agent.fallback).toBeNull()
+  })
+
   test('applies repo, profile, and project concurrency caps to the effective daemon limit', () => {
     const config = buildConfig(
       {

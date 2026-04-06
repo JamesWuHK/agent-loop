@@ -152,6 +152,12 @@ export function buildConfig(
     profileCap: scheduling.concurrencyByProfile[projectProfile] ?? null,
     projectCap: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency ?? null,
   })
+  const agentFallback =
+    repoConfig.agent && Object.prototype.hasOwnProperty.call(repoConfig.agent, 'fallback')
+      ? repoConfig.agent.fallback
+      : fileConfig.agent && Object.prototype.hasOwnProperty.call(fileConfig.agent, 'fallback')
+        ? fileConfig.agent.fallback
+        : 'claude'
 
   const config: AgentConfig = {
     machineId,
@@ -185,7 +191,7 @@ export function buildConfig(
     },
     agent: {
       primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
-      fallback: repoConfig.agent?.fallback ?? fileConfig.agent?.fallback ?? 'claude',
+      fallback: agentFallback,
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
       codexBaseUrl:
