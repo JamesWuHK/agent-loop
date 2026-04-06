@@ -8,6 +8,8 @@ import {
   buildBlockedIssueResumeEscalationComment,
   buildDaemonRuntimeStatus,
   buildIssuePreflightFailureComment,
+  buildPrReviewRefreshFailureComment,
+  canRetryPrReviewRefresh,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
   extractAutomatedIssuePreflightReasons,
@@ -17,6 +19,7 @@ import {
   listBlockedIssueResumeEscalationComments,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
+  shouldRefreshBlockedHumanNeededPr,
   shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
   isRetryableDaemonLoopError,
@@ -661,6 +664,77 @@ describe('daemon merge recovery helpers', () => {
       number: 110,
       labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
     }, true)).toBeNull()
+  })
+
+  test('allows blocked human-needed PRs to auto-refresh when only the base branch moved', () => {
+    expect(shouldRefreshBlockedHumanNeededPr(
+      {
+        labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+      },
+      { state: 'failed' },
+      false,
+      true,
+      true,
+    )).toBe(true)
+
+    expect(shouldRefreshBlockedHumanNeededPr(
+      {
+        labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+      },
+      { state: 'failed' },
+      true,
+      true,
+      true,
+    )).toBe(false)
+
+    expect(shouldRefreshBlockedHumanNeededPr(
+      {
+        labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+      },
+      { state: 'failed' },
+      false,
+      false,
+      true,
+    )).toBe(false)
+
+    expect(shouldRefreshBlockedHumanNeededPr(
+      {
+        labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+      },
+      { state: 'done' },
+      false,
+      true,
+      true,
+    )).toBe(false)
+  })
+
+  test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {
+    const refreshFailure = buildPrReviewRefreshFailureComment(
+      110,
+      'agent/110/codex-20260403',
+      'main',
+      'abc123',
+      'def456',
+      'Branch refresh failed before rerunning review: conflict',
+    )
+
+    expect(canRetryPrReviewRefresh(
+      [{ body: refreshFailure }],
+      'abc123',
+      'def456',
+    )).toBe(false)
+
+    expect(canRetryPrReviewRefresh(
+      [{ body: refreshFailure }],
+      'abc123',
+      'def789',
+    )).toBe(true)
+
+    expect(canRetryPrReviewRefresh(
+      [{ body: refreshFailure }],
+      'zzz999',
+      'def456',
+    )).toBe(true)
   })
 
   test('still allows merged standalone PRs to stamp agent:done on closed issues', () => {

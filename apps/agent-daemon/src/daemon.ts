@@ -1257,6 +1257,20 @@ export class AgentDaemon {
       )) {
         return pr
       }
+
+      const baseSyncState = await readRemoteBranchBaseSyncState(pr.headRefName, this.config.git.defaultBranch)
+      if (
+        baseSyncState
+        && shouldRefreshBlockedHumanNeededPr(
+          pr,
+          linkedIssue,
+          false,
+          baseSyncState.behindDefault,
+          canRetryPrReviewRefresh(comments, baseSyncState.headRefOid, baseSyncState.baseRefOid),
+        )
+      ) {
+        return pr
+      }
     }
 
     return null
@@ -1306,7 +1320,73 @@ export class AgentDaemon {
     let leaseRecoveryKind: string | undefined
     try {
       const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
-      const currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      let currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      const worktreeBaseSyncState = await readWorktreeBaseSyncState(
+        detached.worktreePath,
+        this.config.git.defaultBranch,
+      )
+      if (
+        shouldRefreshBlockedHumanNeededPr(
+          pr,
+          linkedIssue,
+          resumableHumanNeededReview,
+          worktreeBaseSyncState.behindDefault,
+          canRetryPrReviewRefresh(
+            priorComments,
+            worktreeBaseSyncState.headRefOid,
+            worktreeBaseSyncState.baseRefOid,
+          ),
+        )
+      ) {
+        this.logger.log(
+          `[pr-review-subagent] refreshing blocked PR #${pr.number} onto origin/${this.config.git.defaultBranch} before rerunning automated review`,
+        )
+        const refreshResult = await rebaseManagedBranchOntoDefault(
+          detached.worktreePath,
+          pr.headRefName,
+          this.config.git.defaultBranch,
+          this.logger,
+        )
+        if (!refreshResult.success) {
+          const reason = `Branch refresh failed before rerunning review: ${refreshResult.message}`
+          await commentOnPr(
+            pr.number,
+            buildPrReviewRefreshFailureComment(
+              pr.number,
+              pr.headRefName,
+              this.config.git.defaultBranch,
+              worktreeBaseSyncState.headRefOid,
+              worktreeBaseSyncState.baseRefOid,
+              reason,
+            ),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+          return
+        }
+
+        try {
+          await pushBranch(detached.worktreePath, pr.headRefName, this.logger)
+        } catch (error) {
+          const reason = `Branch refresh push failed before rerunning review: ${formatDaemonError(error)}`
+          await commentOnPr(
+            pr.number,
+            buildPrReviewRefreshFailureComment(
+              pr.number,
+              pr.headRefName,
+              this.config.git.defaultBranch,
+              worktreeBaseSyncState.headRefOid,
+              worktreeBaseSyncState.baseRefOid,
+              reason,
+            ),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+          return
+        }
+
+        currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      }
       const restartReviewOnUpdatedHead = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
         && shouldRestartAutomatedPrReviewOnNewHead(priorComments, currentHeadRefOid)
       const restartReviewOnUpdatedIssue = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
@@ -3087,6 +3167,52 @@ async function isWorktreeSyncedWithRemoteBranch(
   return headResult.stdout.trim() === remoteHeadResult.stdout.trim()
 }
 
+async function readWorktreeBaseSyncState(
+  worktreePath: string,
+  defaultBranch: string,
+): Promise<{ headRefOid: string; baseRefOid: string; behindDefault: boolean }> {
+  await runGitInWorktree(worktreePath, ['fetch', 'origin', defaultBranch])
+  const [headResult, baseResult, behindResult] = await Promise.all([
+    runGitInWorktree(worktreePath, ['rev-parse', 'HEAD']),
+    runGitInWorktree(worktreePath, ['rev-parse', `origin/${defaultBranch}`]),
+    runGitInWorktree(worktreePath, ['rev-list', '--count', `HEAD..origin/${defaultBranch}`]),
+  ])
+
+  const headRefOid = headResult.stdout.trim()
+  const baseRefOid = baseResult.stdout.trim()
+  const behindCount = Number.parseInt(behindResult.stdout.trim(), 10)
+
+  return {
+    headRefOid,
+    baseRefOid,
+    behindDefault: Number.isFinite(behindCount) && behindCount > 0,
+  }
+}
+
+async function readRemoteBranchBaseSyncState(
+  branch: string,
+  defaultBranch: string,
+): Promise<{ headRefOid: string; baseRefOid: string; behindDefault: boolean } | null> {
+  const fetchResult = await runGitInRepo(['fetch', 'origin', branch, defaultBranch])
+  if (fetchResult.exitCode !== 0) return null
+
+  const [headResult, baseResult, behindResult] = await Promise.all([
+    runGitInRepo(['rev-parse', `origin/${branch}`]),
+    runGitInRepo(['rev-parse', `origin/${defaultBranch}`]),
+    runGitInRepo(['rev-list', '--count', `origin/${branch}..origin/${defaultBranch}`]),
+  ])
+  if (headResult.exitCode !== 0 || baseResult.exitCode !== 0 || behindResult.exitCode !== 0) {
+    return null
+  }
+
+  const behindCount = Number.parseInt(behindResult.stdout.trim(), 10)
+  return {
+    headRefOid: headResult.stdout.trim(),
+    baseRefOid: baseResult.stdout.trim(),
+    behindDefault: Number.isFinite(behindCount) && behindCount > 0,
+  }
+}
+
 
 export function isRetryableDaemonLoopError(error: unknown): boolean {
   const message = formatDaemonError(error).toLowerCase()
@@ -3250,6 +3376,16 @@ interface IssuePreflightFailureCommentPayload {
   violations: string[]
 }
 
+interface PrReviewRefreshFailureCommentPayload {
+  pr: number
+  refreshed: false
+  branch: string
+  baseBranch: string
+  headRefOid: string
+  baseRefOid: string
+  reason: string
+}
+
 export function buildIssuePreflightFailureComment(
   issueNumber: number,
   reason: string,
@@ -3269,6 +3405,90 @@ export function buildIssuePreflightFailureComment(
 ${violations.map((violation) => `- ${violation}`).join('\n')}
 
 Next step: fix the branch in the existing worktree until scope and validation commands both pass, then let daemon retry the issue.`
+}
+
+export function buildPrReviewRefreshFailureComment(
+  prNumber: number,
+  branch: string,
+  baseBranch: string,
+  headRefOid: string,
+  baseRefOid: string,
+  reason: string,
+): string {
+  const payload: PrReviewRefreshFailureCommentPayload = {
+    pr: prNumber,
+    refreshed: false,
+    branch,
+    baseBranch,
+    headRefOid,
+    baseRefOid,
+    reason,
+  }
+
+  return `<!-- agent-loop:pr-review-refresh ${JSON.stringify(payload)} -->
+## Automated review recovery blocked
+
+- Branch: \`${branch}\`
+- Base: \`origin/${baseBranch}\`
+- Reason: ${reason}
+
+Next step: update the branch or let \`origin/${baseBranch}\` move again before expecting another automated refresh attempt.`
+}
+
+function extractPrReviewRefreshFailureComment(
+  body: string,
+): PrReviewRefreshFailureCommentPayload | null {
+  const match = body.match(/<!-- agent-loop:pr-review-refresh ([\s\S]*?) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<PrReviewRefreshFailureCommentPayload>
+    if (parsed.refreshed !== false) return null
+    if (!Number.isInteger(parsed.pr) || typeof parsed.reason !== 'string') return null
+    if (typeof parsed.branch !== 'string' || typeof parsed.baseBranch !== 'string') return null
+    if (typeof parsed.headRefOid !== 'string' || typeof parsed.baseRefOid !== 'string') return null
+
+    return {
+      pr: parsed.pr as number,
+      refreshed: false,
+      branch: parsed.branch,
+      baseBranch: parsed.baseBranch,
+      headRefOid: parsed.headRefOid,
+      baseRefOid: parsed.baseRefOid,
+      reason: parsed.reason,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function canRetryPrReviewRefresh(
+  comments: Array<Pick<IssueComment, 'body'>>,
+  currentHeadRefOid: string,
+  currentBaseRefOid: string,
+): boolean {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const parsed = extractPrReviewRefreshFailureComment(comments[index]?.body ?? '')
+    if (!parsed) continue
+
+    return parsed.headRefOid !== currentHeadRefOid || parsed.baseRefOid !== currentBaseRefOid
+  }
+
+  return true
+}
+
+export function shouldRefreshBlockedHumanNeededPr(
+  pr: Pick<ManagedPullRequest, 'labels'>,
+  linkedIssue: Pick<AgentIssue, 'state'> | null,
+  canResumeHumanNeededReview: boolean,
+  branchBehindDefault: boolean,
+  canRetryRefresh: boolean,
+): boolean {
+  if (!branchBehindDefault || !canRetryRefresh) return false
+  if (!linkedIssue || linkedIssue.state === 'done') return false
+
+  const labels = new Set(pr.labels)
+  return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && !canResumeHumanNeededReview
 }
 
 function extractIssuePreflightFailureComment(body: string): IssuePreflightFailureCommentPayload | null {
