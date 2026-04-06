@@ -92,6 +92,62 @@ describe('ready-gate', () => {
     }
   })
 
+  test('accepts ready issues when validation points at a new file that is explicitly allowed', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-future-file-'))
+
+    try {
+      mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
+
+      expect(evaluateReadyGate({
+        number: 77,
+        title: 'example',
+        body: [
+          '## 用户故事',
+          '作为用户，我希望 issue 可以用 RED 测试文件名做 validation。',
+          '',
+          '## Context',
+          '### Dependencies',
+          '```json',
+          '{ "dependsOn": [76] }',
+          '```',
+          '### AllowedFiles',
+          '- apps/desktop/src/pages/MainPage.future.test.tsx',
+          '### ForbiddenFiles',
+          '- apps/desktop/src/App.tsx',
+          '### MustPreserve',
+          '- 既有页面结构保持不变',
+          '### OutOfScope',
+          '- 其它新功能',
+          '### RequiredSemantics',
+          '- 新测试文件属于本 issue 合法产物',
+          '### Validation',
+          '- bun --cwd apps/desktop test src/pages/MainPage.future.test.tsx',
+          '',
+          '## RED 测试',
+          '```tsx',
+          'expect(true).toBe(false)',
+          '```',
+          '',
+          '## 实现步骤',
+          '1. 先写 RED',
+          '',
+          '## 验收',
+          '- 只改 AllowedFiles',
+        ].join('\n'),
+        state: 'open',
+        labels: [ISSUE_LABELS.READY],
+      }, {
+        repoRoot: tempDir,
+      })).toEqual({
+        shouldEnforce: true,
+        valid: true,
+        errors: [],
+      })
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   test('rejects ready issues when validation references repo paths that do not exist', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-missing-'))
 

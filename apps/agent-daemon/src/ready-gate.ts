@@ -21,6 +21,10 @@ interface ReadyGateOptions {
   repoRoot?: string
 }
 
+function normalizeContractPath(value: string): string {
+  return value.trim().replace(/^\.\//, '').replace(/\\/g, '/')
+}
+
 function normalizeValidationEntry(entry: string): string {
   const trimmed = entry.trim()
   if (trimmed.startsWith('`') && trimmed.endsWith('`')) {
@@ -72,16 +76,45 @@ function extractValidationFileCandidates(entry: string): string[] {
   return [...candidates]
 }
 
-function validateValidationTargets(body: string, repoRoot?: string): string[] {
+function matchesContractFilePattern(path: string, pattern: string): boolean {
+  const normalizedPath = normalizeContractPath(path)
+  const normalizedPattern = normalizeContractPath(pattern)
+  if (!normalizedPattern) return false
+
+  const escaped = normalizedPattern
+    .replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
+    .replace(/\*\*/g, '::DOUBLE_STAR::')
+    .replace(/\*/g, '[^/]*')
+    .replace(/::DOUBLE_STAR::/g, '.*')
+
+  return new RegExp(`^${escaped}$`).test(normalizedPath)
+}
+
+function isAllowedFutureValidationTarget(candidate: string, allowedFiles: string[]): boolean {
+  const normalizedCandidate = normalizeContractPath(candidate)
+  return allowedFiles.some((pattern) => {
+    const normalizedPattern = normalizeContractPath(pattern)
+    if (!normalizedPattern) return false
+    if (matchesContractFilePattern(normalizedCandidate, normalizedPattern)) return true
+
+    // Allow validation commands to point at new files inside an allowed directory.
+    return normalizedCandidate.startsWith(`${normalizedPattern.replace(/\/$/, '')}/`)
+  })
+}
+
+function validateValidationTargets(contractBody: string, repoRoot?: string): string[] {
+  const contract = parseIssueContract(contractBody)
   if (!repoRoot) return []
 
-  const contract = parseIssueContract(body)
   const missingTargets = new Set<string>()
 
   for (const entry of contract.validation) {
     for (const candidate of extractValidationFileCandidates(entry)) {
       const absolutePath = isAbsolute(candidate) ? candidate : resolve(repoRoot, candidate)
       if (!existsSync(absolutePath)) {
+        if (isAllowedFutureValidationTarget(candidate, contract.allowedFiles)) {
+          continue
+        }
         missingTargets.add(candidate)
       }
     }
