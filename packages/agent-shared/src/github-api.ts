@@ -243,7 +243,11 @@ export function applyDependencyClaimability(
 
 export function isGraphQlRateLimitErrorMessage(message: string): boolean {
   const normalized = message.toLowerCase()
-  return normalized.includes('graphql') && normalized.includes('rate limit')
+  return (
+    normalized.includes('api rate limit already exceeded')
+    || normalized.includes('secondary rate limit')
+    || (normalized.includes('graphql') && normalized.includes('rate limit'))
+  )
 }
 
 export function extractRestOpenIssueListPage(data: unknown): RawRestGitHubIssue[] {

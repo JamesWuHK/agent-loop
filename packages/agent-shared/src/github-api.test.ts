@@ -13,6 +13,7 @@ import {
   extractManagedLeaseComment,
   getActiveManagedLease,
   getLatestManagedLease,
+  isGraphQlRateLimitErrorMessage,
   isManagedLeaseExpired,
   isManagedLeaseProgressStale,
   parseManagedLeaseComments,
@@ -47,6 +48,16 @@ describe('parseGhApiErrorMessage', () => {
 
   test('falls back to stderr when stdout is empty', () => {
     expect(parseGhApiErrorMessage('', 'gh: GraphQL error')).toBe('gh: GraphQL error')
+  })
+})
+
+describe('isGraphQlRateLimitErrorMessage', () => {
+  test('matches explicit GraphQL rate limit errors', () => {
+    expect(isGraphQlRateLimitErrorMessage('GraphQL: API rate limit already exceeded for user ID 1.')).toBe(true)
+  })
+
+  test('matches generic gh api rate limit errors emitted by gh api graphql', () => {
+    expect(isGraphQlRateLimitErrorMessage('gh: API rate limit already exceeded for user ID 1.')).toBe(true)
   })
 })
 
