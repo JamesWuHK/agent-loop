@@ -1261,6 +1261,19 @@ export class AgentDaemon {
     const reviewLabels = new Set(pr.labels)
     const issueNumber = extractIssueNumberFromPrTitle(pr.title)
     const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
+    if (
+      issueNumber !== null
+      && linkedIssue
+      && linkedIssue.state !== 'working'
+      && linkedIssue.state !== 'done'
+    ) {
+      await this.transitionStandaloneIssue(
+        issueNumber,
+        ISSUE_LABELS.WORKING,
+        `Standalone PR review running for PR #${pr.number}`,
+        pr.number,
+      )
+    }
     const resumableHumanNeededReview = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
       && canResumeHumanNeededPrReview(
         priorComments,

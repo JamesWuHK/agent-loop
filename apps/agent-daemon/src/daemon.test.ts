@@ -679,6 +679,13 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(false)
   })
 
+  test('allows standalone PR review to move stale issues back to agent:working', () => {
+    expect(shouldApplyStandaloneIssueTransition(
+      { state: 'stale' },
+      ISSUE_LABELS.WORKING,
+    )).toBe(true)
+  })
+
   test('reconciles human-needed PR labels back to agent:failed on startup', () => {
     expect(getStandaloneIssueTransitionForReviewLabels(
       [PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED],
