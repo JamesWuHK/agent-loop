@@ -56,6 +56,10 @@ export interface BackgroundRuntimeSnapshot {
   alive: boolean
 }
 
+export interface StopBackgroundRuntimeOptions {
+  timeoutMs?: number
+}
+
 export type BackgroundRuntimeRecordRemovalResult =
   | 'removed'
   | 'missing'
@@ -244,7 +248,10 @@ export function buildCurrentProcessRuntimeRecord(input: {
   }
 }
 
-export function stopBackgroundRuntime(recordPath: string): {
+export function stopBackgroundRuntime(
+  recordPath: string,
+  options: StopBackgroundRuntimeOptions = {},
+): {
   stopped: boolean
   message: string
 } {
@@ -265,10 +272,11 @@ export function stopBackgroundRuntime(recordPath: string): {
   }
 
   process.kill(record.pid, 'SIGTERM')
-  if (!waitForProcessExit(record.pid)) {
+  const timeoutMs = options.timeoutMs ?? BACKGROUND_RUNTIME_STOP_TIMEOUT_MS
+  if (!waitForProcessExit(record.pid, timeoutMs)) {
     return {
       stopped: false,
-      message: `Sent SIGTERM to background daemon pid ${record.pid}, but it did not exit within ${BACKGROUND_RUNTIME_STOP_TIMEOUT_MS}ms`,
+      message: `Sent SIGTERM to background daemon pid ${record.pid}, but it did not exit within ${timeoutMs}ms`,
     }
   }
 

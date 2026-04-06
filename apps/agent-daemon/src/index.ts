@@ -48,6 +48,7 @@ import {
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
+const RESTART_BACKGROUND_RUNTIME_STOP_TIMEOUT_MS = 30_000
 
 export interface RestartManagedRuntimeInput {
   discoveredRuntime: BackgroundRuntimeSnapshot | null
@@ -1137,7 +1138,9 @@ export function restartManagedRuntime(
   const runtime = input.discoveredRuntime
 
   if (runtime?.record.supervisor === 'detached') {
-    const stopResult = deps.stopBackgroundRuntime(runtime.recordPath)
+    const stopResult = deps.stopBackgroundRuntime(runtime.recordPath, {
+      timeoutMs: RESTART_BACKGROUND_RUNTIME_STOP_TIMEOUT_MS,
+    })
     if (runtime.alive && !stopResult.stopped) {
       return {
         kind: 'detached',

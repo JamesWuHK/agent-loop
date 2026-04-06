@@ -514,8 +514,8 @@ describe('index helpers', () => {
         restarted: true,
         message: 'unused',
       }),
-      stopBackgroundRuntime: (recordPath) => {
-        calls.push(`stop:${recordPath}`)
+      stopBackgroundRuntime: (recordPath, options) => {
+        calls.push(`stop:${recordPath}:${options?.timeoutMs ?? 'default'}`)
         return {
           stopped: true,
           message: 'Sent SIGTERM to background daemon pid 12345',
@@ -542,7 +542,7 @@ describe('index helpers', () => {
       message: 'Sent SIGTERM to background daemon pid 12345; restarted detached daemon with pid 67890',
     })
     expect(calls).toEqual([
-      'stop:/Users/wujames/.agent-loop/runtime/runtime.json',
+      'stop:/Users/wujames/.agent-loop/runtime/runtime.json:30000',
       'launch:JamesWuHK/digital-employee:codex-dev:9311:9091',
     ])
   })
@@ -625,6 +625,7 @@ describe('index helpers', () => {
 
   test('does not relaunch a detached runtime until the old pid has actually exited', () => {
     let launched = false
+    let timeoutMs: number | undefined
 
     const result = restartManagedRuntime({
       discoveredRuntime: buildRuntimeSnapshot(),
@@ -662,10 +663,13 @@ describe('index helpers', () => {
         restarted: true,
         message: 'unused',
       }),
-      stopBackgroundRuntime: () => ({
-        stopped: false,
-        message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 5000ms',
-      }),
+      stopBackgroundRuntime: (_recordPath, options) => {
+        timeoutMs = options?.timeoutMs
+        return {
+          stopped: false,
+          message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 30000ms',
+        }
+      },
       launchBackgroundRuntime: () => {
         launched = true
         return buildRuntimeSnapshot().record
@@ -675,9 +679,10 @@ describe('index helpers', () => {
     expect(result).toEqual({
       kind: 'detached',
       restarted: false,
-      message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 5000ms',
+      message: 'Sent SIGTERM to background daemon pid 12345, but it did not exit within 30000ms',
     })
     expect(launched).toBe(false)
+    expect(timeoutMs).toBe(30_000)
   })
 
   test('restarts installed launchd services even when no runtime record is currently discovered', () => {
