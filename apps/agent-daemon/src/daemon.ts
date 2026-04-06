@@ -122,6 +122,11 @@ interface StalledWorkerState {
   reason: string
 }
 
+interface ManagedLeaseMonitorOptions {
+  shouldAbort?: () => boolean | Promise<boolean>
+  abortMessage?: string
+}
+
 interface BlockedIssueResumeState {
   issueNumber: number
   prNumber: number | null
@@ -209,6 +214,7 @@ export class AgentDaemon {
     scope: ManagedLeaseScope,
     targetNumber: number,
     handle: ManagedLeaseHandle,
+    options?: ManagedLeaseMonitorOptions,
   ): TaskExecutionMonitor {
     return {
       setPhase: (phase) => {
@@ -222,6 +228,8 @@ export class AgentDaemon {
           handle.recordActivity(kind)
           this.clearStalledWorker(scope, targetNumber)
         },
+        shouldAbort: options?.shouldAbort,
+        abortMessage: options?.abortMessage,
       },
     }
   }
@@ -1729,7 +1737,13 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
 
       await restoreManagedWorktreeState(worktreePath, this.logger)
-      const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle)
+      const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle, {
+        shouldAbort: async () => {
+          const latestIssue = await getAgentIssueByNumber(issueNumber, this.config)
+          return latestIssue?.state === 'done'
+        },
+        abortMessage: `Aborted because remote issue #${issueNumber} is already done`,
+      })
 
       const prCheck = await checkPrExists(branch, this.config)
       const linkedOpenPr = prCheck.prNumber !== null && prCheck.prState === 'open'
@@ -1762,6 +1776,44 @@ export class AgentDaemon {
       )
 
       if (!recoveryResult.success) {
+        if (recoveryResult.failureKind === 'remote_closed') {
+          let latestIssue: AgentIssue | null = null
+          try {
+            latestIssue = await getAgentIssueByNumber(issueNumber, this.config)
+          } catch (err) {
+            this.logger.warn(
+              `[daemon] failed to confirm remote close state for issue #${issueNumber}: ${formatDaemonError(err)}`,
+            )
+          }
+
+          if (shouldCompleteIssueRecoveryOnRemoteClose(recoveryResult.failureKind, latestIssue)) {
+            this.failedIssueResumeAttempts.delete(issueNumber)
+            this.failedIssueResumeCooldownUntil.delete(issueNumber)
+            await removeWorktree(worktreePath, branch, true)
+            await this.completeManagedLease(
+              'issue-process',
+              issueNumber,
+              leaseHandle,
+              'completed',
+              recoveryResult.error,
+              'issue-process-remote-closed',
+            )
+          } else {
+            await this.completeManagedLease(
+              'issue-process',
+              issueNumber,
+              leaseHandle,
+              'recoverable',
+              recoveryResult.error,
+              'issue-process-remote-closed-unconfirmed',
+            )
+          }
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+          return
+        }
+
         if (this.isRecoverableAgentFailureKind(recoveryResult.failureKind)) {
           recordWorkerIdleTimeout('issue-process')
           await this.markIssueRecoverable(issueNumber, recoveryResult.error ?? 'issue recovery hit idle timeout')
@@ -3095,6 +3147,13 @@ export function shouldApplyStandaloneIssueTransition(
 export function shouldResetLinkedPrToRetryOnIssueResume(prLabels: string[]): boolean {
   const labels = new Set(prLabels)
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) || labels.has(PR_REVIEW_LABELS.FAILED)
+}
+
+export function shouldCompleteIssueRecoveryOnRemoteClose(
+  failureKind: string | undefined,
+  issue: Pick<AgentIssue, 'state'> | null,
+): boolean {
+  return failureKind === 'remote_closed' && issue?.state === 'done'
 }
 
 export function getStandaloneIssueTransitionForReviewLabels(

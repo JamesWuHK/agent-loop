@@ -19,6 +19,8 @@ export interface AgentRunMonitor {
   heartbeatIntervalMs?: number
   idleTimeoutMs?: number
   onActivity?: (kind: 'stdout' | 'stderr' | 'git-state') => void | Promise<void>
+  shouldAbort?: () => boolean | Promise<boolean>
+  abortMessage?: string
 }
 
 export interface TaskExecutionMonitor {
@@ -34,7 +36,7 @@ export interface CliAgentRunResult {
   responseText: string
   usedAgent: AgentKind
   usedFallback: boolean
-  failureKind?: 'binary_missing' | 'process_timeout' | 'idle_timeout' | 'execution_error' | 'nonzero_exit'
+  failureKind?: 'binary_missing' | 'process_timeout' | 'idle_timeout' | 'execution_error' | 'nonzero_exit' | 'remote_closed'
 }
 
 export type AgentFailureKind = NonNullable<CliAgentRunResult['failureKind']>
@@ -154,7 +156,12 @@ export async function runConfiguredAgent(
   const fallback = options.config.agent.fallback
 
   const primaryResult = await runSingleAgent(primary, false, options)
-  if (primaryResult.ok || !fallback || fallback === primary) {
+  if (
+    primaryResult.ok
+    || !fallback
+    || fallback === primary
+    || primaryResult.failureKind === 'remote_closed'
+  ) {
     return primaryResult
   }
 
@@ -204,6 +211,8 @@ async function runSingleAgent(
   let lastActivityAt = Date.now()
   let lastWorktreeSignature: string | null = null
   let monitorInFlight = false
+  let aborted = false
+  let abortMessage = options.monitor?.abortMessage ?? 'Aborted because the remote issue is already done/closed'
 
   try {
     const env = buildRuntimeEnv(agent, options.config, tempDir)
@@ -245,6 +254,15 @@ async function runSingleAgent(
           () => lastActivityAt,
           () => {
             idleTimedOut = true
+            try {
+              proc?.kill('SIGKILL')
+            } catch {
+              // ignore kill errors
+            }
+          },
+          (message) => {
+            aborted = true
+            abortMessage = message
             try {
               proc?.kill('SIGKILL')
             } catch {
@@ -300,6 +318,19 @@ async function runSingleAgent(
     }
     rmSync(tempDir, { recursive: true, force: true })
 
+    if (aborted) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: '',
+        stderr: abortMessage,
+        responseText: '',
+        usedAgent: agent,
+        usedFallback,
+        failureKind: 'remote_closed',
+      }
+    }
+
     if (idleTimedOut) {
       return {
         ok: false,
@@ -343,6 +374,20 @@ async function runSingleAgent(
   }
   if (processTimeoutId) {
     clearTimeout(processTimeoutId)
+  }
+
+  if (aborted) {
+    rmSync(tempDir, { recursive: true, force: true })
+    return {
+      ok: false,
+      exitCode: 1,
+      stdout: '',
+      stderr: abortMessage,
+      responseText: '',
+      usedAgent: agent,
+      usedFallback,
+      failureKind: 'remote_closed',
+    }
   }
 
   if (idleTimedOut) {
@@ -423,6 +468,7 @@ async function pollMonitorProgress(
   onGitProgress: () => void,
   getLastActivityAt: () => number,
   onIdleTimeout: () => void,
+  onAbort: (message: string) => void,
 ): Promise<void> {
   if (!options.monitor) return
 
@@ -430,6 +476,18 @@ async function pollMonitorProgress(
   if (signature !== getSignature()) {
     setSignature(signature)
     onGitProgress()
+  }
+
+  if (options.monitor.shouldAbort) {
+    try {
+      const shouldAbort = await options.monitor.shouldAbort()
+      if (shouldAbort) {
+        onAbort(options.monitor.abortMessage ?? 'Aborted because the remote issue is already done/closed')
+        return
+      }
+    } catch {
+      // abort checks are best-effort and should never fail the agent run
+    }
   }
 
   const idleTimeoutMs = options.monitor.idleTimeoutMs ?? options.config.recovery.workerIdleTimeoutMs

@@ -24,6 +24,7 @@ import {
   rebaseManagedBranchOntoDefault,
   shouldApplyStandaloneIssueTransition,
   shouldResetLinkedPrToRetryOnIssueResume,
+  shouldCompleteIssueRecoveryOnRemoteClose,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
 } from './daemon'
@@ -684,6 +685,13 @@ describe('daemon merge recovery helpers', () => {
       { state: 'stale' },
       ISSUE_LABELS.WORKING,
     )).toBe(true)
+  })
+
+  test('treats remote_closed issue recovery aborts as completed only when the issue is already done', () => {
+    expect(shouldCompleteIssueRecoveryOnRemoteClose('remote_closed', { state: 'done' })).toBe(true)
+    expect(shouldCompleteIssueRecoveryOnRemoteClose('remote_closed', { state: 'working' })).toBe(false)
+    expect(shouldCompleteIssueRecoveryOnRemoteClose('idle_timeout', { state: 'done' })).toBe(false)
+    expect(shouldCompleteIssueRecoveryOnRemoteClose('remote_closed', null)).toBe(false)
   })
 
   test('reconciles human-needed PR labels back to agent:failed on startup', () => {

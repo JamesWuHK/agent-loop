@@ -308,6 +308,16 @@ export async function runIssueRecovery(
   const afterHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
   const commitCreated = beforeHead !== afterHead
 
+  if (result.failureKind === 'remote_closed') {
+    return {
+      success: false,
+      exitCode: result.exitCode,
+      error: result.stderr || 'issue recovery aborted because the remote issue is already done/closed',
+      commitCreated: false,
+      failureKind: result.failureKind,
+    }
+  }
+
   if (result.exitCode !== 0) {
     if (commitCreated) {
       logger.warn(`[issue-recovery] agent exited ${result.exitCode} but created commit ${afterHead.slice(0, 7)} — continuing`)

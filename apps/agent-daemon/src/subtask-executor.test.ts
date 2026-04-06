@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
@@ -7,6 +7,7 @@ import {
   buildIssueRecoveryPrompt,
   buildReviewAutoFixPrompt,
   runIssueBranchPreflight,
+  runIssueRecovery,
   salvageDirtyWorktree,
   shouldTreatCleanNoCommitSubtaskAsSuccess,
   validateReviewAutoFixScope,
@@ -178,6 +179,56 @@ describe('buildIssueRecoveryPrompt', () => {
     expect(prompt).toContain('App stays on /login because there is no real login flow yet.')
     expect(prompt).toContain('cd apps/desktop && bun run --bun test src/App.test.tsx')
     expect(prompt).toContain('Prefer Bun-native execution to avoid host Node mismatches')
+  })
+})
+
+describe('runIssueRecovery', () => {
+  it('returns remote_closed without salvaging when the linked issue is already done elsewhere', async () => {
+    const dir = await createGitRepo()
+    const scriptDir = mkdtempSync(join(tmpdir(), 'subtask-executor-agent-'))
+    tempDirs.push(scriptDir)
+    const scriptPath = join(scriptDir, 'fake-claude.sh')
+
+    writeFileSync(
+      scriptPath,
+      '#!/bin/sh\ncat >/dev/null\nwhile :; do :; done\n',
+      'utf-8',
+    )
+    chmodSync(scriptPath, 0o755)
+
+    const result = await runIssueRecovery(
+      dir,
+      104,
+      'test issue',
+      'test body',
+      {
+        ...TEST_CONFIG,
+        agent: {
+          ...TEST_CONFIG.agent,
+          primary: 'claude',
+          fallback: null,
+          claudePath: scriptPath,
+        },
+      },
+      console,
+      null,
+      [],
+      {
+        agentMonitor: {
+          heartbeatIntervalMs: 50,
+          idleTimeoutMs: 2_000,
+          shouldAbort: () => true,
+        },
+      },
+    )
+
+    expect(result.success).toBe(false)
+    expect(result.failureKind).toBe('remote_closed')
+    expect(result.commitCreated).toBe(false)
+    expect(result.error).toContain('remote issue is already done')
+
+    const status = (await Bun.$`git -C ${dir} status --short`.quiet().text()).trim()
+    expect(status).toBe('')
   })
 })
 

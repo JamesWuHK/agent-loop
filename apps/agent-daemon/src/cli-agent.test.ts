@@ -198,4 +198,49 @@ describe('cli-agent', () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  test('aborts agent runs when the monitor reports the remote issue is already closed', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-abort-test-'))
+    const scriptPath = join(tempDir, 'fake-claude.sh')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      writeFileSync(
+        scriptPath,
+        '#!/bin/sh\ncat >/dev/null\nwhile :; do :; done\n',
+        'utf-8',
+      )
+      chmodSync(scriptPath, 0o755)
+      mkdirSync(worktreePath, { recursive: true })
+
+      const result = await runConfiguredAgent({
+        prompt: 'noop',
+        worktreePath,
+        timeoutMs: 5_000,
+        config: {
+          ...baseConfig,
+          agent: {
+            ...baseConfig.agent,
+            primary: 'claude',
+            fallback: 'codex',
+            claudePath: scriptPath,
+            codexPath: '/path/that/should/not/run',
+          },
+        },
+        monitor: {
+          heartbeatIntervalMs: 50,
+          idleTimeoutMs: 2_000,
+          shouldAbort: () => true,
+        },
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.failureKind).toBe('remote_closed')
+      expect(result.stderr).toContain('remote issue is already done')
+      expect(result.usedAgent).toBe('claude')
+      expect(result.usedFallback).toBe(false)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 })
