@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  PR_REVIEW_LABELS,
   getActiveManagedLease,
   listIssueComments,
   listOpenAgentIssues,
@@ -14,6 +15,10 @@ import {
   collectDaemonObservability,
   type DaemonObservabilitySnapshot,
 } from './status'
+import {
+  canResumeHumanNeededPrReview,
+  extractLatestAutomatedPrReviewBlockerSummary,
+} from './pr-reviewer'
 import {
   listBackgroundRuntimeRecords,
   type BackgroundRuntimeSnapshot,
@@ -149,6 +154,11 @@ export interface DashboardPullRequestView {
   labels: string[]
   isDraft: boolean
   linkedIssueNumber: number | null
+  blockerAttempt: number | null
+  blockerReason: string | null
+  blockerFindingSummary: string | null
+  blockerUpdatedAt: string | null
+  blockerResumable: boolean
   reviewLease: DashboardLeaseView | null
   mergeLease: DashboardLeaseView | null
 }
@@ -560,6 +570,7 @@ async function collectGitHubDashboardData(input: {
   ])
 
   const linkedPrsByIssue = new Map<number, ManagedPullRequest[]>()
+  const issueBodiesByNumber = new Map(issues.map((issue) => [issue.number, issue.body]))
   for (const pr of prs) {
     const issueNumber = parseIssueNumberFromManagedBranch(pr.headRefName)
     if (issueNumber === null) continue
@@ -629,29 +640,79 @@ async function collectGitHubDashboardData(input: {
     .sort(compareIssues)
 
   const prViews = prs
-    .map((pr) => ({
-      number: pr.number,
-      title: pr.title,
-      url: pr.url,
-      headRefName: pr.headRefName,
-      labels: pr.labels,
-      isDraft: pr.isDraft,
-      linkedIssueNumber: parseIssueNumberFromManagedBranch(pr.headRefName),
-      reviewLease: preferLocalLease(
-        input.localLeaseIndex,
-        reviewLeaseMap.get(pr.number) ?? null,
-      ),
-      mergeLease: preferLocalLease(
-        input.localLeaseIndex,
-        mergeLeaseMap.get(pr.number) ?? null,
-      ),
-    }) satisfies DashboardPullRequestView)
+    .map((pr) => {
+      const linkedIssueNumber = parseIssueNumberFromManagedBranch(pr.headRefName)
+      const prCommentList = prComments.find((entry) => entry.pr.number === pr.number)?.comments ?? []
+      const blocker = buildDashboardPrBlocker(
+        pr,
+        prCommentList,
+        linkedIssueNumber === null ? null : (issueBodiesByNumber.get(linkedIssueNumber) ?? null),
+      )
+
+      return ({
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        headRefName: pr.headRefName,
+        labels: pr.labels,
+        isDraft: pr.isDraft,
+        linkedIssueNumber,
+        blockerAttempt: blocker?.attempt ?? null,
+        blockerReason: blocker?.reason ?? null,
+        blockerFindingSummary: blocker?.findingSummary ?? null,
+        blockerUpdatedAt: blocker?.updatedAt ?? null,
+        blockerResumable: blocker?.resumable ?? false,
+        reviewLease: preferLocalLease(
+          input.localLeaseIndex,
+          reviewLeaseMap.get(pr.number) ?? null,
+        ),
+        mergeLease: preferLocalLease(
+          input.localLeaseIndex,
+          mergeLeaseMap.get(pr.number) ?? null,
+        ),
+      }) satisfies DashboardPullRequestView
+    })
     .sort(comparePullRequests)
 
   return {
     issues: issueViews,
     prs: prViews,
     remoteLeases,
+  }
+}
+
+function buildDashboardPrBlocker(
+  pr: Pick<ManagedPullRequest, 'number' | 'headRefName' | 'headRefOid' | 'labels'>,
+  comments: Awaited<ReturnType<typeof listIssueComments>>,
+  linkedIssueBody: string | null,
+): {
+  attempt: number | null
+  reason: string
+  findingSummary: string | null
+  updatedAt: string | null
+  resumable: boolean
+} | null {
+  const labelSet = new Set(pr.labels)
+  if (!labelSet.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && !labelSet.has(PR_REVIEW_LABELS.FAILED)) {
+    return null
+  }
+
+  const latest = extractLatestAutomatedPrReviewBlockerSummary(comments)
+  if (!latest) return null
+
+  return {
+    attempt: latest.attempt,
+    reason: latest.reason,
+    findingSummary: latest.findingSummary,
+    updatedAt: latest.commentUpdatedAt,
+    resumable: labelSet.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? canResumeHumanNeededPrReview(
+          comments,
+          3,
+          pr.headRefOid,
+          linkedIssueBody,
+        )
+      : false,
   }
 }
 
@@ -905,7 +966,7 @@ function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): Dash
   }
 }
 
-function renderDashboardHtml(): string {
+export function renderDashboardHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -1009,7 +1070,7 @@ function renderDashboardHtml(): string {
 </html>`
 }
 
-function renderDashboardCss(): string {
+export function renderDashboardCss(): string {
   return `:root {
   color-scheme: light;
   --bg-top: #f6efe3;
@@ -1382,6 +1443,19 @@ a:hover {
   margin-bottom: 6px;
 }
 
+.table-note {
+  border-radius: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(60, 86, 76, 0.1);
+  background: rgba(247, 239, 226, 0.75);
+  line-height: 1.45;
+}
+
+.table-note-error {
+  border-color: rgba(179, 77, 61, 0.16);
+  background: rgba(255, 244, 240, 0.92);
+}
+
 .log-controls {
   display: flex;
   gap: 10px;
@@ -1444,7 +1518,7 @@ select {
 }`
 }
 
-function renderDashboardAppScript(): string {
+export function renderDashboardAppScript(): string {
   return `const refreshIntervalMs = ${DEFAULT_DASHBOARD_REFRESH_INTERVAL_MS};
 const state = {
   snapshot: null,
@@ -1661,6 +1735,9 @@ function renderPullRequests(prs) {
     const draft = pr.isDraft ? renderChip('草稿', 'gold') : '';
     const reviewLease = pr.reviewLease ? renderInlineLease(pr.reviewLease) : '<span class="muted">无</span>';
     const mergeLease = pr.mergeLease ? renderInlineLease(pr.mergeLease) : '<span class="muted">无</span>';
+    const blocker = pr.blockerReason
+      ? '<div class="table-note table-note-error" style="margin-top:8px"><strong>阻塞原因</strong> · attempt ' + escapeHtml(String(pr.blockerAttempt ?? '?')) + (pr.blockerUpdatedAt ? ' · ' + escapeHtml(formatTimestamp(pr.blockerUpdatedAt)) : '') + (pr.blockerResumable ? ' · 可自动续跑' : '') + '<br>' + escapeHtml(pr.blockerReason) + (pr.blockerFindingSummary ? '<br><span class="muted">Top finding: ' + escapeHtml(pr.blockerFindingSummary) + '</span>' : '') + '</div>'
+      : '';
 
     return [
       '<tr>',
@@ -1671,6 +1748,7 @@ function renderPullRequests(prs) {
       draft,
       pr.labels.map((label) => renderChip(label, label.indexOf('approved') !== -1 ? 'accent' : label.indexOf('human-needed') !== -1 ? 'error' : '')).join(''),
       '</div>',
+      blocker,
       '</td>',
       '<td><div>' + escapeHtml(pr.headRefName) + '</div></td>',
       '<td>' + reviewLease + '</td>',

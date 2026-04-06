@@ -11,6 +11,7 @@ import {
   classifyPrReviewOutcome,
   buildReviewFeedback,
   collectDependencyDirectories,
+  extractLatestAutomatedPrReviewBlockerSummary,
   extractLatestAutomatedPrReviewState,
   extractIssueNumberFromPrBody,
   extractIssueNumberFromPrTitle,
@@ -350,6 +351,24 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
           },
         ],
       },
+      commentCreatedAt: '2026-04-05T08:00:00.000Z',
+      commentUpdatedAt: '2026-04-05T08:10:00.000Z',
+    })
+  })
+
+  test('extracts the latest automated PR review blocker summary', () => {
+    expect(extractLatestAutomatedPrReviewBlockerSummary([
+      {
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Approval bar flow regressed","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"approval CTA no longer opens the existing action flow","mustFix":["restore the approval action handlers"],"mustNotDo":["do not replace the approval bar with execution log UI"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.approval-bar.test.tsx"],"scopeRationale":"issue #105 requires preserving the approval-bar contract while adding logging"}]} -->
+## Automated review still failing — human intervention required`,
+      },
+    ])).toEqual({
+      attempt: 1,
+      reason: 'Approval bar flow regressed',
+      findingSummary: 'approval CTA no longer opens the existing action flow',
       commentCreatedAt: '2026-04-05T08:00:00.000Z',
       commentUpdatedAt: '2026-04-05T08:10:00.000Z',
     })

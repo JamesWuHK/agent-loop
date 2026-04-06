@@ -17,7 +17,10 @@ import {
   METRICS_PATH,
   METRICS_PORT_DEFAULT,
 } from './metrics'
-import { canResumeHumanNeededPrReview } from './pr-reviewer'
+import {
+  canResumeHumanNeededPrReview,
+  extractLatestAutomatedPrReviewBlockerSummary,
+} from './pr-reviewer'
 import type { BackgroundRuntimeSnapshot } from './background'
 import {
   buildLaunchdServicePaths,
@@ -147,10 +150,23 @@ export interface GitHubLeaseAuditCheck {
   adoptable?: boolean | null
 }
 
+export interface GitHubPrBlockerSummary {
+  prNumber: number
+  issueNumber: number | null
+  labels: string[]
+  headRefName: string
+  attempt: number | null
+  reason: string
+  findingSummary: string | null
+  updatedAt: string | null
+  resumable: boolean
+}
+
 export interface GitHubLeaseAudit {
   ok: boolean
   error: string | null
   checks: GitHubLeaseAuditCheck[]
+  prBlockers: GitHubPrBlockerSummary[]
   warnings: string[]
 }
 
@@ -376,6 +392,9 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
       ...(snapshot.localRuntime ? [`runtime files: record ${snapshot.localRuntime.recordPath} | log ${snapshot.localRuntime.logPath}`] : []),
       `health: ${snapshot.healthUrl}`,
       `error: ${snapshot.error ?? 'unknown error'}`,
+      ...(snapshot.githubAudit?.prBlockers.length
+        ? [`pr blockers: ${formatGitHubPrBlockersInlineSummary(snapshot.githubAudit.prBlockers)}`]
+        : []),
       `hint: ${buildOfflineStatusHint(snapshot)}`,
     ].join('\n')
   }
@@ -433,6 +452,9 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   lines.push(
     `endpoints: health ${snapshot.healthUrl} | metrics ${snapshot.metricsUrl ?? 'unknown'}`,
   )
+  if (snapshot.githubAudit?.prBlockers.length) {
+    lines.push(`pr blockers: ${formatGitHubPrBlockersInlineSummary(snapshot.githubAudit.prBlockers)}`)
+  }
 
   if (snapshot.warnings.length > 0) {
     lines.push(`warnings: ${snapshot.warnings.join(' | ')}`)
@@ -450,6 +472,11 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         : snapshot.githubAudit.checks.length === 0
           ? ['none']
           : snapshot.githubAudit.checks.map((check) => formatGitHubAuditLine(check))
+    const prBlockerLines = snapshot.githubAudit === null
+      ? ['not available']
+      : snapshot.githubAudit.prBlockers.length === 0
+        ? ['none']
+        : snapshot.githubAudit.prBlockers.map((blocker) => formatGitHubPrBlockerLine(blocker))
 
     return [
       'Daemon Doctor',
@@ -471,6 +498,9 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
             ...(snapshot.localRuntime.launchd ? formatLaunchdDoctorLines(snapshot.localRuntime.launchd) : []),
           ]
         : []),
+      '',
+      'PR Review Blockers',
+      ...prBlockerLines,
       '',
       'GitHub Audit',
       ...gitHubAuditLines,
@@ -508,6 +538,11 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
       : snapshot.githubAudit.checks.length === 0
         ? ['none']
         : snapshot.githubAudit.checks.map((check) => formatGitHubAuditLine(check))
+  const prBlockerLines = snapshot.githubAudit === null
+    ? ['not requested']
+    : snapshot.githubAudit.prBlockers.length === 0
+      ? ['none']
+      : snapshot.githubAudit.prBlockers.map((blocker) => formatGitHubPrBlockerLine(blocker))
   const outcomeLines = snapshot.metrics
     ? [
         `polls: ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)}`,
@@ -598,6 +633,9 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     '',
     'Recent Recovery Actions',
     ...recoveryHistoryLines,
+    '',
+    'PR Review Blockers',
+    ...prBlockerLines,
     '',
     'GitHub Audit',
     ...gitHubAuditLines,
@@ -965,6 +1003,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (((snapshot.metrics?.mergeRecovery.refresh_push_failed ?? 0) + (snapshot.metrics?.mergeRecovery.retry_merge_failed ?? 0)) > 0) {
     warnings.push('merge recovery has recent push/merge retry failures; inspect the latest PR recovery comments')
   }
+  if ((snapshot.githubAudit?.prBlockers.length ?? 0) > 0) {
+    warnings.push(`open PR review blockers: ${snapshot.githubAudit?.prBlockers.map((blocker) => `pr#${blocker.prNumber}`).join(', ')}`)
+  }
   if (snapshot.githubAudit?.warnings.length) {
     warnings.push(...snapshot.githubAudit.warnings)
   }
@@ -1027,6 +1068,7 @@ export async function collectGitHubLeaseAudit(
     ok: error === null,
     error,
     checks,
+    prBlockers: remote.prBlockers,
     warnings: [
       ...checks.flatMap((check) => check.warning ? [check.warning] : []),
       ...checks.flatMap((check) => {
@@ -1036,6 +1078,9 @@ export async function collectGitHubLeaseAudit(
           `${formatLeaseIdentity(check.scope, check.targetNumber)} has been blocked on GitHub for over ${formatNullableSeconds(BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS)}`,
         ]
       }),
+      ...(remote.prBlockers.length > 0
+        ? [`open PR review blockers: ${remote.prBlockers.map((blocker) => `pr#${blocker.prNumber}`).join(', ')}`]
+        : []),
       ...(remote.error ? [`GitHub audit unavailable: ${remote.error}`] : []),
     ],
   }
@@ -1376,7 +1421,7 @@ async function collectRemoteGitHubLeaseChecks(
   health: GitHubAuditInput,
   knownKeys: Set<string>,
   runner: GhJsonRunner,
-): Promise<{ checks: GitHubLeaseAuditCheck[]; error: string | null }> {
+): Promise<{ checks: GitHubLeaseAuditCheck[]; prBlockers: GitHubPrBlockerSummary[]; error: string | null }> {
   const [issueListResult, prListResult] = await Promise.all([
     runner([
       'issue',
@@ -1407,22 +1452,26 @@ async function collectRemoteGitHubLeaseChecks(
   if (!issueListResult.ok) {
     return {
       checks: [],
+      prBlockers: [],
       error: issueListResult.error ?? 'failed to list open issues',
     }
   }
   if (!prListResult.ok) {
     return {
       checks: [],
+      prBlockers: [],
       error: prListResult.error ?? 'failed to list open PRs',
     }
   }
 
   const checks: GitHubLeaseAuditCheck[] = []
+  const prBlockers: GitHubPrBlockerSummary[] = []
   const prCommentsByNumber = new Map<number, IssueComment[]>()
   const openIssues = normalizeGitHubIssueList(issueListResult.data)
     .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
   const openPrs = normalizeGitHubPrList(prListResult.data)
     .filter((pr) => pr.headRefName.startsWith('agent/'))
+  const issueBodiesByNumber = new Map(openIssues.map((issue) => [issue.number, issue.body]))
 
   for (const issue of openIssues) {
     const key = buildLeaseAuditKey('issue-process', issue.number)
@@ -1437,6 +1486,7 @@ async function collectRemoteGitHubLeaseChecks(
     if (commentResult.error) {
       return {
         checks,
+        prBlockers,
         error: `issue-process#${issue.number}: ${commentResult.error}`,
       }
     }
@@ -1454,12 +1504,24 @@ async function collectRemoteGitHubLeaseChecks(
     if (commentResult.error) {
       return {
         checks,
+        prBlockers,
         error: `PR #${pr.number}: ${commentResult.error}`,
       }
     }
     if (!commentResult.comments) continue
 
     prCommentsByNumber.set(pr.number, commentResult.comments)
+    const blocker = buildGitHubPrBlockerSummary(
+      pr,
+      commentResult.comments,
+      (() => {
+        const issueNumber = parseIssueNumberFromManagedBranch(pr.headRefName)
+        return issueNumber === null ? null : (issueBodiesByNumber.get(issueNumber) ?? null)
+      })(),
+    )
+    if (blocker) {
+      prBlockers.push(blocker)
+    }
     for (const scope of ['pr-review', 'pr-merge'] as const) {
       const key = buildLeaseAuditKey(scope, pr.number)
       if (knownKeys.has(key)) continue
@@ -1479,6 +1541,12 @@ async function collectRemoteGitHubLeaseChecks(
 
   return {
     checks,
+    prBlockers: prBlockers.sort((left, right) => {
+      const leftUpdated = left.updatedAt ? Date.parse(left.updatedAt) : 0
+      const rightUpdated = right.updatedAt ? Date.parse(right.updatedAt) : 0
+      if (leftUpdated !== rightUpdated) return rightUpdated - leftUpdated
+      return left.prNumber - right.prNumber
+    }),
     error: null,
   }
 }
@@ -1706,6 +1774,39 @@ function collectRemoteBlockedIssueResumeChecks(
   return checks
 }
 
+function buildGitHubPrBlockerSummary(
+  pr: { number: number; labels: string[]; headRefName: string; headRefOid: string | null },
+  comments: IssueComment[],
+  linkedIssueBody: string | null,
+): GitHubPrBlockerSummary | null {
+  const labelSet = new Set(pr.labels)
+  if (!labelSet.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && !labelSet.has(PR_REVIEW_LABELS.FAILED)) {
+    return null
+  }
+
+  const latest = extractLatestAutomatedPrReviewBlockerSummary(comments)
+  if (!latest) return null
+
+  return {
+    prNumber: pr.number,
+    issueNumber: parseIssueNumberFromManagedBranch(pr.headRefName),
+    labels: pr.labels,
+    headRefName: pr.headRefName,
+    attempt: latest.attempt,
+    reason: latest.reason,
+    findingSummary: latest.findingSummary,
+    updatedAt: latest.commentUpdatedAt,
+    resumable: labelSet.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? canResumeHumanNeededPrReview(
+          comments,
+          GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          pr.headRefOid,
+          linkedIssueBody,
+        )
+      : false,
+  }
+}
+
 function getLatestAutomatedPrReviewCommentAgeSeconds(comments: IssueComment[]): number | null {
   for (let index = comments.length - 1; index >= 0; index -= 1) {
     const comment = comments[index]
@@ -1714,6 +1815,39 @@ function getLatestAutomatedPrReviewCommentAgeSeconds(comments: IssueComment[]): 
   }
 
   return null
+}
+
+function formatGitHubPrBlockersInlineSummary(blockers: GitHubPrBlockerSummary[]): string {
+  const rendered = blockers.slice(0, 2).map((blocker) => {
+    const attempt = blocker.attempt === null ? 'attempt ?' : `attempt ${blocker.attempt}`
+    const updated = blocker.updatedAt ? ` @ ${blocker.updatedAt}` : ''
+    const resumable = blocker.resumable ? ' | auto-resume yes' : ''
+    return `pr#${blocker.prNumber}${blocker.issueNumber === null ? '' : `<-issue#${blocker.issueNumber}`} ${attempt}${updated}: ${truncateSingleLine(blocker.reason, 120)}${resumable}`
+  })
+
+  if (blockers.length > 2) {
+    rendered.push(`+${blockers.length - 2} more`)
+  }
+
+  return rendered.join(' | ')
+}
+
+function formatGitHubPrBlockerLine(blocker: GitHubPrBlockerSummary): string {
+  return [
+    `pr#${blocker.prNumber}${blocker.issueNumber === null ? '' : ` <- issue#${blocker.issueNumber}`}`,
+    `labels=${blocker.labels.join(',') || 'none'}`,
+    `attempt=${blocker.attempt ?? 'unknown'}`,
+    `updated=${blocker.updatedAt ?? 'unknown'}`,
+    `auto_resume=${blocker.resumable ? 'yes' : 'no'}`,
+    `reason=${blocker.reason}`,
+    blocker.findingSummary ? `top_finding=${blocker.findingSummary}` : null,
+  ].filter((value): value is string => value !== null).join(' | ')
+}
+
+function truncateSingleLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
 }
 
 function parseIssueNumberFromManagedBranch(headRefName: string): number | null {

@@ -63,7 +63,7 @@ interface AutomatedPrReviewMetadata {
   issueContractFingerprint?: string
 }
 
-interface AutomatedPrReviewCommentLike {
+export interface AutomatedPrReviewCommentLike {
   body: string
   createdAt?: string
   updatedAt?: string
@@ -72,6 +72,14 @@ interface AutomatedPrReviewCommentLike {
 export interface LatestAutomatedPrReviewState {
   metadata: AutomatedPrReviewMetadata
   feedback: StructuredReviewFeedbackPayload | null
+  commentCreatedAt: string | null
+  commentUpdatedAt: string | null
+}
+
+export interface LatestAutomatedPrReviewBlockerSummary {
+  attempt: number
+  reason: string
+  findingSummary: string | null
   commentCreatedAt: string | null
   commentUpdatedAt: string | null
 }
@@ -510,6 +518,32 @@ export function extractLatestAutomatedPrReviewState(
   return null
 }
 
+export function extractLatestAutomatedPrReviewBlockerSummary(
+  comments: AutomatedPrReviewCommentLike[],
+): LatestAutomatedPrReviewBlockerSummary | null {
+  for (let index = comments.length - 1; index >= 0; index--) {
+    const comment = comments[index]
+    const body = comment?.body ?? ''
+    const metadata = extractAutomatedPrReviewMetadata(body)
+    if (!metadata) continue
+    if (metadata.approved || metadata.canMerge) return null
+
+    const feedback = extractStructuredReviewFeedback(body)
+    const reason = feedback?.reason ?? extractLegacyAutomatedPrReviewReason(body)
+    if (!reason) return null
+
+    return {
+      attempt: metadata.attempt,
+      reason,
+      findingSummary: feedback?.findings?.[0]?.summary ?? extractLegacyAutomatedPrReviewFindingSummary(body),
+      commentCreatedAt: comment?.createdAt ?? null,
+      commentUpdatedAt: comment?.updatedAt ?? comment?.createdAt ?? null,
+    }
+  }
+
+  return null
+}
+
 export function getNextAutomatedPrReviewAttempt(
   comments: AutomatedPrReviewCommentLike[],
 ): number {
@@ -858,6 +892,18 @@ function extractStructuredReviewFeedback(body: string): StructuredReviewFeedback
   } catch {
     return null
   }
+}
+
+function extractLegacyAutomatedPrReviewReason(body: string): string | null {
+  const reasonMatch = body.match(/- Reason:\s+([^\n]+)/)
+  const reason = reasonMatch?.[1]?.trim() ?? ''
+  return reason.length > 0 ? reason : null
+}
+
+function extractLegacyAutomatedPrReviewFindingSummary(body: string): string | null {
+  const findingMatch = body.match(/^  - (.+)$/m)
+  const finding = findingMatch?.[1]?.trim() ?? ''
+  return finding.length > 0 ? finding : null
 }
 
 export function validateRejectedReviewFindings(

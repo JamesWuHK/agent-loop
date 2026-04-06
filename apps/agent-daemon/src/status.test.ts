@@ -343,7 +343,25 @@ describe('status helpers', () => {
       health: baseHealth,
       metrics: summarizeDaemonMetrics(metricsText),
       metricsError: null,
-      githubAudit: null,
+      githubAudit: {
+        ok: true,
+        error: null,
+        checks: [],
+        prBlockers: [
+          {
+            prNumber: 239,
+            issueNumber: 105,
+            labels: ['agent:review-failed', 'agent:human-needed'],
+            headRefName: 'agent/105/codex-20260403',
+            attempt: 5,
+            reason: 'The PR breaks the existing approval-bar flow that this issue explicitly had to preserve while adding execution-status logging.',
+            findingSummary: 'approval CTA no longer drives the existing approval action flow',
+            updatedAt: '2026-04-06T01:23:45.000Z',
+            resumable: false,
+          },
+        ],
+        warnings: ['open PR review blockers: pr#239'],
+      },
       warnings: [
         'startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile',
       ],
@@ -363,6 +381,7 @@ describe('status helpers', () => {
     expect(report).toContain('launchd: loaded yes | state running | runs 2 | last signal Terminated: 15')
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
+    expect(report).toContain('pr blockers: pr#239<-issue#105 attempt 5 @ 2026-04-06T01:23:45.000Z: The PR breaks the existing approval-bar flow')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
 
@@ -389,12 +408,27 @@ describe('status helpers', () => {
             warning: 'issue-process#77 has an active lease but issue state is stale (expected working)',
           },
         ],
+        prBlockers: [
+          {
+            prNumber: 239,
+            issueNumber: 105,
+            labels: ['agent:review-failed', 'agent:human-needed'],
+            headRefName: 'agent/105/codex-20260403',
+            attempt: 5,
+            reason: 'The PR breaks the existing approval-bar flow that this issue explicitly had to preserve while adding execution-status logging.',
+            findingSummary: 'approval CTA no longer drives the existing approval action flow',
+            updatedAt: '2026-04-06T01:23:45.000Z',
+            resumable: false,
+          },
+        ],
         warnings: [
+          'open PR review blockers: pr#239',
           'issue-process#77 has an active lease but issue state is stale (expected working)',
         ],
       },
       warnings: [
         'startup recovery is still pending; the daemon is waiting to finish its GitHub/network reconcile',
+        'open PR review blockers: pr#239',
         'review auto-fix push failures observed: 1',
       ],
     })
@@ -420,6 +454,9 @@ describe('status helpers', () => {
     expect(report).toContain('issue#91<-pr#110 | blocked 45s')
     expect(report).toContain('Recent Recovery Actions')
     expect(report).toContain('issue-process-idle-timeout/recoverable | target=issue-process#77')
+    expect(report).toContain('PR Review Blockers')
+    expect(report).toContain('pr#239 <- issue#105 | labels=agent:review-failed,agent:human-needed | attempt=5')
+    expect(report).toContain('reason=The PR breaks the existing approval-bar flow that this issue explicitly had to preserve while adding execution-status logging.')
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#77 | state=open | labels=agent:stale | warning=issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(report).toContain('merge-recovery: merged_initial=1')
@@ -427,6 +464,7 @@ describe('status helpers', () => {
     expect(report).toContain('blocked-issue-resumes: 1')
     expect(report).toContain('blocked-issue-resume-age-seconds: 45')
     expect(report).toContain('oldest blocked issue resume age: 45s')
+    expect(report).toContain('- open PR review blockers: pr#239')
     expect(report).toContain('- review auto-fix push failures observed: 1')
   })
 
@@ -1085,11 +1123,24 @@ describe('status helpers', () => {
     expect(snapshot.ok).toBe(false)
     expect(snapshot.githubAudit?.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
     expect(snapshot.githubAudit?.warnings).toContain('issue-process#91 has been blocked on GitHub for over 300s')
+    expect(snapshot.githubAudit?.warnings).toContain('open PR review blockers: pr#110')
+    expect(snapshot.githubAudit?.prBlockers).toContainEqual(expect.objectContaining({
+      prNumber: 110,
+      issueNumber: 91,
+      attempt: 3,
+      reason: 'Selection state still breaks the issue contract.',
+      findingSummary: 'selection mode regressed the required session list behavior',
+      resumable: false,
+    }))
     expect(snapshot.warnings).toContain('daemon health endpoint is not reachable at http://127.0.0.1:1/health')
     expect(snapshot.warnings).toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
     expect(snapshot.warnings).toContain('issue-process#91 has been blocked on GitHub for over 300s')
+    expect(snapshot.warnings).toContain('open PR review blockers: pr#110')
 
     const report = formatDoctorReport(snapshot)
+    expect(report).toContain('PR Review Blockers')
+    expect(report).toContain('pr#110 <- issue#91 | labels=agent:review-failed,agent:human-needed | attempt=3')
+    expect(report).toContain('reason=Selection state still breaks the issue contract.')
     expect(report).toContain('issue-process#91 | state=open | labels=agent:failed | warning=issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path | blocked_age=')
     expect(report).toContain('- issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
     expect(report).toContain('- issue-process#91 has been blocked on GitHub for over 300s')

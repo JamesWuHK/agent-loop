@@ -285,7 +285,7 @@ async function main() {
       healthHost: (args['health-host'] as string | undefined) ?? DEFAULT_HEALTH_SERVER_HOST,
       healthPort: runtimeHealthPortHint ?? discoveredRuntime?.record.healthPort ?? DEFAULT_HEALTH_SERVER_PORT,
       metricsPort: metricsPort ?? discoveredRuntime?.record.metricsPort,
-      includeGitHubAudit: Boolean(args.doctor),
+      includeGitHubAudit: true,
       fallbackRepo,
       fallbackRuntime: discoveredRuntime ?? undefined,
     })
