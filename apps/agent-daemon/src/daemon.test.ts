@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
 import {
   AgentDaemon,
+  buildIssueWorkingTransitionEvent,
   buildBlockedIssueResumeEscalationComment,
   buildDaemonRuntimeStatus,
   buildIssuePreflightFailureComment,
@@ -57,6 +58,29 @@ describe('issue preflight comments', () => {
 })
 
 describe('daemon merge recovery helpers', () => {
+  test('skips duplicate claimed comments when a freshly claimed issue enters working', () => {
+    expect(buildIssueWorkingTransitionEvent('fresh-claim', 'codex-dev')).toBeNull()
+  })
+
+  test('emits structured claimed events for resume and recoverable working transitions', () => {
+    const resumed = buildIssueWorkingTransitionEvent('resume', 'codex-dev', 'resume-existing-worktree')
+    const recoverable = buildIssueWorkingTransitionEvent('recoverable', 'codex-dev', 'idle timeout')
+
+    expect(resumed).toMatchObject({
+      event: 'claimed',
+      machine: 'codex-dev',
+      reason: 'resume-existing-worktree',
+    })
+    expect(typeof resumed?.ts).toBe('string')
+
+    expect(recoverable).toMatchObject({
+      event: 'claimed',
+      machine: 'codex-dev',
+      reason: 'recoverable:idle timeout',
+    })
+    expect(typeof recoverable?.ts).toBe('string')
+  })
+
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {
     const config: AgentConfig = {
       machineId: 'codex-dev',

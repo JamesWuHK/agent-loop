@@ -6,6 +6,7 @@ import type {
   AgentConfig,
   AgentIssue,
   BlockedIssueResumeRuntimeDetail,
+  ClaimEvent,
   DaemonStatus,
   IssueComment,
   ManagedLease,
@@ -76,6 +77,9 @@ export const HEALTH_PATH = '/health'
 export const DEFAULT_HEALTH_SERVER_PORT = 9310
 export const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
 const LOCAL_METRICS_HOST = '127.0.0.1'
+
+export type IssueWorkingTransitionKind = 'fresh-claim' | 'resume' | 'recoverable'
+
 const RETRYABLE_DAEMON_ERROR_PATTERNS = [
   'timeout',
   'timed out',
@@ -478,12 +482,7 @@ export class AgentDaemon {
       issueNumber,
       ISSUE_LABELS.WORKING,
       ISSUE_LABELS.WORKING,
-      {
-        event: 'claimed',
-        machine: this.config.machineId,
-        ts: new Date().toISOString(),
-        reason: `recoverable:${reason}`,
-      },
+      buildIssueWorkingTransitionEvent('recoverable', this.config.machineId, reason),
       this.config,
     )
   }
@@ -1769,12 +1768,11 @@ export class AgentDaemon {
           issueNumber,
           ISSUE_LABELS.WORKING,
           ISSUE_LABELS.FAILED,
-          {
-            event: 'claimed',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          },
+          buildIssueWorkingTransitionEvent(
+            'resume',
+            this.config.machineId,
+            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          ),
           this.config,
         )
       } else {
@@ -1782,12 +1780,11 @@ export class AgentDaemon {
           issueNumber,
           ISSUE_LABELS.WORKING,
           ISSUE_LABELS.WORKING,
-          {
-            event: 'claimed',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          },
+          buildIssueWorkingTransitionEvent(
+            'resume',
+            this.config.machineId,
+            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          ),
           this.config,
         )
       }
@@ -2491,11 +2488,7 @@ export class AgentDaemon {
         issueNumber,
         ISSUE_LABELS.WORKING,
         ISSUE_LABELS.CLAIMED,
-        {
-          event: 'claimed',
-          machine: this.config.machineId,
-          ts: new Date().toISOString(),
-        },
+        buildIssueWorkingTransitionEvent('fresh-claim', this.config.machineId),
         this.config,
       )
 
@@ -3219,6 +3212,23 @@ async function readRemoteBranchBaseSyncState(
 export function isRetryableDaemonLoopError(error: unknown): boolean {
   const message = formatDaemonError(error).toLowerCase()
   return RETRYABLE_DAEMON_ERROR_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
+export function buildIssueWorkingTransitionEvent(
+  kind: IssueWorkingTransitionKind,
+  machineId: string,
+  reason?: string,
+): ClaimEvent | null {
+  if (kind === 'fresh-claim') return null
+
+  return {
+    event: 'claimed',
+    machine: machineId,
+    ts: new Date().toISOString(),
+    reason: kind === 'recoverable' && reason
+      ? `recoverable:${reason}`
+      : reason,
+  }
 }
 
 export function shouldResumeManagedIssue(

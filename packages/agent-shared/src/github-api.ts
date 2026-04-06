@@ -456,10 +456,12 @@ export async function transitionIssueState(
   issueNumber: number,
   addLabel: string,
   removeLabel: string | null,
-  event: ClaimEvent,
+  event: ClaimEvent | null | undefined,
   config: AgentConfig,
 ): Promise<void> {
   await setManagedIssueStateLabels(issueNumber, addLabel, config)
+
+  if (!event) return
 
   // Add event comment via temp file (gh issue edit has no --comment-file)
   writeFileSync(TMP_COMMENT_FILE, buildEventComment(event), 'utf-8')
