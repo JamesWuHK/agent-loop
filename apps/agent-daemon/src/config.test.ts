@@ -101,6 +101,7 @@ describe('buildConfig', () => {
       leaseTtlMs: 60_000,
       workerIdleTimeoutMs: 300_000,
       leaseAdoptionBackoffMs: 5_000,
+      leaseNoProgressTimeoutMs: 360_000,
     })
     expect(config.worktreesBase).toBe('/tmp/agent-loop-home/.agent-worktrees/JamesWuHK-digital-employee')
   })
@@ -126,6 +127,7 @@ describe('buildConfig', () => {
     expect(config.requestedConcurrency).toBe(1)
     expect(config.concurrency).toBe(1)
     expect(config.recovery.leaseTtlMs).toBe(60_000)
+    expect(config.recovery.leaseNoProgressTimeoutMs).toBe(360_000)
   })
 
   test('allows repo-local config to disable agent fallback explicitly', () => {
@@ -237,6 +239,7 @@ describe('buildConfig', () => {
             leaseTtlMs: 45_000,
             workerIdleTimeoutMs: 90_000,
             leaseAdoptionBackoffMs: 12_000,
+            leaseNoProgressTimeoutMs: 180_000,
           },
         },
         repoConfig: {},
@@ -250,7 +253,30 @@ describe('buildConfig', () => {
       leaseTtlMs: 45_000,
       workerIdleTimeoutMs: 90_000,
       leaseAdoptionBackoffMs: 12_000,
+      leaseNoProgressTimeoutMs: 180_000,
     })
+  })
+
+  test('derives the no-progress adoption threshold from idle timeout and lease ttl when omitted', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          recovery: {
+            heartbeatIntervalMs: 10_000,
+            leaseTtlMs: 45_000,
+            workerIdleTimeoutMs: 90_000,
+            leaseAdoptionBackoffMs: 12_000,
+          },
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.recovery.leaseNoProgressTimeoutMs).toBe(135_000)
   })
 
   test('falls back to gh auth token when no PAT is configured elsewhere', () => {

@@ -11,6 +11,7 @@ import {
   getActiveManagedLease,
   getLatestManagedLease,
   isManagedLeaseExpired,
+  isManagedLeaseProgressStale,
   parseManagedLeaseComments,
   parseGhApiErrorMessage,
   parseMergePrResponse,
@@ -282,5 +283,65 @@ describe('managed lease helpers', () => {
     expect(canDaemonAdoptManagedLease(expired, 'daemon-b', Date.parse('2026-04-05T08:01:01.000Z'))).toBe(true)
     expect(canDaemonAdoptManagedLease(expired, 'daemon-b', Date.parse('2026-04-05T08:00:45.000Z'))).toBe(false)
     expect(canDaemonAdoptManagedLease(expired, 'daemon-a', Date.parse('2026-04-05T08:00:45.000Z'))).toBe(true)
+  })
+
+  test('treats heartbeating leases with stale progress as adoptable by other daemons', () => {
+    const now = Date.parse('2026-04-05T08:01:00.000Z')
+    const stalledLease = {
+      ...activeLease,
+      lastHeartbeatAt: '2026-04-05T08:00:55.000Z',
+      expiresAt: '2026-04-05T08:01:55.000Z',
+      lastProgressAt: '2026-04-05T08:00:10.000Z',
+      lastProgressKind: 'stdout' as const,
+    }
+    const stalled = {
+      commentId: 11,
+      body: buildManagedLeaseComment(stalledLease),
+      createdAt: '2026-04-05T08:00:00.000Z',
+      updatedAt: '2026-04-05T08:00:55.000Z',
+      lease: stalledLease,
+    }
+
+    expect(isManagedLeaseExpired(stalledLease, now)).toBe(false)
+    expect(isManagedLeaseProgressStale(stalledLease, 45_000, now)).toBe(true)
+    expect(canDaemonAdoptManagedLease(stalled, 'daemon-b', now, 45_000)).toBe(true)
+    expect(canDaemonAdoptManagedLease(stalled, 'daemon-b', now, 90_000)).toBe(false)
+    expect(canDaemonAdoptManagedLease(stalled, 'daemon-a', now, 45_000)).toBe(true)
+  })
+
+  test('ignores stale-progress leases when choosing the canonical active lease for adoption', () => {
+    const now = Date.parse('2026-04-05T08:01:00.000Z')
+    const comments = [
+      {
+        commentId: 11,
+        body: buildManagedLeaseComment({
+          ...activeLease,
+          lastHeartbeatAt: '2026-04-05T08:00:55.000Z',
+          expiresAt: '2026-04-05T08:01:55.000Z',
+          lastProgressAt: '2026-04-05T08:00:10.000Z',
+        }),
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:00:55.000Z',
+      },
+      {
+        commentId: 12,
+        body: buildManagedLeaseComment({
+          ...activeLease,
+          leaseId: 'lease-2',
+          daemonInstanceId: 'daemon-b',
+          machineId: 'machine-b',
+          startedAt: '2026-04-05T08:00:40.000Z',
+          lastHeartbeatAt: '2026-04-05T08:00:58.000Z',
+          expiresAt: '2026-04-05T08:01:58.000Z',
+          lastProgressAt: '2026-04-05T08:00:58.000Z',
+        }),
+        createdAt: '2026-04-05T08:00:40.000Z',
+        updatedAt: '2026-04-05T08:00:58.000Z',
+      },
+    ]
+
+    expect(getActiveManagedLease(comments, 'issue-process', now)?.commentId).toBe(11)
+    expect(getActiveManagedLease(comments, 'issue-process', now, 45_000)?.commentId).toBe(12)
+    expect(getLatestManagedLease(comments, 'issue-process')?.commentId).toBe(12)
   })
 })

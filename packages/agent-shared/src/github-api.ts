@@ -601,13 +601,31 @@ export function isManagedLeaseExpired(
   return expiresAt <= now
 }
 
+export function isManagedLeaseProgressStale(
+  lease: ManagedLease,
+  maxNoProgressMs: number | null | undefined,
+  now = Date.now(),
+): boolean {
+  if (maxNoProgressMs == null || maxNoProgressMs <= 0) return false
+
+  const lastProgressAt = Date.parse(lease.lastProgressAt)
+  if (!Number.isFinite(lastProgressAt)) return true
+  return lastProgressAt + maxNoProgressMs <= now
+}
+
 export function getActiveManagedLease(
   comments: IssueComment[],
   scope: ManagedLeaseScope,
   now = Date.now(),
+  maxNoProgressMs?: number | null,
 ): ManagedLeaseComment | null {
   const active = parseManagedLeaseComments(comments, scope)
-    .filter((comment) => comment.lease.status === 'active' && !isManagedLeaseExpired(comment.lease, now))
+    .filter((comment) => {
+      if (comment.lease.status !== 'active') return false
+      if (isManagedLeaseExpired(comment.lease, now)) return false
+      if (isManagedLeaseProgressStale(comment.lease, maxNoProgressMs, now)) return false
+      return true
+    })
     .sort((left, right) => {
       const createdDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt)
       if (Number.isFinite(createdDelta) && createdDelta !== 0) return createdDelta
@@ -635,10 +653,14 @@ export function canDaemonAdoptManagedLease(
   activeLease: ManagedLeaseComment | null,
   daemonInstanceId: string,
   now = Date.now(),
+  maxNoProgressMs?: number | null,
 ): boolean {
   if (!activeLease) return true
   if (activeLease.lease.daemonInstanceId === daemonInstanceId) return true
-  return isManagedLeaseExpired(activeLease.lease, now)
+  return (
+    isManagedLeaseExpired(activeLease.lease, now)
+    || isManagedLeaseProgressStale(activeLease.lease, maxNoProgressMs, now)
+  )
 }
 
 export async function createManagedLeaseComment(

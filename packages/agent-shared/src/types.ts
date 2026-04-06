@@ -128,6 +128,7 @@ export interface RecoveryConfig {
   leaseTtlMs: number
   workerIdleTimeoutMs: number
   leaseAdoptionBackoffMs: number
+  leaseNoProgressTimeoutMs: number
 }
 
 export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'

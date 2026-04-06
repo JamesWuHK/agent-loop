@@ -117,6 +117,14 @@ export function buildConfig(
     fileConfig.recovery?.leaseTtlMs,
     heartbeatIntervalMs * 2,
   )
+  const workerIdleTimeoutMs = normalizePositiveInteger(
+    fileConfig.recovery?.workerIdleTimeoutMs,
+    5 * 60 * 1000,
+  )
+  const leaseNoProgressTimeoutMs = normalizePositiveInteger(
+    fileConfig.recovery?.leaseNoProgressTimeoutMs,
+    workerIdleTimeoutMs + leaseTtlMs,
+  )
   const scheduling = {
     concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
     concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
@@ -171,14 +179,12 @@ export function buildConfig(
     recovery: {
       heartbeatIntervalMs,
       leaseTtlMs,
-      workerIdleTimeoutMs: normalizePositiveInteger(
-        fileConfig.recovery?.workerIdleTimeoutMs,
-        5 * 60 * 1000,
-      ),
+      workerIdleTimeoutMs,
       leaseAdoptionBackoffMs: normalizePositiveInteger(
         fileConfig.recovery?.leaseAdoptionBackoffMs,
         5_000,
       ),
+      leaseNoProgressTimeoutMs,
     },
     worktreesBase: resolve(homeDir, '.agent-worktrees', repo.replace('/', '-')),
     project: {

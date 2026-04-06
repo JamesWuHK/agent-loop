@@ -1092,8 +1092,19 @@ export class AgentDaemon {
     scope: ManagedLeaseScope,
   ): Promise<boolean> {
     const comments = await listIssueComments(targetNumber, this.config)
-    const activeLease = getActiveManagedLease(comments, scope)
-    return canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId)
+    const now = Date.now()
+    const activeLease = getActiveManagedLease(
+      comments,
+      scope,
+      now,
+      this.config.recovery.leaseNoProgressTimeoutMs,
+    )
+    return canDaemonAdoptManagedLease(
+      activeLease,
+      this.daemonInstanceId,
+      now,
+      this.config.recovery.leaseNoProgressTimeoutMs,
+    )
   }
 
   private async findResumableIssue(): Promise<ResumableIssueCandidate | null> {
@@ -1108,7 +1119,12 @@ export class AgentDaemon {
       const cooldownUntil = this.failedIssueResumeCooldownUntil.get(issue.number) ?? 0
       const hasLocalWorktree = hasWorktreeForIssue(issue.number, this.config)
       const comments = await listIssueComments(issue.number, this.config)
-      const activeLease = getActiveManagedLease(comments, 'issue-process', now)
+      const activeLease = getActiveManagedLease(
+        comments,
+        'issue-process',
+        now,
+        this.config.recovery.leaseNoProgressTimeoutMs,
+      )
       const latestLease = getLatestManagedLease(comments, 'issue-process')
       const branch = latestLease?.lease.branch ?? `agent/${issue.number}/${this.config.machineId}`
       const linkedPr = findLinkedManagedPr(prs, issue.number, branch)
@@ -1123,7 +1139,12 @@ export class AgentDaemon {
             issue.updatedAt,
           )
         : false
-      const canAdoptLease = canDaemonAdoptManagedLease(activeLease, this.daemonInstanceId, now)
+      const canAdoptLease = canDaemonAdoptManagedLease(
+        activeLease,
+        this.daemonInstanceId,
+        now,
+        this.config.recovery.leaseNoProgressTimeoutMs,
+      )
       const canResumeFromLease = (
         latestLease?.lease.scope === 'issue-process'
         && Boolean(latestLease.lease.branch)

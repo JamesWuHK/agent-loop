@@ -135,9 +135,20 @@ export async function acquireManagedLease(
 ): Promise<LeaseAcquireResult> {
   const api = options.api ?? defaultLeaseApiAdapter
   const logger = options.logger ?? console
+  const now = Date.now()
   const comments = await api.listIssueComments(options.targetNumber, options.config)
-  const activeLease = getActiveManagedLease(comments, options.scope)
-  if (!canDaemonAdoptManagedLease(activeLease, options.daemonInstanceId)) {
+  const activeLease = getActiveManagedLease(
+    comments,
+    options.scope,
+    now,
+    options.config.recovery.leaseNoProgressTimeoutMs,
+  )
+  if (!canDaemonAdoptManagedLease(
+    activeLease,
+    options.daemonInstanceId,
+    now,
+    options.config.recovery.leaseNoProgressTimeoutMs,
+  )) {
     return {
       status: 'blocked',
       activeLease,
@@ -192,7 +203,12 @@ export async function acquireManagedLease(
 
   const createdComment = await api.createManagedLeaseComment(options.targetNumber, lease, options.config)
   const latestComments = await api.listIssueComments(options.targetNumber, options.config)
-  const canonicalLease = getActiveManagedLease(latestComments, options.scope)
+  const canonicalLease = getActiveManagedLease(
+    latestComments,
+    options.scope,
+    Date.now(),
+    options.config.recovery.leaseNoProgressTimeoutMs,
+  )
   if (canonicalLease && canonicalLease.commentId !== createdComment.commentId) {
     await api.updateManagedLeaseComment(
       createdComment.commentId,
