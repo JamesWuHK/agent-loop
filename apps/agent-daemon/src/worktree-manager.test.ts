@@ -1,4 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, it, expect } from 'vitest'
+import type { AgentConfig } from '@agent/shared'
+import { createWorktree } from './worktree-manager'
 
 // We need to test the validation logic directly since the module has side effects
 describe('validateBranchName', () => {
@@ -97,5 +103,103 @@ describe('validateBranchName', () => {
       expect(() => validateBranchName('agent//uuid')).toThrow()
       expect(() => validateBranchName('//uuid')).toThrow()
     })
+  })
+})
+
+describe('createWorktree', () => {
+  it('refreshes origin/defaultBranch before creating a new issue worktree', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'worktree-manager-test-'))
+    const remoteDir = join(tempDir, 'remote.git')
+    const seedDir = join(tempDir, 'seed')
+    const runnerDir = join(tempDir, 'runner')
+    const previousCwd = process.cwd()
+
+    const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+
+    try {
+      mkdirSync(remoteDir, { recursive: true })
+      mkdirSync(seedDir, { recursive: true })
+
+      git(remoteDir, 'init', '--bare')
+      git(seedDir, 'init', '-b', 'main')
+      git(seedDir, 'config', 'user.name', 'agent-loop')
+      git(seedDir, 'config', 'user.email', 'agent-loop@local')
+      git(seedDir, 'remote', 'add', 'origin', remoteDir)
+
+      writeFileSync(join(seedDir, 'demo.txt'), 'base\n', 'utf-8')
+      git(seedDir, 'add', 'demo.txt')
+      git(seedDir, 'commit', '-m', 'base')
+      git(seedDir, 'push', '-u', 'origin', 'main')
+
+      git(tempDir, 'clone', remoteDir, runnerDir)
+      git(runnerDir, 'config', 'user.name', 'agent-loop')
+      git(runnerDir, 'config', 'user.email', 'agent-loop@local')
+
+      writeFileSync(join(seedDir, 'demo.txt'), 'latest\n', 'utf-8')
+      git(seedDir, 'add', 'demo.txt')
+      git(seedDir, 'commit', '-m', 'advance main')
+      git(seedDir, 'push')
+
+      const remoteHead = git(seedDir, 'rev-parse', 'HEAD')
+      const staleOriginHead = git(runnerDir, 'rev-parse', 'origin/main')
+      expect(staleOriginHead).not.toBe(remoteHead)
+
+      process.chdir(runnerDir)
+      const config: AgentConfig = {
+        machineId: 'test-machine',
+        repo: 'JamesWuHK/digital-employee',
+        pat: 'test-token',
+        pollIntervalMs: 60_000,
+        concurrency: 1,
+        requestedConcurrency: 1,
+        concurrencyPolicy: {
+          requested: 1,
+          effective: 1,
+          repoCap: null,
+          profileCap: null,
+          projectCap: null,
+        },
+        scheduling: {
+          concurrencyByRepo: {},
+          concurrencyByProfile: {},
+        },
+        recovery: {
+          heartbeatIntervalMs: 30_000,
+          leaseTtlMs: 60_000,
+          workerIdleTimeoutMs: 300_000,
+          leaseAdoptionBackoffMs: 5_000,
+          leaseNoProgressTimeoutMs: 360_000,
+        },
+        worktreesBase: join(tempDir, 'worktrees'),
+        project: {
+          profile: 'desktop-vite',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: null,
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 60_000,
+        },
+        git: {
+          defaultBranch: 'main',
+          authorName: 'agent-loop',
+          authorEmail: 'agent-loop@local',
+        },
+      }
+
+      const worktreePath = await createWorktree(42, config)
+
+      expect(git(runnerDir, 'rev-parse', 'origin/main')).toBe(remoteHead)
+      expect(git(worktreePath, 'rev-parse', 'HEAD')).toBe(remoteHead)
+      expect(git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('agent/42/test-machine')
+    } finally {
+      process.chdir(previousCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 })

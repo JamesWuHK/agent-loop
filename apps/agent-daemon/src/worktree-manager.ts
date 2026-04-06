@@ -77,6 +77,15 @@ function branchExists(branch: string): boolean {
   return remoteResult.exitCode === 0
 }
 
+function refreshRemoteDefaultBranch(defaultBranch: string): void {
+  const result = gitCheck('fetch', '--quiet', 'origin', defaultBranch)
+  if (result.exitCode !== 0) {
+    throw new WorktreeError(
+      `git fetch origin ${defaultBranch} failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`,
+    )
+  }
+}
+
 /**
  * Create a new worktree for the given issue.
  * The branch name is globally unique: agent/{issue}/{machineId}
@@ -102,6 +111,8 @@ export async function createWorktree(
     console.log(`[worktree] worktree already exists at ${worktreePath}, skipping create`)
     return worktreePath
   }
+
+  refreshRemoteDefaultBranch(config.git.defaultBranch)
 
   // Check if branch already exists (from a previous failed run)
   if (branchExists(branch)) {
