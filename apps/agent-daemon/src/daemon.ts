@@ -152,6 +152,7 @@ export class AgentDaemon {
   private shutdownRequested = false
   private readonly daemonInstanceId = `${process.pid}-${crypto.randomUUID()}`
   private activeWorktrees = new Map<number, WorktreeInfo>()
+  private activeIssueProcesses = new Set<number>()
   private activeLeaseReaders = new Map<string, ActiveLeaseRuntimeReader>()
   private stalledWorkers = new Map<string, StalledWorkerState>()
   private blockedIssueResumes = new Map<number, BlockedIssueResumeState>()
@@ -178,8 +179,8 @@ export class AgentDaemon {
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
   private presencePublisher: ManagedDaemonPresencePublisher | null = null
-  private _inFlightProcess: Promise<void> | null = null
-  private _inFlightPrReview: Promise<void> | null = null
+  private inFlightIssueProcesses = new Set<Promise<void>>()
+  private inFlightPrTasks = new Set<Promise<void>>()
   private activePrReviews = new Set<number>()
   private static readonly MAX_REVIEW_FIX_RETRIES = 1
   private static readonly MAX_FAILED_ISSUE_RESUMES = 2
@@ -723,16 +724,13 @@ export class AgentDaemon {
 
   /** Wait for any in-flight issue processing to complete (used by --once mode). */
   async waitForInFlightProcess(): Promise<void> {
-    if (this._inFlightProcess) {
-      await this._inFlightProcess
-      this._inFlightProcess = null
-      this.syncRuntimeMetrics()
+    while (this.inFlightIssueProcesses.size > 0 || this.inFlightPrTasks.size > 0) {
+      await Promise.allSettled([
+        ...this.inFlightIssueProcesses,
+        ...this.inFlightPrTasks,
+      ])
     }
-    if (this._inFlightPrReview) {
-      await this._inFlightPrReview
-      this._inFlightPrReview = null
-      this.syncRuntimeMetrics()
-    }
+    this.syncRuntimeMetrics()
   }
 
   private scheduleNextPoll(options: {
@@ -847,84 +845,75 @@ export class AgentDaemon {
     this.refreshObservability()
     this.logger.log(`[daemon] poll cycle at ${this.lastPollAt}`)
 
-    // Check concurrency limit
-    const activeTaskCount = getEffectiveActiveTaskCount({
-      activeWorktreeCount: this.activeWorktrees.size,
-      hasInFlightProcess: this._inFlightProcess !== null,
-      activePrReviewCount: this.activePrReviews.size,
-      hasInFlightPrReview: this._inFlightPrReview !== null,
-    })
-    if (activeTaskCount >= this.config.concurrency) {
-      this.logger.log(`[daemon] at concurrency limit (${activeTaskCount}/${this.config.concurrency}), skipping`)
-      recordPoll('skipped_concurrency')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
+    let startedWork = false
 
-    if (await this.maybeStartStandaloneApprovedPrMerge()) {
-      recordPoll('success')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
-
-    if (await this.maybeStartResumableIssue()) {
-      recordPoll('success')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
-
-    if (await this.maybeStartStandalonePrReview()) {
-      recordPoll('success')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
-
-    if (await this.maybeRequeueFailedIssue()) {
-      recordPoll('success')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
-
-    // Claim an issue
-    const claimedIssue = await pollAndClaim(this.config, this.logger)
-
-    if (claimedIssue === null) {
-      recordPoll('no_issues')
-      recordPollDuration(Date.now() - pollStartTime)
-      this.scheduleNextPoll()
-      return
-    }
-
-    recordPoll('success')
-    recordPollDuration(Date.now() - pollStartTime)
-    this.lastClaimedAt = new Date().toISOString()
-
-    // Process in background (don't block the poll loop)
-    const processPromise = this.processIssue(claimedIssue)
-      .catch((err) => {
-        this.logger.error(`[daemon] processIssue #${claimedIssue.number} threw:`, err)
+    while (!this.shutdownRequested && this.running) {
+      const activeTaskCount = getEffectiveActiveTaskCount({
+        activeWorktreeCount: this.activeWorktrees.size,
+        inFlightIssueProcessCount: this.activeIssueProcesses.size,
+        activePrReviewCount: this.activePrReviews.size,
+        inFlightPrReviewCount: this.activePrReviews.size,
       })
-      .finally(() => {
-        if (this._inFlightProcess === processPromise) {
-          this._inFlightProcess = null
-          this.syncRuntimeMetrics()
+      if (activeTaskCount >= this.config.concurrency) {
+        if (!startedWork) {
+          this.logger.log(`[daemon] at concurrency limit (${activeTaskCount}/${this.config.concurrency}), skipping`)
+          recordPoll('skipped_concurrency')
+        } else {
+          recordPoll('success')
         }
-      })
+        recordPollDuration(Date.now() - pollStartTime)
+        this.scheduleNextPoll()
+        return
+      }
 
-    this._inFlightProcess = processPromise
-    this.syncRuntimeMetrics()
+      if (await this.maybeStartStandaloneApprovedPrMerge()) {
+        startedWork = true
+        continue
+      }
 
-    this.scheduleNextPoll()
+      if (await this.maybeStartResumableIssue()) {
+        startedWork = true
+        continue
+      }
+
+      if (await this.maybeStartStandalonePrReview()) {
+        startedWork = true
+        continue
+      }
+
+      if (await this.maybeRequeueFailedIssue()) {
+        startedWork = true
+        continue
+      }
+
+      const claimedIssue = await pollAndClaim(this.config, this.logger)
+
+      if (claimedIssue === null) {
+        recordPoll(startedWork ? 'success' : 'no_issues')
+        recordPollDuration(Date.now() - pollStartTime)
+        this.scheduleNextPoll()
+        return
+      }
+
+      this.lastClaimedAt = new Date().toISOString()
+      this.activeIssueProcesses.add(claimedIssue.number)
+      const processPromise = this.processIssue(claimedIssue)
+        .catch((err) => {
+          this.logger.error(`[daemon] processIssue #${claimedIssue.number} threw:`, err)
+        })
+        .finally(() => {
+          this.activeIssueProcesses.delete(claimedIssue.number)
+          this.inFlightIssueProcesses.delete(processPromise)
+          this.syncRuntimeMetrics()
+        })
+
+      this.inFlightIssueProcesses.add(processPromise)
+      this.syncRuntimeMetrics()
+      startedWork = true
+    }
   }
 
   private async maybeStartStandalonePrReview(): Promise<boolean> {
-    if (this._inFlightPrReview) return false
-
     const pendingPr = await this.findPendingStandalonePrReview()
     if (!pendingPr) return false
 
@@ -936,20 +925,16 @@ export class AgentDaemon {
       })
       .finally(() => {
         this.activePrReviews.delete(pendingPr.number)
-        if (this._inFlightPrReview === reviewPromise) {
-          this._inFlightPrReview = null
-        }
+        this.inFlightPrTasks.delete(reviewPromise)
         this.syncRuntimeMetrics()
       })
 
-    this._inFlightPrReview = reviewPromise
+    this.inFlightPrTasks.add(reviewPromise)
     this.syncRuntimeMetrics()
     return true
   }
 
   private async maybeStartStandaloneApprovedPrMerge(): Promise<boolean> {
-    if (this._inFlightPrReview) return false
-
     const pendingPr = await this.findPendingStandaloneApprovedPrMerge()
     if (!pendingPr) return false
 
@@ -961,36 +946,32 @@ export class AgentDaemon {
       })
       .finally(() => {
         this.activePrReviews.delete(pendingPr.number)
-        if (this._inFlightPrReview === mergePromise) {
-          this._inFlightPrReview = null
-        }
+        this.inFlightPrTasks.delete(mergePromise)
         this.syncRuntimeMetrics()
       })
 
-    this._inFlightPrReview = mergePromise
+    this.inFlightPrTasks.add(mergePromise)
     this.syncRuntimeMetrics()
     return true
   }
 
   private async maybeStartResumableIssue(): Promise<boolean> {
-    if (this._inFlightProcess) return false
-
     const resumableIssue = await this.findResumableIssue()
     if (!resumableIssue) return false
     if (await this.shouldPreferLinkedPrHandoff(resumableIssue)) return false
 
+    this.activeIssueProcesses.add(resumableIssue.issue.number)
     const processPromise = this.processResumableIssue(resumableIssue)
       .catch((err) => {
         this.logger.error(`[daemon] processResumableIssue #${resumableIssue.issue.number} threw:`, err)
       })
       .finally(() => {
-        if (this._inFlightProcess === processPromise) {
-          this._inFlightProcess = null
-          this.syncRuntimeMetrics()
-        }
+        this.activeIssueProcesses.delete(resumableIssue.issue.number)
+        this.inFlightIssueProcesses.delete(processPromise)
+        this.syncRuntimeMetrics()
       })
 
-    this._inFlightProcess = processPromise
+    this.inFlightIssueProcesses.add(processPromise)
     this.syncRuntimeMetrics()
     return true
   }
@@ -1066,6 +1047,7 @@ export class AgentDaemon {
     )
 
     for (const issue of issues) {
+      if (this.activeIssueProcesses.has(issue.number)) continue
       const eligible = shouldRequeueFailedIssue(
         issue,
         hasWorktreeForIssue(issue.number, this.config),
@@ -1115,6 +1097,8 @@ export class AgentDaemon {
     let candidate: ResumableIssueCandidate | null = null
 
     for (const issue of issues) {
+      if (this.activeIssueProcesses.has(issue.number)) continue
+      if (this.activeWorktrees.has(issue.number)) continue
       const attempts = this.failedIssueResumeAttempts.get(issue.number) ?? 0
       const cooldownUntil = this.failedIssueResumeCooldownUntil.get(issue.number) ?? 0
       const hasLocalWorktree = hasWorktreeForIssue(issue.number, this.config)
@@ -2482,8 +2466,8 @@ export class AgentDaemon {
       logPath: process.env.AGENT_LOOP_LOG_FILE ?? null,
       activeWorktreeCount: this.activeWorktrees.size,
       activePrReviewCount: this.activePrReviews.size,
-      hasInFlightProcess: this._inFlightProcess !== null,
-      hasInFlightPrReview: this._inFlightPrReview !== null,
+      inFlightIssueProcessCount: this.activeIssueProcesses.size,
+      inFlightPrReviewCount: this.activePrReviews.size,
       startupRecoveryPending: this.startupRecoveryPending,
       transientLoopErrorCount: this.transientLoopErrorCount,
       startupRecoveryDeferredCount: this.startupRecoveryDeferredCount,
@@ -2880,12 +2864,12 @@ export function shouldEscalateBlockedIssueResume(input: {
 
 export function getEffectiveActiveTaskCount(input: {
   activeWorktreeCount: number
-  hasInFlightProcess: boolean
+  inFlightIssueProcessCount: number
   activePrReviewCount: number
-  hasInFlightPrReview: boolean
+  inFlightPrReviewCount: number
 }): number {
-  const issueTaskCount = Math.max(input.activeWorktreeCount, input.hasInFlightProcess ? 1 : 0)
-  const prTaskCount = Math.max(input.activePrReviewCount, input.hasInFlightPrReview ? 1 : 0)
+  const issueTaskCount = Math.max(input.activeWorktreeCount, input.inFlightIssueProcessCount)
+  const prTaskCount = Math.max(input.activePrReviewCount, input.inFlightPrReviewCount)
 
   return issueTaskCount + prTaskCount
 }
@@ -2897,8 +2881,8 @@ export function buildDaemonRuntimeStatus(input: {
   logPath: string | null
   activeWorktreeCount: number
   activePrReviewCount: number
-  hasInFlightProcess: boolean
-  hasInFlightPrReview: boolean
+  inFlightIssueProcessCount: number
+  inFlightPrReviewCount: number
   startupRecoveryPending: boolean
   transientLoopErrorCount: number
   startupRecoveryDeferredCount: number
@@ -2928,8 +2912,8 @@ export function buildDaemonRuntimeStatus(input: {
     runtimeRecordPath: input.runtimeRecordPath,
     logPath: input.logPath,
     activePrReviews: input.activePrReviewCount,
-    inFlightIssueProcess: input.hasInFlightProcess,
-    inFlightPrReview: input.hasInFlightPrReview,
+    inFlightIssueProcess: input.inFlightIssueProcessCount > 0,
+    inFlightPrReview: input.inFlightPrReviewCount > 0,
     startupRecoveryPending: input.startupRecoveryPending,
     transientLoopErrorCount: input.transientLoopErrorCount,
     startupRecoveryDeferredCount: input.startupRecoveryDeferredCount,
@@ -2939,9 +2923,9 @@ export function buildDaemonRuntimeStatus(input: {
     lastTransientLoopErrorAgeSeconds: input.lastTransientLoopErrorAgeSeconds,
     effectiveActiveTasks: getEffectiveActiveTaskCount({
       activeWorktreeCount: input.activeWorktreeCount,
-      hasInFlightProcess: input.hasInFlightProcess,
+      inFlightIssueProcessCount: input.inFlightIssueProcessCount,
       activePrReviewCount: input.activePrReviewCount,
-      hasInFlightPrReview: input.hasInFlightPrReview,
+      inFlightPrReviewCount: input.inFlightPrReviewCount,
     }),
     failedIssueResumeAttemptsTracked: input.failedIssueResumeAttemptCount,
     failedIssueResumeCooldownsTracked: input.failedIssueResumeCooldownCount,

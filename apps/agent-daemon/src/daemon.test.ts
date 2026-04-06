@@ -56,6 +56,7 @@ describe('daemon merge recovery helpers', () => {
         leaseTtlMs: 60_000,
         workerIdleTimeoutMs: 300_000,
         leaseAdoptionBackoffMs: 5_000,
+        leaseNoProgressTimeoutMs: 360_000,
       },
       worktreesBase: '/tmp/worktrees',
       project: {
@@ -123,18 +124,18 @@ describe('daemon merge recovery helpers', () => {
   test('counts in-flight issue work before a worktree is registered', () => {
     expect(getEffectiveActiveTaskCount({
       activeWorktreeCount: 0,
-      hasInFlightProcess: true,
+      inFlightIssueProcessCount: 1,
       activePrReviewCount: 0,
-      hasInFlightPrReview: false,
+      inFlightPrReviewCount: 0,
     })).toBe(1)
   })
 
   test('does not double-count work that already has an active slot', () => {
     expect(getEffectiveActiveTaskCount({
       activeWorktreeCount: 1,
-      hasInFlightProcess: true,
+      inFlightIssueProcessCount: 1,
       activePrReviewCount: 1,
-      hasInFlightPrReview: true,
+      inFlightPrReviewCount: 1,
     })).toBe(2)
   })
 
@@ -146,8 +147,8 @@ describe('daemon merge recovery helpers', () => {
       logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
       activeWorktreeCount: 1,
       activePrReviewCount: 2,
-      hasInFlightProcess: true,
-      hasInFlightPrReview: true,
+      inFlightIssueProcessCount: 1,
+      inFlightPrReviewCount: 2,
       startupRecoveryPending: true,
       transientLoopErrorCount: 2,
       startupRecoveryDeferredCount: 1,
@@ -401,6 +402,7 @@ describe('daemon merge recovery helpers', () => {
         leaseTtlMs: 60_000,
         workerIdleTimeoutMs: 300_000,
         leaseAdoptionBackoffMs: 5_000,
+        leaseNoProgressTimeoutMs: 360_000,
       },
       worktreesBase: '/tmp/worktrees',
       project: {
