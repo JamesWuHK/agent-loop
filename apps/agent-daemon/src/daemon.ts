@@ -1758,6 +1758,20 @@ export class AgentDaemon {
     let worktreeId = `issue-${issueNumber}-${this.config.machineId}`
 
     try {
+      const acquiredLease = await this.acquireLeaseForScope({
+        targetNumber: issueNumber,
+        scope: 'issue-process',
+        branch,
+        worktreeId,
+        phase: 'issue-recovery',
+        issueNumber,
+      })
+      if (!acquiredLease) {
+        recordIssueProcessingDuration(Date.now() - processingStartTime)
+        return
+      }
+      leaseHandle = acquiredLease.handle
+
       const ensured = await this.ensureResumableIssueWorktree(issueNumber, priorLease)
       branch = ensured.branch
       worktreePath = ensured.worktreePath
@@ -1788,20 +1802,6 @@ export class AgentDaemon {
           this.config,
         )
       }
-
-      const acquiredLease = await this.acquireLeaseForScope({
-        targetNumber: issueNumber,
-        scope: 'issue-process',
-        branch,
-        worktreeId,
-        phase: 'issue-recovery',
-        issueNumber,
-      })
-      if (!acquiredLease) {
-        recordIssueProcessingDuration(Date.now() - processingStartTime)
-        return
-      }
-      leaseHandle = acquiredLease.handle
 
       const wt: WorktreeInfo = {
         path: worktreePath,
