@@ -1022,6 +1022,12 @@ export class AgentDaemon {
     const branch = candidate.priorLease?.lease.branch ?? `agent/${candidate.issue.number}/${this.config.machineId}`
     const linkedPr = await this.findLinkedOpenPrForIssue(candidate.issue.number, branch)
     if (!linkedPr) return false
+    if (shouldDeferResumableIssueForActiveLinkedPrTask(linkedPr.number, this.activePrReviews)) {
+      this.logger.log(
+        `[daemon] deferring resumable issue #${candidate.issue.number} because standalone PR task is already active on PR #${linkedPr.number}`,
+      )
+      return true
+    }
 
     const labels = new Set(linkedPr.labels)
     const linkedPrComments = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
@@ -2954,6 +2960,13 @@ export function shouldDeferStandalonePrTaskForActiveIssueProcess(
 ): boolean {
   const issueNumber = extractIssueNumberFromPrTitle(pr.title)
   return issueNumber !== null && activeIssueProcesses.has(issueNumber)
+}
+
+export function shouldDeferResumableIssueForActiveLinkedPrTask(
+  prNumber: number | null,
+  activePrReviews: ReadonlySet<number>,
+): boolean {
+  return prNumber !== null && activePrReviews.has(prNumber)
 }
 
 export function getResumableIssueLinkedPrHandoff(

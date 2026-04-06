@@ -22,6 +22,7 @@ import {
   isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
   shouldDeferStandalonePrTaskForActiveIssueProcess,
+  shouldDeferResumableIssueForActiveLinkedPrTask,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
@@ -100,6 +101,12 @@ describe('daemon merge recovery helpers', () => {
       { title: 'chore: update docs' },
       new Set([129]),
     )).toBe(false)
+  })
+
+  test('defers resumable issue recovery while a linked standalone PR task is active locally', () => {
+    expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([250]))).toBe(true)
+    expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([249]))).toBe(false)
+    expect(shouldDeferResumableIssueForActiveLinkedPrTask(null, new Set([250]))).toBe(false)
   })
 
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {
