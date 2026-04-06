@@ -21,6 +21,7 @@ import {
   getFailedIssueResumeBlock,
   isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
+  shouldDeferStandalonePrTaskForActiveIssueProcess,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
@@ -82,6 +83,23 @@ describe('daemon merge recovery helpers', () => {
       reason: 'recoverable:idle timeout',
     })
     expect(typeof recoverable?.ts).toBe('string')
+  })
+
+  test('defers standalone PR tasks while the linked issue process is active locally', () => {
+    expect(shouldDeferStandalonePrTaskForActiveIssueProcess(
+      { title: 'Fix #129: [US9-2] RightPanel 执行日志 Tab 壳层' },
+      new Set([129]),
+    )).toBe(true)
+
+    expect(shouldDeferStandalonePrTaskForActiveIssueProcess(
+      { title: 'Fix #129: [US9-2] RightPanel 执行日志 Tab 壳层' },
+      new Set([113]),
+    )).toBe(false)
+
+    expect(shouldDeferStandalonePrTaskForActiveIssueProcess(
+      { title: 'chore: update docs' },
+      new Set([129]),
+    )).toBe(false)
   })
 
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {

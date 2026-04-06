@@ -1267,6 +1267,7 @@ export class AgentDaemon {
     for (const pr of prs) {
       if (pr.isDraft) continue
       if (this.activePrReviews.has(pr.number)) continue
+      if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) continue
       if (!shouldMergeManagedPr(pr)) continue
       if (!(await this.canStartManagedScope(pr.number, 'pr-merge'))) continue
       return pr
@@ -1287,6 +1288,7 @@ export class AgentDaemon {
     for (const pr of prs) {
       if (pr.isDraft) continue
       if (this.activePrReviews.has(pr.number)) continue
+      if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) continue
       if (!(await this.canStartManagedScope(pr.number, 'pr-review'))) continue
 
       if (shouldReviewManagedPr(pr)) {
@@ -2944,6 +2946,14 @@ function shouldReviewManagedPr(pr: Pick<ManagedPullRequest, 'labels'>): boolean 
   if (labels.has(PR_REVIEW_LABELS.APPROVED)) return false
   if (labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) return false
   return true
+}
+
+export function shouldDeferStandalonePrTaskForActiveIssueProcess(
+  pr: Pick<ManagedPullRequest, 'title'>,
+  activeIssueProcesses: ReadonlySet<number>,
+): boolean {
+  const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+  return issueNumber !== null && activeIssueProcesses.has(issueNumber)
 }
 
 export function getResumableIssueLinkedPrHandoff(
