@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentConfig } from '@agent/shared'
+import type { AgentConfig, ManagedLeaseComment } from '@agent/shared'
 import {
   AgentDaemon,
   buildIssueWorkingTransitionEvent,
@@ -11,12 +11,15 @@ import {
   buildIssuePreflightFailureComment,
   buildPrReviewRefreshFailureComment,
   canRetryPrReviewRefresh,
+  canResumeIssueFromLease,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  createWorktreeFromRemoteBranch,
   extractAutomatedIssuePreflightReasons,
   extractBlockedIssueResumeEscalationComment,
   getResumableIssueLinkedPrHandoff,
   getFailedIssueResumeBlock,
+  isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
@@ -516,6 +519,43 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(true)
   })
 
+  test('does not resume failed issues from leases that already recorded a missing remote recovery branch', () => {
+    const latestLease: ManagedLeaseComment = {
+      commentId: 11,
+      body: '',
+      createdAt: '2026-04-06T08:00:00.000Z',
+      updatedAt: '2026-04-06T08:01:00.000Z',
+      lease: {
+        leaseId: 'lease-111',
+        scope: 'issue-process',
+        issueNumber: 111,
+        machineId: 'codex-remote',
+        daemonInstanceId: 'daemon-remote',
+        branch: 'agent/111/codex-remote',
+        worktreeId: 'issue-111-codex-remote',
+        phase: 'issue-recovery',
+        startedAt: '2026-04-06T08:00:00.000Z',
+        lastHeartbeatAt: '2026-04-06T08:01:00.000Z',
+        expiresAt: '2026-04-06T08:02:00.000Z',
+        attempt: 2,
+        lastProgressAt: '2026-04-06T08:00:30.000Z',
+        status: 'recoverable' as const,
+        recoveryReason: 'missing-remote-branch:agent/111/codex-remote fatal: couldn\'t find remote ref agent/111/codex-remote',
+      },
+    }
+
+    expect(isMissingRemoteBranchRecoveryReason(latestLease.lease.recoveryReason)).toBe(true)
+    expect(canResumeIssueFromLease(latestLease, null, true)).toBe(false)
+
+    expect(canResumeIssueFromLease({
+      ...latestLease,
+      lease: {
+        ...latestLease.lease,
+        recoveryReason: undefined,
+      },
+    }, null, true)).toBe(true)
+  })
+
   test('respects failed-issue retry cooldowns while still requiring a local worktree', () => {
     const now = Date.now()
 
@@ -904,6 +944,91 @@ describe('daemon merge recovery helpers', () => {
       expect(Number.parseInt((await Bun.$`git -C ${repoDir} rev-list --count HEAD..origin/main`.quiet().text()).trim(), 10)).toBe(0)
       expect(Number.parseInt((await Bun.$`git -C ${repoDir} rev-list --count origin/main..HEAD`.quiet().text()).trim(), 10)).toBeGreaterThan(0)
     } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('treats missing remote recovery branches as recoverable adoption failures', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'daemon-missing-remote-branch-'))
+    const remoteDir = join(tempDir, 'remote.git')
+    const repoDir = join(tempDir, 'repo')
+    const previousCwd = process.cwd()
+
+    try {
+      mkdirSync(remoteDir, { recursive: true })
+      mkdirSync(repoDir, { recursive: true })
+
+      await Bun.$`git -C ${remoteDir} init --bare`.quiet()
+      await Bun.$`git -C ${repoDir} init -b main`.quiet()
+      await Bun.$`git -C ${repoDir} config user.name test`.quiet()
+      await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
+      await Bun.$`git -C ${repoDir} remote add origin ${remoteDir}`.quiet()
+
+      writeFileSync(join(repoDir, 'shared.txt'), 'base\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add shared.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
+      await Bun.$`git -C ${repoDir} push -u origin main`.quiet()
+
+      process.chdir(repoDir)
+      const config: AgentConfig = {
+        machineId: 'test-machine',
+        repo: 'JamesWuHK/digital-employee',
+        pat: 'test-token',
+        pollIntervalMs: 60_000,
+        concurrency: 1,
+        requestedConcurrency: 1,
+        concurrencyPolicy: {
+          requested: 1,
+          effective: 1,
+          repoCap: null,
+          profileCap: null,
+          projectCap: null,
+        },
+        scheduling: {
+          concurrencyByRepo: {},
+          concurrencyByProfile: {},
+        },
+        recovery: {
+          heartbeatIntervalMs: 30_000,
+          leaseTtlMs: 60_000,
+          workerIdleTimeoutMs: 300_000,
+          leaseAdoptionBackoffMs: 5_000,
+          leaseNoProgressTimeoutMs: 360_000,
+        },
+        worktreesBase: join(tempDir, 'worktrees'),
+        project: {
+          profile: 'desktop-vite',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: null,
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 60_000,
+        },
+        git: {
+          defaultBranch: 'main',
+          authorName: 'agent-loop',
+          authorEmail: 'agent-loop@local',
+        },
+      }
+
+      const worktreePath = join(tempDir, 'worktrees', 'issue-111-test-machine')
+      const result = await createWorktreeFromRemoteBranch(
+        worktreePath,
+        'agent/111/codex-remote',
+        config,
+        console,
+      )
+
+      expect(result.status).toBe('missing-remote-branch')
+      if (result.status === 'missing-remote-branch') {
+        expect(isMissingRemoteBranchRecoveryReason(result.reason)).toBe(true)
+        expect(result.reason).toContain('agent/111/codex-remote')
+      }
+      expect(existsSync(worktreePath)).toBe(false)
+    } finally {
+      process.chdir(previousCwd)
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
