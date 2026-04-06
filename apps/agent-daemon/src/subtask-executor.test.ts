@@ -366,4 +366,53 @@ describe('runIssueBranchPreflight', () => {
     expect(result.validationFailures[0]?.command).toBe('sh -lc "test -f missing.txt"')
     expect(result.violations[0]).toContain('validation failed: sh -lc "test -f missing.txt"')
   })
+
+  it('runs validation commands without a login shell so local profiles cannot override PATH', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const fakeHome = mkdtempSync(join(tmpdir(), 'subtask-executor-home-'))
+    tempDirs.push(fakeHome)
+    const fakeBin = join(fakeHome, 'fake-bin')
+    await Bun.$`mkdir -p ${fakeBin}`.quiet()
+    writeFileSync(
+      join(fakeBin, 'node'),
+      '#!/bin/sh\nexit 42\n',
+      'utf-8',
+    )
+    chmodSync(join(fakeBin, 'node'), 0o755)
+    writeFileSync(
+      join(fakeHome, '.profile'),
+      `export PATH="${fakeBin}:$PATH"\n`,
+      'utf-8',
+    )
+
+    const previousHome = process.env.HOME
+
+    try {
+      process.env.HOME = fakeHome
+
+      const result = await runIssueBranchPreflight(
+        dir,
+        `## Context
+### AllowedFiles
+- demo.txt
+### Validation
+- \`node -e "process.exit(0)"\``,
+        TEST_CONFIG,
+      )
+
+      expect(result.valid).toBe(true)
+      expect(result.validationFailures).toEqual([])
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME
+      } else {
+        process.env.HOME = previousHome
+      }
+    }
+  })
 })

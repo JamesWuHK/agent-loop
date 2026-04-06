@@ -687,10 +687,11 @@ async function runValidationCommand(
   command: string,
   config: AgentConfig,
 ): Promise<IssueBranchValidationCommandResult> {
-  const proc = Bun.spawn(['sh', '-lc', command], {
+  const proc = Bun.spawn(['/bin/sh', '-c', command], {
     cwd: worktreePath,
     env: {
       ...process.env,
+      PWD: worktreePath,
       GIT_AUTHOR_NAME: config.git.authorName,
       GIT_COMMITTER_NAME: config.git.authorName,
       GIT_AUTHOR_EMAIL: config.git.authorEmail,
