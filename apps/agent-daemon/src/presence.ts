@@ -51,6 +51,7 @@ interface RawIssueListItem {
   number?: unknown
   title?: unknown
   body?: unknown
+  pull_request?: unknown
 }
 
 interface RawIssueRecord {
@@ -102,8 +103,16 @@ async function runGhCommand(
 }
 
 function isPresenceRegistryIssue(issue: RawIssueListItem): boolean {
+  if (issue.pull_request) return false
   return issue.title === MANAGED_DAEMON_PRESENCE_ISSUE_TITLE
     || (typeof issue.body === 'string' && issue.body.includes(MANAGED_DAEMON_PRESENCE_ISSUE_MARKER))
+}
+
+export function extractManagedDaemonPresenceIssueNumber(
+  issues: RawIssueListItem[],
+): number | null {
+  const match = issues.find(isPresenceRegistryIssue)
+  return typeof match?.number === 'number' ? match.number : null
 }
 
 export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresence): string {
@@ -228,26 +237,24 @@ export function getLatestManagedDaemonPresenceComment(
 export async function findManagedDaemonPresenceIssue(
   config: AgentConfig,
 ): Promise<number | null> {
-  const response = await runGhCommand([
-    'issue',
-    'list',
-    '--repo',
-    config.repo,
-    '--state',
-    'open',
-    '--limit',
-    '200',
-    '--json',
-    'number,title,body',
-  ], config)
+  for (let page = 1; ; page += 1) {
+    const response = await runGhCommand([
+      'api',
+      `repos/${config.repo}/issues?state=open&per_page=100&page=${page}`,
+    ], config)
 
-  if (response.exitCode !== 0) {
-    throw new Error(`gh issue list failed (exit ${response.exitCode}): ${response.stderr}`)
+    if (response.exitCode !== 0) {
+      throw new Error(`gh api repos/${config.repo}/issues failed (exit ${response.exitCode}): ${response.stderr}`)
+    }
+
+    const issues = JSON.parse(response.stdout) as RawIssueListItem[]
+    const match = extractManagedDaemonPresenceIssueNumber(issues)
+    if (match !== null) return match
+
+    if (issues.length < 100) {
+      return null
+    }
   }
-
-  const issues = JSON.parse(response.stdout) as RawIssueListItem[]
-  const match = issues.find(isPresenceRegistryIssue)
-  return typeof match?.number === 'number' ? match.number : null
 }
 
 async function createManagedDaemonPresenceIssue(

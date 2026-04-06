@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { AgentConfig, IssueComment } from '@agent/shared'
 import {
   buildManagedDaemonPresenceComment,
+  extractManagedDaemonPresenceIssueNumber,
   extractManagedDaemonPresenceComment,
   listActiveManagedDaemonPresenceComments,
   ManagedDaemonPresencePublisher,
@@ -159,6 +160,35 @@ describe('managed daemon presence helpers', () => {
 
     expect(active).toHaveLength(1)
     expect(active[0]?.presence.machineId).toBe('machine-a')
+  })
+
+  test('finds the managed presence registry issue from REST issue pages', () => {
+    expect(extractManagedDaemonPresenceIssueNumber([
+      {
+        number: 41,
+        title: 'Unrelated issue',
+        body: 'no marker here',
+      },
+      {
+        number: 42,
+        title: 'Agent Loop Presence',
+        body: 'registry body',
+      },
+    ])).toBe(42)
+
+    expect(extractManagedDaemonPresenceIssueNumber([
+      {
+        number: 43,
+        title: 'Agent Loop Presence',
+        body: 'registry body',
+        pull_request: {},
+      },
+      {
+        number: 44,
+        title: 'Infra',
+        body: '<!-- agent-loop:presence-registry -->',
+      },
+    ])).toBe(44)
   })
 })
 
