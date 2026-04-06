@@ -992,7 +992,7 @@ export class AgentDaemon {
           linkedPrComments,
           AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
           linkedPr.headRefOid,
-          candidate.issue.updatedAt,
+          candidate.issue.body,
         )
       : false
     const hasSyncedBranchState = candidate.requiresRemoteAdoption
@@ -1120,7 +1120,7 @@ export class AgentDaemon {
             linkedPrComments,
             AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
             linkedPr.headRefOid,
-            issue.updatedAt,
+            issue.body,
           )
         : false
       const canAdoptLease = canDaemonAdoptManagedLease(
@@ -1245,7 +1245,7 @@ export class AgentDaemon {
         comments,
         AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
         pr.headRefOid,
-        linkedIssue?.updatedAt ?? null,
+        linkedIssue?.body ?? null,
       )) {
         return pr
       }
@@ -1266,7 +1266,7 @@ export class AgentDaemon {
         priorComments,
         AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
         pr.headRefOid,
-        linkedIssue?.updatedAt ?? null,
+        linkedIssue?.body ?? null,
       )
     const lease = await this.acquireLeaseForScope({
       targetNumber: pr.number,
@@ -1289,7 +1289,7 @@ export class AgentDaemon {
       const restartReviewOnUpdatedHead = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
         && shouldRestartAutomatedPrReviewOnNewHead(priorComments, currentHeadRefOid)
       const restartReviewOnUpdatedIssue = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-        && shouldRestartAutomatedPrReviewOnIssueUpdate(priorComments, linkedIssue?.updatedAt ?? null)
+        && shouldRestartAutomatedPrReviewOnIssueUpdate(priorComments, linkedIssue?.body ?? null)
       const canReuseHumanNeededFeedback = (
         resumableHumanNeededReview
         && !restartReviewOnUpdatedHead
@@ -1372,7 +1372,7 @@ export class AgentDaemon {
         if (firstReview.approved && firstReview.canMerge) {
           await commentOnPr(
             pr.number,
-            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid),
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid, linkedIssue?.body ?? null),
             this.config,
           )
           await setManagedPrReviewLabels(pr.number, 'approved', this.config)
@@ -1383,7 +1383,7 @@ export class AgentDaemon {
         if (firstReview.reviewFailed) {
           await commentOnPr(
             pr.number,
-            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid),
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid, linkedIssue?.body ?? null),
             this.config,
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
@@ -1397,7 +1397,7 @@ export class AgentDaemon {
         if (issueNumber === null) {
           await commentOnPr(
             pr.number,
-            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid),
+            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid, linkedIssue?.body ?? null),
             this.config,
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
@@ -1407,7 +1407,7 @@ export class AgentDaemon {
 
         await commentOnPr(
           pr.number,
-          buildPrReviewComment(pr.number, firstReview, nextAttempt, 'retrying', currentHeadRefOid),
+          buildPrReviewComment(pr.number, firstReview, nextAttempt, 'retrying', currentHeadRefOid, linkedIssue?.body ?? null),
           this.config,
         )
         await setManagedPrReviewLabels(pr.number, 'retry', this.config)
@@ -1449,7 +1449,7 @@ export class AgentDaemon {
         }
         await commentOnPr(
           pr.number,
-          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed'),
+          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed', undefined, linkedIssue?.body ?? null),
           this.config,
         )
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
@@ -1465,7 +1465,7 @@ export class AgentDaemon {
         const failedReview = buildAutoFixPushFailedReview(err)
         await commentOnPr(
           pr.number,
-          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed'),
+          buildPrReviewComment(pr.number, failedReview, attemptAfterFix, 'human-needed', undefined, linkedIssue?.body ?? null),
           this.config,
         )
         await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
@@ -1496,7 +1496,7 @@ export class AgentDaemon {
       if (secondReview.approved && secondReview.canMerge) {
         await commentOnPr(
           pr.number,
-          buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid),
+          buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid, linkedIssue?.body ?? null),
           this.config,
         )
         await setManagedPrReviewLabels(pr.number, 'approved', this.config)
@@ -1506,7 +1506,7 @@ export class AgentDaemon {
 
       await commentOnPr(
         pr.number,
-        buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid),
+        buildPrReviewComment(pr.number, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid, linkedIssue?.body ?? null),
         this.config,
       )
       await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
@@ -1991,6 +1991,7 @@ export class AgentDaemon {
               ? 'human-needed'
               : 'retrying',
           currentHeadRefOid,
+          issue.body,
         ),
         this.config,
       )
@@ -2045,7 +2046,7 @@ export class AgentDaemon {
       }
       await commentOnPr(
         prNumber,
-        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed'),
+        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed', undefined, issue.body),
         this.config,
       )
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
@@ -2059,7 +2060,7 @@ export class AgentDaemon {
       const failedReview = buildAutoFixPushFailedReview(err)
       await commentOnPr(
         prNumber,
-        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed'),
+        buildPrReviewComment(prNumber, failedReview, attemptAfterFix, 'human-needed', undefined, issue.body),
         this.config,
       )
       await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
@@ -2077,7 +2078,7 @@ export class AgentDaemon {
     if (secondReview.approved && secondReview.canMerge) {
       await commentOnPr(
         prNumber,
-        buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid),
+        buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'approved', updatedHeadRefOid, issue.body),
         this.config,
       )
       await setManagedPrReviewLabels(prNumber, 'approved', this.config)
@@ -2086,7 +2087,7 @@ export class AgentDaemon {
 
     await commentOnPr(
       prNumber,
-      buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid),
+      buildPrReviewComment(prNumber, secondReview, attemptAfterFix, 'human-needed', updatedHeadRefOid, issue.body),
       this.config,
     )
     await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)

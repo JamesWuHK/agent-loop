@@ -195,6 +195,22 @@ describe('pr-reviewer', () => {
     expect(comment).toContain('"headRefOid":"abc123def456"')
   })
 
+  test('embeds linked issue contract fingerprint when provided in PR review comments', () => {
+    const issueBody = `## Constraints
+- keep the approval bar minimal
+
+## Acceptance
+- renders allow once / always allow / reject`
+    const comment = buildPrReviewComment(61, {
+      approved: true,
+      canMerge: true,
+      reason: 'ready',
+      findings: [],
+    }, 2, 'approved', 'abc123def456', issueBody)
+
+    expect(comment).toContain('"issueContractFingerprint":"')
+  })
+
   test('does not embed structured review feedback when the reviewer output itself failed validation', () => {
     const comment = buildPrReviewComment(61, {
       approved: false,
@@ -379,7 +395,47 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     expect(shouldRestartAutomatedPrReviewOnNewHead(comments, 'abc123')).toBe(false)
   })
 
-  test('restarts standalone review when the linked issue contract is updated after the latest automated review', () => {
+  test('restarts standalone review only when the linked issue contract changes after the latest automated review', () => {
+    const issueBody = `## Constraints
+- keep the approval bar minimal
+
+## Acceptance
+- renders allow once / always allow / reject`
+    const comments = [
+      {
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:10:00.000Z',
+        body: buildPrReviewComment(84, {
+          approved: false,
+          canMerge: false,
+          reason: 'Final blocker',
+          findings: [{
+            severity: 'high',
+            file: 'apps/desktop/src/pages/MainPage.tsx',
+            summary: 'scope violation',
+            mustFix: ['remove forbidden diff'],
+            mustNotDo: ['do not broaden scope'],
+            validation: ['bun --cwd apps/desktop test src/pages/MainPage.sessions-sidebar.test.tsx'],
+            scopeRationale: 'issue #91 limits allowed files',
+          }],
+        }, 9, 'human-needed', 'abc123', issueBody),
+      },
+    ]
+
+    const updatedIssueBody = `## Constraints
+- keep the approval bar minimal
+
+## Acceptance
+- renders allow once / always allow / reject
+- preserves the approval event payload names`
+
+    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueBody)).toBe(false)
+    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, updatedIssueBody)).toBe(true)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', issueBody)).toBe(false)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', updatedIssueBody)).toBe(true)
+  })
+
+  test('does not restart standalone review from legacy comments that only differ by issue timestamp', () => {
     const comments = [
       {
         createdAt: '2026-04-05T08:00:00.000Z',
@@ -390,10 +446,7 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
       },
     ]
 
-    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:01.000Z')).toBe(true)
-    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:00.000Z')).toBe(false)
-    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', '2026-04-05T08:10:01.000Z')).toBe(true)
-    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', '2026-04-05T08:09:59.000Z')).toBe(false)
+    expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:01.000Z')).toBe(false)
   })
 
   test('reuses the latest structured review feedback when the PR head sha is unchanged', () => {

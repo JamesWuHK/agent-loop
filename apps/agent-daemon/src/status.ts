@@ -185,6 +185,7 @@ interface GitHubIssueListItem {
   number?: unknown
   state?: unknown
   updatedAt?: unknown
+  body?: unknown
   labels?: GitHubListLabel[]
 }
 
@@ -1387,7 +1388,7 @@ async function collectRemoteGitHubLeaseChecks(
       '--limit',
       '100',
       '--json',
-      'number,state,labels,updatedAt',
+      'number,state,labels,updatedAt,body',
     ]),
     runner([
       'pr',
@@ -1586,7 +1587,7 @@ function extractGitHubAuditState(data: unknown): { state: string; labels: string
   }
 }
 
-function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state: string; labels: string[]; updatedAt: string }> {
+function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state: string; labels: string[]; updatedAt: string; body: string }> {
   if (!Array.isArray(data)) return []
 
   return data
@@ -1598,9 +1599,10 @@ function normalizeGitHubIssueList(data: unknown): Array<{ number: number; state:
         state: typeof issue.state === 'string' ? issue.state.toLowerCase() : 'unknown',
         labels: normalizeGitHubLabels(issue.labels),
         updatedAt: typeof issue.updatedAt === 'string' ? issue.updatedAt : '',
+        body: typeof issue.body === 'string' ? issue.body : '',
       }
     })
-    .filter((item): item is { number: number; state: string; labels: string[]; updatedAt: string } => item !== null)
+    .filter((item): item is { number: number; state: string; labels: string[]; updatedAt: string; body: string } => item !== null)
 }
 
 function normalizeGitHubPrList(
@@ -1634,7 +1636,7 @@ function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): s
 }
 
 function collectRemoteBlockedIssueResumeChecks(
-  issues: Array<{ number: number; state: string; labels: string[]; updatedAt: string }>,
+  issues: Array<{ number: number; state: string; labels: string[]; updatedAt: string; body: string }>,
   prs: Array<{ number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null }>,
   prCommentsByNumber: Map<number, IssueComment[]>,
 ): GitHubLeaseAuditCheck[] {
@@ -1662,7 +1664,7 @@ function collectRemoteBlockedIssueResumeChecks(
             prComments,
             GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
             pr.headRefOid,
-            issue.updatedAt,
+            issue.body,
           )
         : false
       const blocked = getFailedIssueResumeBlock({

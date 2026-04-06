@@ -1,4 +1,5 @@
 import { $ } from 'bun'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
@@ -59,6 +60,7 @@ interface AutomatedPrReviewMetadata {
   approved: boolean
   canMerge: boolean
   headRefOid?: string
+  issueContractFingerprint?: string
 }
 
 interface AutomatedPrReviewCommentLike {
@@ -399,7 +401,9 @@ export function buildPrReviewComment(
   attempt: number,
   action: 'approved' | 'retrying' | 'human-needed',
   headRefOid?: string,
+  linkedIssueBody?: string | null,
 ): string {
+  const issueContractFingerprint = buildIssueContractFingerprint(linkedIssueBody)
   const title = action === 'approved'
     ? 'Automated review approved'
     : action === 'retrying'
@@ -425,6 +429,7 @@ export function buildPrReviewComment(
     approved: review.approved,
     canMerge: review.canMerge,
     ...(headRefOid ? { headRefOid } : {}),
+    ...(issueContractFingerprint ? { issueContractFingerprint } : {}),
   }
 
   return `<!-- agent-loop:pr-review ${JSON.stringify(metadata)} -->
@@ -542,34 +547,31 @@ export function shouldRestartAutomatedPrReviewOnNewHead(
 
 export function shouldRestartAutomatedPrReviewOnIssueUpdate(
   comments: AutomatedPrReviewCommentLike[],
-  issueUpdatedAt: string | null | undefined,
+  issueBody: string | null | undefined,
 ): boolean {
-  if (!issueUpdatedAt) return false
-
-  const issueUpdatedAtMs = Date.parse(issueUpdatedAt)
-  if (!Number.isFinite(issueUpdatedAtMs)) return false
+  const currentIssueContractFingerprint = buildIssueContractFingerprint(issueBody)
+  if (!currentIssueContractFingerprint) return false
 
   const latest = extractLatestAutomatedPrReviewState(comments)
   if (!latest) return false
   if (latest.metadata.approved || latest.metadata.canMerge) return false
 
-  const latestReviewAt = latest.commentUpdatedAt ?? latest.commentCreatedAt
-  const latestReviewAtMs = Date.parse(latestReviewAt ?? '')
-  if (!Number.isFinite(latestReviewAtMs)) return false
+  const latestIssueContractFingerprint = latest.metadata.issueContractFingerprint
+  if (!latestIssueContractFingerprint) return false
 
-  return issueUpdatedAtMs > latestReviewAtMs
+  return latestIssueContractFingerprint !== currentIssueContractFingerprint
 }
 
 export function canResumeHumanNeededPrReview(
   comments: AutomatedPrReviewCommentLike[],
   maxAttempt: number,
   currentHeadRefOid: string | null | undefined,
-  issueUpdatedAt: string | null | undefined,
+  issueBody: string | null | undefined,
 ): boolean {
   return (
     canResumeAutomatedPrReview(comments, maxAttempt)
     || shouldRestartAutomatedPrReviewOnNewHead(comments, currentHeadRefOid)
-    || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueUpdatedAt)
+    || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueBody)
   )
 }
 
@@ -777,10 +779,22 @@ function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetada
       headRefOid: typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
         ? parsed.headRefOid.trim()
         : undefined,
+      issueContractFingerprint: typeof parsed.issueContractFingerprint === 'string'
+        && parsed.issueContractFingerprint.trim().length > 0
+        ? parsed.issueContractFingerprint.trim()
+        : undefined,
     }
   } catch {
     return null
   }
+}
+
+function buildIssueContractFingerprint(body: string | null | undefined): string | null {
+  if (typeof body !== 'string' || body.trim().length === 0) return null
+
+  return createHash('sha256')
+    .update(renderIssueContractForPrompt(body))
+    .digest('hex')
 }
 
 function serializeStructuredReviewFeedback(payload: StructuredReviewFeedbackPayload): string {
