@@ -6,7 +6,6 @@ import type {
   AgentConfig,
   AgentIssue,
   BlockedIssueResumeRuntimeDetail,
-  ClaimEvent,
   DaemonStatus,
   IssueComment,
   ManagedLease,
@@ -77,9 +76,6 @@ export const HEALTH_PATH = '/health'
 export const DEFAULT_HEALTH_SERVER_PORT = 9310
 export const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
 const LOCAL_METRICS_HOST = '127.0.0.1'
-
-export type IssueWorkingTransitionKind = 'fresh-claim' | 'resume' | 'recoverable'
-
 const RETRYABLE_DAEMON_ERROR_PATTERNS = [
   'timeout',
   'timed out',
@@ -100,7 +96,6 @@ const RETRYABLE_DAEMON_ERROR_PATTERNS = [
 const BLOCKED_ISSUE_RESUME_ESCALATION_COOLDOWN_SECONDS = 30 * 60
 const BLOCKED_ISSUE_RESUME_ESCALATION_COMMENT_PREFIX = '<!-- agent-loop:issue-resume-blocked '
 export const BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS = 5 * 60
-const MISSING_REMOTE_BRANCH_RECOVERY_REASON_PREFIX = 'missing-remote-branch:'
 
 interface ResumableIssueCandidate {
   issue: AgentIssue
@@ -108,41 +103,9 @@ interface ResumableIssueCandidate {
   requiresRemoteAdoption: boolean
 }
 
-interface ReadyResumableIssueWorktree {
-  status: 'ready'
-  worktreePath: string
-  branch: string
-  worktreeId: string
-}
-
-interface MissingRemoteBranchResumableIssueWorktree {
-  status: 'missing-remote-branch'
-  worktreePath: string
-  branch: string
-  worktreeId: string
-  reason: string
-}
-
-type ResumableIssueWorktreeResult =
-  | ReadyResumableIssueWorktree
-  | MissingRemoteBranchResumableIssueWorktree
-
 interface ResumableIssuePrHandoff {
   kind: 'pr-review' | 'pr-merge'
 }
-
-interface RemoteBranchAdoptionReadyResult {
-  status: 'ready'
-}
-
-interface RemoteBranchAdoptionMissingResult {
-  status: 'missing-remote-branch'
-  reason: string
-}
-
-type RemoteBranchAdoptionResult =
-  | RemoteBranchAdoptionReadyResult
-  | RemoteBranchAdoptionMissingResult
 
 interface ActiveLeaseRuntimeReader {
   scope: ManagedLeaseScope
@@ -515,7 +478,12 @@ export class AgentDaemon {
       issueNumber,
       ISSUE_LABELS.WORKING,
       ISSUE_LABELS.WORKING,
-      buildIssueWorkingTransitionEvent('recoverable', this.config.machineId, reason),
+      {
+        event: 'claimed',
+        machine: this.config.machineId,
+        ts: new Date().toISOString(),
+        reason: `recoverable:${reason}`,
+      },
       this.config,
     )
   }
@@ -1169,10 +1137,11 @@ export class AgentDaemon {
         now,
         this.config.recovery.leaseNoProgressTimeoutMs,
       )
-      const canResumeFromLease = canResumeIssueFromLease(
-        latestLease,
-        activeLease,
-        canAdoptLease,
+      const canResumeFromLease = (
+        latestLease?.lease.scope === 'issue-process'
+        && Boolean(latestLease.lease.branch)
+        && canAdoptLease
+        && (latestLease.lease.status === 'recoverable' || activeLease === null)
       )
       const resumable = shouldResumeManagedIssue(
         issue,
@@ -1219,7 +1188,7 @@ export class AgentDaemon {
   private async ensureResumableIssueWorktree(
     issueNumber: number,
     priorLease: ManagedLeaseComment | null,
-  ): Promise<ResumableIssueWorktreeResult> {
+  ): Promise<{ worktreePath: string; branch: string; worktreeId: string }> {
     const worktreeId = `issue-${issueNumber}-${this.config.machineId}`
     const worktreePath = resolve(this.config.worktreesBase, worktreeId)
     const branch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
@@ -1227,7 +1196,6 @@ export class AgentDaemon {
     if (hasWorktreeForIssue(issueNumber, this.config)) {
       hydrateManagedIssueWorktree(worktreePath, this.logger)
       return {
-        status: 'ready',
         worktreePath,
         branch,
         worktreeId,
@@ -1238,24 +1206,8 @@ export class AgentDaemon {
       throw new Error(`cannot resume issue #${issueNumber} without a local worktree or recoverable lease branch`)
     }
 
-    const adoption = await createWorktreeFromRemoteBranch(
-      worktreePath,
-      priorLease.lease.branch,
-      this.config,
-      this.logger,
-    )
-    if (adoption.status === 'missing-remote-branch') {
-      return {
-        status: 'missing-remote-branch',
-        worktreePath,
-        branch: priorLease.lease.branch,
-        worktreeId,
-        reason: adoption.reason,
-      }
-    }
-
+    await createWorktreeFromRemoteBranch(worktreePath, priorLease.lease.branch, this.config, this.logger)
     return {
-      status: 'ready',
       worktreePath,
       branch: priorLease.lease.branch,
       worktreeId,
@@ -1807,6 +1759,39 @@ export class AgentDaemon {
     let worktreeId = `issue-${issueNumber}-${this.config.machineId}`
 
     try {
+      const ensured = await this.ensureResumableIssueWorktree(issueNumber, priorLease)
+      branch = ensured.branch
+      worktreePath = ensured.worktreePath
+      worktreeId = ensured.worktreeId
+
+      if (issue.state === 'failed') {
+        await transitionIssueState(
+          issueNumber,
+          ISSUE_LABELS.WORKING,
+          ISSUE_LABELS.FAILED,
+          {
+            event: 'claimed',
+            machine: this.config.machineId,
+            ts: new Date().toISOString(),
+            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          },
+          this.config,
+        )
+      } else {
+        await transitionIssueState(
+          issueNumber,
+          ISSUE_LABELS.WORKING,
+          ISSUE_LABELS.WORKING,
+          {
+            event: 'claimed',
+            machine: this.config.machineId,
+            ts: new Date().toISOString(),
+            reason: candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          },
+          this.config,
+        )
+      }
+
       const acquiredLease = await this.acquireLeaseForScope({
         targetNumber: issueNumber,
         scope: 'issue-process',
@@ -1821,56 +1806,6 @@ export class AgentDaemon {
       }
       leaseHandle = acquiredLease.handle
 
-      const ensured = await this.ensureResumableIssueWorktree(issueNumber, priorLease)
-      if (ensured.status === 'missing-remote-branch') {
-        this.failedIssueResumeAttempts.delete(issueNumber)
-        this.failedIssueResumeCooldownUntil.delete(issueNumber)
-        await this.markIssueFailed(issueNumber, ensured.reason)
-        await this.completeManagedLease(
-          'issue-process',
-          issueNumber,
-          leaseHandle,
-          'recoverable',
-          ensured.reason,
-          'issue-process-missing-remote-branch',
-        )
-        this.logger.warn(
-          `[daemon] cannot resume issue #${issueNumber} from missing remote recovery branch ${ensured.branch}; leaving it failed until it can be re-queued or handed off elsewhere`,
-        )
-        recordIssueProcessingDuration(Date.now() - processingStartTime)
-        return
-      }
-
-      branch = ensured.branch
-      worktreePath = ensured.worktreePath
-      worktreeId = ensured.worktreeId
-
-      if (issue.state === 'failed') {
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          ISSUE_LABELS.FAILED,
-          buildIssueWorkingTransitionEvent(
-            'resume',
-            this.config.machineId,
-            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          ),
-          this.config,
-        )
-      } else {
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          ISSUE_LABELS.WORKING,
-          buildIssueWorkingTransitionEvent(
-            'resume',
-            this.config.machineId,
-            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          ),
-          this.config,
-        )
-      }
-
       const wt: WorktreeInfo = {
         path: worktreePath,
         issueNumber,
@@ -1883,6 +1818,15 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
 
       await restoreManagedWorktreeState(worktreePath, this.logger)
+      const refreshedBranch = await refreshResumableIssueBranchOntoDefault(
+        worktreePath,
+        branch,
+        this.config.git.defaultBranch,
+        this.logger,
+      )
+      if (!refreshedBranch.success) {
+        throw new Error(`issue recovery branch refresh failed: ${refreshedBranch.message}`)
+      }
       const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle, {
         shouldAbort: async () => {
           const latestIssue = await getAgentIssueByNumber(issueNumber, this.config)
@@ -2556,7 +2500,11 @@ export class AgentDaemon {
         issueNumber,
         ISSUE_LABELS.WORKING,
         ISSUE_LABELS.CLAIMED,
-        buildIssueWorkingTransitionEvent('fresh-claim', this.config.machineId),
+        {
+          event: 'claimed',
+          machine: this.config.machineId,
+          ts: new Date().toISOString(),
+        },
         this.config,
       )
 
@@ -3282,23 +3230,6 @@ export function isRetryableDaemonLoopError(error: unknown): boolean {
   return RETRYABLE_DAEMON_ERROR_PATTERNS.some((pattern) => message.includes(pattern))
 }
 
-export function buildIssueWorkingTransitionEvent(
-  kind: IssueWorkingTransitionKind,
-  machineId: string,
-  reason?: string,
-): ClaimEvent | null {
-  if (kind === 'fresh-claim') return null
-
-  return {
-    event: 'claimed',
-    machine: machineId,
-    ts: new Date().toISOString(),
-    reason: kind === 'recoverable' && reason
-      ? `recoverable:${reason}`
-      : reason,
-  }
-}
-
 export function shouldResumeManagedIssue(
   issue: Pick<AgentIssue, 'state'>,
   hasLocalWorktree: boolean,
@@ -3436,44 +3367,6 @@ function buildAutoFixPushFailedReview(error: unknown): PrReviewResult {
 export function isMergeabilityFailure(message: string): boolean {
   const normalized = message.toLowerCase()
   return normalized.includes('not mergeable') || normalized.includes('merge conflict')
-}
-
-export function isMissingRemoteBranchGitOutput(
-  output: string,
-  branch?: string,
-): boolean {
-  const normalized = output.toLowerCase()
-  const normalizedBranch = branch ? `origin/${branch}`.toLowerCase() : null
-
-  return normalized.includes("couldn't find remote ref")
-    || normalized.includes('could not find remote ref')
-    || normalized.includes('invalid reference')
-    || (normalized.includes('not a commit') && normalizedBranch !== null && normalized.includes(normalizedBranch))
-    || (normalized.includes('ambiguous argument') && normalizedBranch !== null && normalized.includes(normalizedBranch))
-}
-
-function buildMissingRemoteBranchRecoveryReason(
-  branch: string,
-  rawMessage: string,
-): string {
-  const detail = rawMessage.trim().replace(/\s+/g, ' ').slice(0, 240)
-  return `${MISSING_REMOTE_BRANCH_RECOVERY_REASON_PREFIX}${branch}${detail ? ` ${detail}` : ''}`
-}
-
-export function isMissingRemoteBranchRecoveryReason(reason: string | null | undefined): boolean {
-  return typeof reason === 'string' && reason.startsWith(MISSING_REMOTE_BRANCH_RECOVERY_REASON_PREFIX)
-}
-
-export function canResumeIssueFromLease(
-  latestLease: ManagedLeaseComment | null,
-  activeLease: ManagedLeaseComment | null,
-  canAdoptLease: boolean,
-): boolean {
-  return latestLease?.lease.scope === 'issue-process'
-    && Boolean(latestLease.lease.branch)
-    && !isMissingRemoteBranchRecoveryReason(latestLease.lease.recoveryReason)
-    && canAdoptLease
-    && (latestLease.lease.status === 'recoverable' || activeLease === null)
 }
 
 function buildPrMergeBlockedComment(prNumber: number, reason: string): string {
@@ -3660,13 +3553,13 @@ export function buildPrMergeRetryComment(
 Next step: daemon will update the approved branch and retry the merge.`
 }
 
-export async function createWorktreeFromRemoteBranch(
+async function createWorktreeFromRemoteBranch(
   worktreePath: string,
   branch: string,
   config: AgentConfig,
   logger = console,
-): Promise<RemoteBranchAdoptionResult> {
-  if (existsSync(worktreePath)) return { status: 'ready' }
+): Promise<void> {
+  if (existsSync(worktreePath)) return
 
   if (!existsSync(config.worktreesBase)) {
     mkdirSync(config.worktreesBase, { recursive: true })
@@ -3674,25 +3567,11 @@ export async function createWorktreeFromRemoteBranch(
 
   const fetchResult = await runGitInRepo(['fetch', 'origin', branch])
   if (fetchResult.exitCode !== 0) {
-    const output = fetchResult.stderr || fetchResult.stdout
-    if (isMissingRemoteBranchGitOutput(output, branch)) {
-      return {
-        status: 'missing-remote-branch',
-        reason: buildMissingRemoteBranchRecoveryReason(branch, output),
-      }
-    }
     throw new Error(fetchResult.stderr || fetchResult.stdout || `git fetch origin ${branch} failed`)
   }
 
   const addResult = await runGitInRepo(['worktree', 'add', worktreePath, '-B', branch, `origin/${branch}`])
   if (addResult.exitCode !== 0) {
-    const output = addResult.stderr || addResult.stdout
-    if (isMissingRemoteBranchGitOutput(output, branch)) {
-      return {
-        status: 'missing-remote-branch',
-        reason: buildMissingRemoteBranchRecoveryReason(branch, output),
-      }
-    }
     throw new Error(addResult.stderr || addResult.stdout || `git worktree add ${worktreePath} -B ${branch} origin/${branch} failed`)
   }
 
@@ -3700,7 +3579,6 @@ export async function createWorktreeFromRemoteBranch(
   await runGitInWorktree(worktreePath, ['config', 'user.email', config.git.authorEmail])
   hydrateManagedIssueWorktree(worktreePath, logger)
   logger.log(`[worktree] adopted remote branch ${branch} into ${worktreePath}`)
-  return { status: 'ready' }
 }
 
 function hydrateManagedIssueWorktree(
@@ -3799,6 +3677,32 @@ export async function rebaseManagedBranchOntoDefault(
 
   logger.log(`[worktree] rebuilt ${branch} on top of origin/${defaultBranch} in ${worktreePath}`)
   return { success: true }
+}
+
+export async function refreshResumableIssueBranchOntoDefault(
+  worktreePath: string,
+  branch: string,
+  defaultBranch: string,
+  logger = console,
+): Promise<
+  | { success: true; refreshed: boolean }
+  | { success: false; refreshed: false; message: string }
+> {
+  const syncState = await readWorktreeBaseSyncState(worktreePath, defaultBranch)
+  if (!syncState.behindDefault) {
+    return { success: true, refreshed: false }
+  }
+
+  const rebased = await rebaseManagedBranchOntoDefault(worktreePath, branch, defaultBranch, logger)
+  if (!rebased.success) {
+    return {
+      success: false,
+      refreshed: false,
+      message: rebased.message,
+    }
+  }
+
+  return { success: true, refreshed: true }
 }
 
 async function runGitInWorktree(
