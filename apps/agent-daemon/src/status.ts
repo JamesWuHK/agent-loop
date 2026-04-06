@@ -909,7 +909,7 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
     if ((snapshot.localRuntime?.launchd?.runtime?.runs ?? 0) >= 3) {
       warnings.push(`launchd has restarted this daemon ${snapshot.localRuntime?.launchd?.runtime?.runs} times; inspect recent exits if this keeps increasing`)
     }
-    return warnings
+    return [...new Set(warnings)]
   }
 
   const warnings: string[] = []
@@ -1010,7 +1010,7 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
     warnings.push(...snapshot.githubAudit.warnings)
   }
 
-  return warnings
+  return [...new Set(warnings)]
 }
 
 export async function collectGitHubLeaseAudit(
