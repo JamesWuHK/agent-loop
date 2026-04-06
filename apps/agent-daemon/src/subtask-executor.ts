@@ -15,7 +15,10 @@ import {
 import { runConfiguredAgent, type AgentFailureKind, type TaskExecutionMonitor } from './cli-agent'
 
 const PLANNING_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes for planning
-const SUBTASK_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes per subtask
+
+export function resolveAgentExecutionTimeoutMs(config: AgentConfig): number {
+  return config.agent.timeoutMs
+}
 
 export interface SubtaskExecutorResult {
   success: boolean
@@ -112,7 +115,7 @@ export async function runSubtaskExecutor(
     const result = await runConfiguredAgent({
       prompt: subtaskPrompt,
       worktreePath,
-      timeoutMs: SUBTASK_TIMEOUT_MS,
+      timeoutMs: resolveAgentExecutionTimeoutMs(config),
       logger,
       config,
       allowWrites: true,
@@ -299,7 +302,7 @@ export async function runIssueRecovery(
     prompt,
     worktreePath,
     config,
-    timeoutMs: SUBTASK_TIMEOUT_MS,
+    timeoutMs: resolveAgentExecutionTimeoutMs(config),
     logger,
     allowWrites: true,
     monitor: monitor?.agentMonitor,
@@ -423,7 +426,7 @@ export async function runReviewAutoFix(
     prompt,
     worktreePath,
     config,
-    timeoutMs: SUBTASK_TIMEOUT_MS,
+    timeoutMs: resolveAgentExecutionTimeoutMs(config),
     logger,
     allowWrites: true,
     monitor: monitor?.agentMonitor,

@@ -638,7 +638,7 @@ export function buildReviewRunOptions(
   return {
     prompt,
     worktreePath,
-    timeoutMs: Math.min(config.agent.timeoutMs, 10 * 60 * 1000),
+    timeoutMs: config.agent.timeoutMs,
     config,
     logger,
     allowWrites: false,

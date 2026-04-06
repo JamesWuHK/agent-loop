@@ -6,6 +6,7 @@ import {
   buildPrReviewComment,
   buildReviewRepairPrompt,
   buildReviewPrompt,
+  buildReviewRunOptions,
   canResumeAutomatedPrReview,
   canResumeHumanNeededPrReview,
   classifyPrReviewOutcome,
@@ -72,6 +73,22 @@ const TEST_CONFIG: AgentConfig = {
 }
 
 describe('pr-reviewer', () => {
+  test('buildReviewRunOptions uses the configured agent timeout without a 10 minute cap', () => {
+    const options = buildReviewRunOptions(
+      'review prompt',
+      '/tmp/worktree',
+      {
+        ...TEST_CONFIG,
+        agent: {
+          ...TEST_CONFIG.agent,
+          timeoutMs: 45 * 60 * 1000,
+        },
+      },
+    )
+
+    expect(options.timeoutMs).toBe(45 * 60 * 1000)
+  })
+
   test('parses reason directly from JSON response', () => {
     expect(parsePrReviewResponse(`{
       "approved": true,

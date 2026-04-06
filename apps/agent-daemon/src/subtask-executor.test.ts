@@ -6,6 +6,7 @@ import type { AgentConfig } from '@agent/shared'
 import {
   buildIssueRecoveryPrompt,
   buildReviewAutoFixPrompt,
+  resolveAgentExecutionTimeoutMs,
   runIssueBranchPreflight,
   runIssueRecovery,
   salvageDirtyWorktree,
@@ -179,6 +180,20 @@ describe('buildIssueRecoveryPrompt', () => {
     expect(prompt).toContain('App stays on /login because there is no real login flow yet.')
     expect(prompt).toContain('cd apps/desktop && bun run --bun test src/App.test.tsx')
     expect(prompt).toContain('Prefer Bun-native execution to avoid host Node mismatches')
+  })
+})
+
+describe('resolveAgentExecutionTimeoutMs', () => {
+  it('uses the configured agent timeout instead of a hard-coded 10 minute cap', () => {
+    const timeoutMs = resolveAgentExecutionTimeoutMs({
+      ...TEST_CONFIG,
+      agent: {
+        ...TEST_CONFIG.agent,
+        timeoutMs: 45 * 60 * 1000,
+      },
+    })
+
+    expect(timeoutMs).toBe(45 * 60 * 1000)
   })
 })
 
