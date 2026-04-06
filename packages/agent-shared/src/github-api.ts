@@ -1,5 +1,5 @@
 import { $ } from 'bun'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type {
@@ -546,12 +546,14 @@ function withTempJsonFile<T>(
   payload: Record<string, unknown>,
   run: (path: string) => Promise<T>,
 ): Promise<T> {
-  const dir = mkdtempSync(join(tmpdir(), `${prefix}-`))
-  const path = join(dir, 'payload.json')
+  const path = join(
+    tmpdir(),
+    `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+  )
   writeFileSync(path, JSON.stringify(payload), 'utf-8')
 
   return run(path).finally(() => {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(path, { force: true })
   })
 }
 
