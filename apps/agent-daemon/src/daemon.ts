@@ -1028,14 +1028,25 @@ export class AgentDaemon {
       )
       return true
     }
+    const linkedPrComments = await listIssueComments(linkedPr.number, this.config)
+    const now = Date.now()
+    if (shouldDeferResumableIssueForActiveLinkedPrLease(
+      getActiveManagedLease(linkedPrComments, 'pr-review', now, this.config.recovery.leaseNoProgressTimeoutMs),
+      getActiveManagedLease(linkedPrComments, 'pr-merge', now, this.config.recovery.leaseNoProgressTimeoutMs),
+    )) {
+      this.logger.log(
+        `[daemon] deferring resumable issue #${candidate.issue.number} because an active linked PR lease already exists on PR #${linkedPr.number}`,
+      )
+      return true
+    }
 
     const labels = new Set(linkedPr.labels)
-    const linkedPrComments = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
-      ? await listIssueComments(linkedPr.number, this.config)
+    const humanNeededReviewComments = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? linkedPrComments
       : []
     const canResumeHumanNeededReview = labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
       ? canResumeHumanNeededPrReview(
-          linkedPrComments,
+          humanNeededReviewComments,
           AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
           linkedPr.headRefOid,
           candidate.issue.body,
@@ -1274,6 +1285,20 @@ export class AgentDaemon {
       if (pr.isDraft) continue
       if (this.activePrReviews.has(pr.number)) continue
       if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) continue
+      const linkedIssueNumber = extractIssueNumberFromPrTitle(pr.title)
+      if (
+        linkedIssueNumber !== null
+        && shouldDeferStandalonePrTaskForActiveIssueLease(
+          getActiveManagedLease(
+            await listIssueComments(linkedIssueNumber, this.config),
+            'issue-process',
+            Date.now(),
+            this.config.recovery.leaseNoProgressTimeoutMs,
+          ),
+        )
+      ) {
+        continue
+      }
       if (!shouldMergeManagedPr(pr)) continue
       if (!(await this.canStartManagedScope(pr.number, 'pr-merge'))) continue
       return pr
@@ -1295,6 +1320,20 @@ export class AgentDaemon {
       if (pr.isDraft) continue
       if (this.activePrReviews.has(pr.number)) continue
       if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) continue
+      const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+      if (
+        issueNumber !== null
+        && shouldDeferStandalonePrTaskForActiveIssueLease(
+          getActiveManagedLease(
+            await listIssueComments(issueNumber, this.config),
+            'issue-process',
+            Date.now(),
+            this.config.recovery.leaseNoProgressTimeoutMs,
+          ),
+        )
+      ) {
+        continue
+      }
       if (!(await this.canStartManagedScope(pr.number, 'pr-review'))) continue
 
       if (shouldReviewManagedPr(pr)) {
@@ -1304,7 +1343,6 @@ export class AgentDaemon {
       if (!new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)) continue
 
       const comments = await listIssueComments(pr.number, this.config)
-      const issueNumber = extractIssueNumberFromPrTitle(pr.title)
       const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
       if (canResumeHumanNeededPrReview(
         comments,
@@ -2962,11 +3000,24 @@ export function shouldDeferStandalonePrTaskForActiveIssueProcess(
   return issueNumber !== null && activeIssueProcesses.has(issueNumber)
 }
 
+export function shouldDeferStandalonePrTaskForActiveIssueLease(
+  activeIssueLease: ManagedLeaseComment | null,
+): boolean {
+  return activeIssueLease !== null
+}
+
 export function shouldDeferResumableIssueForActiveLinkedPrTask(
   prNumber: number | null,
   activePrReviews: ReadonlySet<number>,
 ): boolean {
   return prNumber !== null && activePrReviews.has(prNumber)
+}
+
+export function shouldDeferResumableIssueForActiveLinkedPrLease(
+  activePrReviewLease: ManagedLeaseComment | null,
+  activePrMergeLease: ManagedLeaseComment | null,
+): boolean {
+  return activePrReviewLease !== null || activePrMergeLease !== null
 }
 
 export function getResumableIssueLinkedPrHandoff(

@@ -22,7 +22,9 @@ import {
   isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
   shouldDeferStandalonePrTaskForActiveIssueProcess,
+  shouldDeferStandalonePrTaskForActiveIssueLease,
   shouldDeferResumableIssueForActiveLinkedPrTask,
+  shouldDeferResumableIssueForActiveLinkedPrLease,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
@@ -107,6 +109,66 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([250]))).toBe(true)
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([249]))).toBe(false)
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(null, new Set([250]))).toBe(false)
+  })
+
+  test('defers standalone PR tasks while a linked issue lease is active on GitHub', () => {
+    const activeIssueLease = {
+      commentId: 1,
+      body: '',
+      createdAt: '2026-04-06T13:00:00.000Z',
+      updatedAt: '2026-04-06T13:00:30.000Z',
+      lease: {
+        leaseId: 'lease-issue',
+        scope: 'issue-process',
+        issueNumber: 129,
+        machineId: 'machine-a',
+        daemonInstanceId: 'daemon-a',
+        branch: 'agent/129/machine-a',
+        worktreeId: 'issue-129-machine-a',
+        phase: 'issue-recovery',
+        startedAt: '2026-04-06T13:00:00.000Z',
+        lastHeartbeatAt: '2026-04-06T13:00:30.000Z',
+        expiresAt: '2026-04-06T13:01:30.000Z',
+        attempt: 1,
+        lastProgressAt: '2026-04-06T13:00:25.000Z',
+        lastProgressKind: 'stdout',
+        status: 'active',
+      },
+    } as ManagedLeaseComment
+
+    expect(shouldDeferStandalonePrTaskForActiveIssueLease(activeIssueLease)).toBe(true)
+    expect(shouldDeferStandalonePrTaskForActiveIssueLease(null)).toBe(false)
+  })
+
+  test('defers resumable issue recovery while linked PR review or merge leases are active on GitHub', () => {
+    const activePrReviewLease = {
+      commentId: 2,
+      body: '',
+      createdAt: '2026-04-06T13:00:00.000Z',
+      updatedAt: '2026-04-06T13:00:30.000Z',
+      lease: {
+        leaseId: 'lease-pr-review',
+        scope: 'pr-review',
+        issueNumber: 129,
+        prNumber: 250,
+        machineId: 'machine-b',
+        daemonInstanceId: 'daemon-b',
+        branch: 'agent/129/machine-b',
+        worktreeId: 'pr-review-250',
+        phase: 'pr-review',
+        startedAt: '2026-04-06T13:00:00.000Z',
+        lastHeartbeatAt: '2026-04-06T13:00:30.000Z',
+        expiresAt: '2026-04-06T13:01:30.000Z',
+        attempt: 1,
+        lastProgressAt: '2026-04-06T13:00:25.000Z',
+        lastProgressKind: 'phase',
+        status: 'active',
+      },
+    } as ManagedLeaseComment
+
+    expect(shouldDeferResumableIssueForActiveLinkedPrLease(activePrReviewLease, null)).toBe(true)
+    expect(shouldDeferResumableIssueForActiveLinkedPrLease(null, activePrReviewLease)).toBe(true)
+    expect(shouldDeferResumableIssueForActiveLinkedPrLease(null, null)).toBe(false)
   })
 
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {
