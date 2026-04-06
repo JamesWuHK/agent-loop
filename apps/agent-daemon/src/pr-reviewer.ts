@@ -1,8 +1,8 @@
 import { $ } from 'bun'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { buildGhEnv, renderIssueContractForPrompt, type AgentConfig } from '@agent/shared'
 import { runConfiguredAgent, type AgentFailureKind, type CliAgentRunOptions, type TaskExecutionMonitor } from './cli-agent'
 
@@ -101,6 +101,7 @@ class ReviewAgentExecutionError extends Error {
 const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
 const MAX_REVIEW_OUTPUT_ATTEMPTS = 2
+const DETACHED_REVIEW_EXCLUDE_MARKER = '# agent-loop detached review dependency symlinks'
 
 /**
  * Review a PR using the configured CLI agent to determine if it can be merged.
@@ -933,16 +934,93 @@ export function hydrateDetachedReviewWorktree(
   worktreePath: string,
   logger = console,
 ): void {
-  for (const relativePath of collectDependencyDirectories(repoRoot)) {
+  const dependencyDirectories = collectDependencyDirectories(repoRoot)
+  const linkedDependencyDirectories: string[] = []
+
+  for (const relativePath of dependencyDirectories) {
     const sourcePath = join(repoRoot, relativePath)
     const targetPath = join(worktreePath, relativePath)
+    const targetParentPath = dirname(targetPath)
 
     if (existsSync(targetPath)) continue
+    if (targetParentPath !== worktreePath && !existsSync(targetParentPath)) {
+      logger.log(`[pr-review] skipped ${relativePath} because ${relative(worktreePath, targetParentPath)} is not present in detached review worktree`)
+      continue
+    }
 
-    mkdirSync(dirname(targetPath), { recursive: true })
+    mkdirSync(targetParentPath, { recursive: true })
     symlinkSync(sourcePath, targetPath, 'dir')
+    linkedDependencyDirectories.push(relativePath)
     logger.log(`[pr-review] linked ${relativePath} into detached review worktree`)
   }
+
+  registerDetachedReviewWorktreeExcludes(worktreePath, linkedDependencyDirectories, logger)
+}
+
+function registerDetachedReviewWorktreeExcludes(
+  worktreePath: string,
+  relativePaths: string[],
+  logger = console,
+): void {
+  if (relativePaths.length === 0) return
+
+  const commonGitDir = resolveCommonGitDirForWorktree(worktreePath)
+  if (!commonGitDir) return
+
+  const excludePath = join(commonGitDir, 'info', 'exclude')
+  const existingContent = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : ''
+  const existingEntries = new Set(
+    existingContent
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#')),
+  )
+
+  const additions = relativePaths
+    .flatMap((path) => {
+      const normalized = path.trim().replace(/\\/g, '/').replace(/^\/+/, '')
+      if (!normalized) return []
+      return [`/${normalized}`, `/${normalized}/`]
+    })
+    .filter((path) => !existingEntries.has(path))
+
+  if (additions.length === 0) return
+
+  let nextContent = existingContent
+  if (nextContent.length > 0 && !nextContent.endsWith('\n')) {
+    nextContent += '\n'
+  }
+  if (!nextContent.includes(DETACHED_REVIEW_EXCLUDE_MARKER)) {
+    nextContent += `${DETACHED_REVIEW_EXCLUDE_MARKER}\n`
+  }
+  nextContent += `${additions.join('\n')}\n`
+
+  mkdirSync(dirname(excludePath), { recursive: true })
+  writeFileSync(excludePath, nextContent, 'utf8')
+  logger.log(`[pr-review] excluded ${additions.length} dependency paths from git status in detached review worktree`)
+}
+
+function resolveCommonGitDirForWorktree(worktreePath: string): string | null {
+  const gitEntryPath = join(worktreePath, '.git')
+  if (!existsSync(gitEntryPath)) return null
+
+  const gitEntryStat = lstatSync(gitEntryPath)
+  if (gitEntryStat.isDirectory()) {
+    return gitEntryPath
+  }
+
+  const gitFile = readFileSync(gitEntryPath, 'utf8').trim()
+  const match = gitFile.match(/^gitdir:\s*(.+)$/i)
+  if (!match?.[1]) return null
+
+  const gitDir = resolve(worktreePath, match[1])
+  const commonDirPath = join(gitDir, 'commondir')
+  if (!existsSync(commonDirPath)) {
+    return gitDir
+  }
+
+  const commonDir = readFileSync(commonDirPath, 'utf8').trim()
+  return commonDir ? resolve(gitDir, commonDir) : gitDir
 }
 
 export async function createDetachedPrWorktree(

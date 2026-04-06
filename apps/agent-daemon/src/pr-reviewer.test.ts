@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
@@ -701,7 +701,7 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     try {
       mkdirSync(join(repoRoot, 'node_modules'), { recursive: true })
       mkdirSync(join(repoRoot, 'apps', 'desktop', 'node_modules'), { recursive: true })
-      mkdirSync(worktreePath, { recursive: true })
+      mkdirSync(join(worktreePath, 'apps', 'desktop'), { recursive: true })
 
       hydrateDetachedReviewWorktree(repoRoot, worktreePath, console)
 
@@ -714,6 +714,41 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
       expect(lstatSync(desktopNodeModules).isSymbolicLink()).toBe(true)
       expect(realpathSync(rootNodeModules)).toBe(realpathSync(join(repoRoot, 'node_modules')))
       expect(realpathSync(desktopNodeModules)).toBe(realpathSync(join(repoRoot, 'apps', 'desktop', 'node_modules')))
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('hydrates detached review worktree without surfacing dependency symlinks as git changes', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'pr-reviewer-test-'))
+    const repoRoot = join(tempDir, 'repo')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      mkdirSync(join(repoRoot, 'node_modules'), { recursive: true })
+      mkdirSync(join(repoRoot, '.kilo', 'node_modules'), { recursive: true })
+      mkdirSync(join(repoRoot, 'apps', 'desktop', 'node_modules'), { recursive: true })
+      writeFileSync(join(repoRoot, 'README.md'), 'seed\n', 'utf8')
+      writeFileSync(join(repoRoot, '.kilo', 'config.json'), '{}\n', 'utf8')
+      writeFileSync(join(repoRoot, 'apps', 'desktop', 'package.json'), '{}\n', 'utf8')
+
+      await Bun.$`git -C ${repoRoot} init -b main`.quiet()
+      await Bun.$`git -C ${repoRoot} config user.name ${TEST_CONFIG.git.authorName}`.quiet()
+      await Bun.$`git -C ${repoRoot} config user.email ${TEST_CONFIG.git.authorEmail}`.quiet()
+      await Bun.$`git -C ${repoRoot} add README.md .kilo/config.json apps/desktop/package.json`.quiet()
+      await Bun.$`git -C ${repoRoot} commit -m "chore: init"`.quiet()
+      await Bun.$`git -C ${repoRoot} worktree add --detach ${worktreePath} HEAD`.quiet()
+
+      hydrateDetachedReviewWorktree(repoRoot, worktreePath, console)
+
+      const status = (await Bun.$`git -C ${worktreePath} status --short`.quiet().text()).trim()
+      const excludePath = (await Bun.$`git -C ${worktreePath} rev-parse --git-path info/exclude`.quiet().text()).trim()
+      const excludeContent = readFileSync(excludePath, 'utf8')
+
+      expect(status).toBe('')
+      expect(excludeContent).toContain('/node_modules')
+      expect(excludeContent).toContain('/.kilo/node_modules')
+      expect(excludeContent).toContain('/apps/desktop/node_modules')
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
