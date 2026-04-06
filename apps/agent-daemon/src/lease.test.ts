@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { buildManagedLeaseComment, type AgentConfig, type IssueComment, type ManagedLease } from '@agent/shared'
 import { acquireManagedLease, getLeaseCommentsForScope, type LeaseApiAdapter } from './lease'
 
@@ -44,6 +44,9 @@ const TEST_CONFIG: AgentConfig = {
     authorEmail: 'agent-loop@local',
   },
 }
+
+const FIXED_NOW = Date.parse('2026-04-05T08:00:45.000Z')
+const REAL_DATE_NOW = Date.now
 
 function buildLease(overrides: Partial<ManagedLease> = {}): ManagedLease {
   return {
@@ -117,6 +120,14 @@ function createFakeLeaseApi(initialComments: IssueComment[] = [], afterCreateLis
 }
 
 describe('lease acquisition', () => {
+  beforeEach(() => {
+    Date.now = () => FIXED_NOW
+  })
+
+  afterEach(() => {
+    Date.now = REAL_DATE_NOW
+  })
+
   test('blocks when another daemon still holds an active lease', async () => {
     const foreign = buildComment(11, buildLease({
       machineId: 'machine-b',
@@ -251,6 +262,14 @@ describe('lease acquisition', () => {
 })
 
 describe('lease comment queries', () => {
+  beforeEach(() => {
+    Date.now = () => FIXED_NOW
+  })
+
+  afterEach(() => {
+    Date.now = REAL_DATE_NOW
+  })
+
   test('returns only comments for the requested scope', async () => {
     const { api } = createFakeLeaseApi([
       buildComment(11, buildLease({ scope: 'issue-process' })),
