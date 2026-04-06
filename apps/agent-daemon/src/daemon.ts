@@ -3884,6 +3884,59 @@ export async function rebaseManagedBranchOntoDefault(
   return { success: true }
 }
 
+async function rebaseLocalManagedBranchOntoDefault(
+  worktreePath: string,
+  branch: string,
+  defaultBranch: string,
+  logger = console,
+): Promise<{ success: true } | { success: false; message: string }> {
+  await restoreManagedWorktreeState(worktreePath, logger)
+
+  const fetchResult = await runGitInWorktree(worktreePath, ['fetch', 'origin', defaultBranch])
+  if (fetchResult.exitCode !== 0) {
+    await restoreManagedWorktreeState(worktreePath, logger)
+    return {
+      success: false,
+      message: fetchResult.stderr || fetchResult.stdout || `git fetch origin ${defaultBranch} failed`,
+    }
+  }
+
+  const checkoutResult = await runGitInWorktree(worktreePath, ['checkout', branch])
+  if (checkoutResult.exitCode !== 0) {
+    await restoreManagedWorktreeState(worktreePath, logger)
+    return {
+      success: false,
+      message: checkoutResult.stderr || checkoutResult.stdout || `git checkout ${branch} failed`,
+    }
+  }
+
+  const localHead = (await runGitInWorktree(worktreePath, ['rev-parse', 'HEAD'])).stdout.trim()
+  const rebaseResult = await runGitInWorktree(worktreePath, ['rebase', `origin/${defaultBranch}`])
+  if (rebaseResult.exitCode === 0) {
+    logger.log(`[worktree] rebased local-only ${branch} onto origin/${defaultBranch} in ${worktreePath}`)
+    return { success: true }
+  }
+
+  await restoreManagedWorktreeState(worktreePath, logger)
+  logger.warn(
+    `[worktree] rebase of local-only ${branch} onto origin/${defaultBranch} failed; rebuilding branch snapshot instead`,
+  )
+
+  const rebuildResult = await rebuildManagedBranchFromSnapshot(
+    worktreePath,
+    branch,
+    defaultBranch,
+    localHead,
+    logger,
+  )
+  if (!rebuildResult.success) {
+    return rebuildResult
+  }
+
+  logger.log(`[worktree] rebuilt local-only ${branch} on top of origin/${defaultBranch} in ${worktreePath}`)
+  return { success: true }
+}
+
 export async function refreshResumableIssueBranchOntoDefault(
   worktreePath: string,
   branch: string,
@@ -3898,7 +3951,22 @@ export async function refreshResumableIssueBranchOntoDefault(
     return { success: true, refreshed: false }
   }
 
-  const rebased = await rebaseManagedBranchOntoDefault(worktreePath, branch, defaultBranch, logger)
+  const remoteBranchResult = await runGitInWorktree(worktreePath, ['ls-remote', '--exit-code', '--heads', 'origin', branch])
+  const remoteBranchOutput = `${remoteBranchResult.stdout}\n${remoteBranchResult.stderr}`.toLowerCase()
+  const missingRemoteBranch =
+    remoteBranchResult.exitCode !== 0
+    && (remoteBranchResult.exitCode === 2 || remoteBranchOutput.includes("couldn't find remote ref"))
+  if (remoteBranchResult.exitCode !== 0 && !missingRemoteBranch) {
+    return {
+      success: false,
+      refreshed: false,
+      message: remoteBranchResult.stderr || remoteBranchResult.stdout || `git ls-remote origin ${branch} failed`,
+    }
+  }
+
+  const rebased = missingRemoteBranch
+    ? await rebaseLocalManagedBranchOntoDefault(worktreePath, branch, defaultBranch, logger)
+    : await rebaseManagedBranchOntoDefault(worktreePath, branch, defaultBranch, logger)
   if (!rebased.success) {
     return {
       success: false,

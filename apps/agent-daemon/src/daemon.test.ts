@@ -1089,6 +1089,61 @@ describe('daemon merge recovery helpers', () => {
     }
   })
 
+  test('refreshes resumed local-only issue branches onto the latest default branch', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'daemon-local-only-issue-recovery-refresh-'))
+    const remoteDir = join(tempDir, 'remote.git')
+    const repoDir = join(tempDir, 'repo')
+
+    try {
+      mkdirSync(remoteDir, { recursive: true })
+      mkdirSync(repoDir, { recursive: true })
+
+      await Bun.$`git -C ${remoteDir} init --bare`.quiet()
+      await Bun.$`git -C ${repoDir} init -b main`.quiet()
+      await Bun.$`git -C ${repoDir} config user.name test`.quiet()
+      await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
+      await Bun.$`git -C ${repoDir} remote add origin ${remoteDir}`.quiet()
+
+      writeFileSync(join(repoDir, 'base.txt'), 'base\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add base.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
+      await Bun.$`git -C ${repoDir} push -u origin main`.quiet()
+
+      await Bun.$`git -C ${repoDir} checkout -b agent/130/e6f5b0a1-a129-492d-b208-8e1da8e49ef4`.quiet()
+      writeFileSync(join(repoDir, 'feature.txt'), 'local-only\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add feature.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "issue work"`.quiet()
+
+      await Bun.$`git -C ${repoDir} checkout main`.quiet()
+      writeFileSync(join(repoDir, 'base.txt'), 'base\nmain-update\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add base.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "main update"`.quiet()
+      await Bun.$`git -C ${repoDir} push`.quiet()
+
+      await Bun.$`git -C ${repoDir} checkout agent/130/e6f5b0a1-a129-492d-b208-8e1da8e49ef4`.quiet()
+
+      const result = await refreshResumableIssueBranchOntoDefault(
+        repoDir,
+        'agent/130/e6f5b0a1-a129-492d-b208-8e1da8e49ef4',
+        'main',
+        console,
+      )
+
+      expect(result).toEqual({ success: true, refreshed: true })
+      expect((await Bun.$`git -C ${repoDir} status --short`.quiet().text()).trim()).toBe('')
+      expect((await Bun.$`git -C ${repoDir} rev-parse --abbrev-ref HEAD`.quiet().text()).trim()).toBe(
+        'agent/130/e6f5b0a1-a129-492d-b208-8e1da8e49ef4',
+      )
+      expect((await Bun.$`cat ${join(repoDir, 'feature.txt')}`.text()).trim()).toBe('local-only')
+      expect((await Bun.$`cat ${join(repoDir, 'base.txt')}`.text()).trim()).toBe('base\nmain-update')
+      expect(
+        Number.parseInt((await Bun.$`git -C ${repoDir} rev-list --count HEAD..origin/main`.quiet().text()).trim(), 10),
+      ).toBe(0)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   test('treats missing remote recovery branches as recoverable adoption failures', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'daemon-missing-remote-branch-'))
     const remoteDir = join(tempDir, 'remote.git')
