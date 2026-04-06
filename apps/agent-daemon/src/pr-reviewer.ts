@@ -942,10 +942,15 @@ export function hydrateDetachedReviewWorktree(
     const targetPath = join(worktreePath, relativePath)
     const targetParentPath = dirname(targetPath)
 
-    if (existsSync(targetPath)) continue
     if (targetParentPath !== worktreePath && !existsSync(targetParentPath)) {
       logger.log(`[pr-review] skipped ${relativePath} because ${relative(worktreePath, targetParentPath)} is not present in detached review worktree`)
       continue
+    }
+
+    if (existsSync(targetPath)) {
+      if (dependencyTargetMatchesSource(targetPath, sourcePath)) continue
+      rmSync(targetPath, { recursive: true, force: true })
+      logger.log(`[pr-review] replaced stale ${relativePath} in detached review worktree`)
     }
 
     mkdirSync(targetParentPath, { recursive: true })
@@ -955,6 +960,14 @@ export function hydrateDetachedReviewWorktree(
   }
 
   registerDetachedReviewWorktreeExcludes(worktreePath, linkedDependencyDirectories, logger)
+}
+
+function dependencyTargetMatchesSource(targetPath: string, sourcePath: string): boolean {
+  try {
+    return realpathSync(targetPath) === realpathSync(sourcePath)
+  } catch {
+    return false
+  }
 }
 
 function registerDetachedReviewWorktreeExcludes(

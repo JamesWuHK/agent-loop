@@ -21,7 +21,7 @@ import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
-import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeHumanNeededPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, shouldRestartAutomatedPrReviewOnIssueUpdate, shouldRestartAutomatedPrReviewOnNewHead, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
+import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeHumanNeededPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, shouldRestartAutomatedPrReviewOnIssueUpdate, shouldRestartAutomatedPrReviewOnNewHead, classifyPrReviewOutcome, hydrateDetachedReviewWorktree, type PrReviewResult } from './pr-reviewer'
 import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
 import type { TaskExecutionMonitor } from './cli-agent'
 import {
@@ -1194,6 +1194,7 @@ export class AgentDaemon {
     const branch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
 
     if (hasWorktreeForIssue(issueNumber, this.config)) {
+      hydrateManagedIssueWorktree(worktreePath, this.logger)
       return {
         worktreePath,
         branch,
@@ -2500,6 +2501,7 @@ export class AgentDaemon {
 
       // Create worktree
       const worktreePath = await createWorktree(issueNumber, this.config)
+      hydrateManagedIssueWorktree(worktreePath, this.logger)
       const acquiredLease = await this.acquireLeaseForScope({
         targetNumber: issueNumber,
         scope: 'issue-process',
@@ -3566,7 +3568,15 @@ async function createWorktreeFromRemoteBranch(
 
   await runGitInWorktree(worktreePath, ['config', 'user.name', config.git.authorName])
   await runGitInWorktree(worktreePath, ['config', 'user.email', config.git.authorEmail])
+  hydrateManagedIssueWorktree(worktreePath, logger)
   logger.log(`[worktree] adopted remote branch ${branch} into ${worktreePath}`)
+}
+
+function hydrateManagedIssueWorktree(
+  worktreePath: string,
+  logger = console,
+): void {
+  hydrateDetachedReviewWorktree(process.cwd(), worktreePath, logger)
 }
 
 async function restoreManagedWorktreeState(

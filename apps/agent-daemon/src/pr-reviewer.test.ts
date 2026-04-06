@@ -719,6 +719,36 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     }
   })
 
+  test('hydrates detached review worktree by replacing stale dependency directories', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'pr-reviewer-test-'))
+    const repoRoot = join(tempDir, 'repo')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      mkdirSync(join(repoRoot, 'node_modules'), { recursive: true })
+      mkdirSync(join(repoRoot, 'apps', 'desktop', 'node_modules'), { recursive: true })
+      writeFileSync(join(repoRoot, 'apps', 'desktop', 'node_modules', 'vitest'), 'source\n', 'utf8')
+
+      mkdirSync(join(worktreePath, 'node_modules'), { recursive: true })
+      mkdirSync(join(worktreePath, 'apps', 'desktop', 'node_modules'), { recursive: true })
+      writeFileSync(join(worktreePath, 'apps', 'desktop', 'node_modules', 'stale.txt'), 'stale\n', 'utf8')
+
+      hydrateDetachedReviewWorktree(repoRoot, worktreePath, console)
+
+      const rootNodeModules = join(worktreePath, 'node_modules')
+      const desktopNodeModules = join(worktreePath, 'apps', 'desktop', 'node_modules')
+
+      expect(lstatSync(rootNodeModules).isSymbolicLink()).toBe(true)
+      expect(lstatSync(desktopNodeModules).isSymbolicLink()).toBe(true)
+      expect(realpathSync(rootNodeModules)).toBe(realpathSync(join(repoRoot, 'node_modules')))
+      expect(realpathSync(desktopNodeModules)).toBe(realpathSync(join(repoRoot, 'apps', 'desktop', 'node_modules')))
+      expect(existsSync(join(desktopNodeModules, 'stale.txt'))).toBe(false)
+      expect(readFileSync(join(desktopNodeModules, 'vitest'), 'utf8')).toBe('source\n')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   test('hydrates detached review worktree without surfacing dependency symlinks as git changes', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'pr-reviewer-test-'))
     const repoRoot = join(tempDir, 'repo')
