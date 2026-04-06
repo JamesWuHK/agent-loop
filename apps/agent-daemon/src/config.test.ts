@@ -25,6 +25,7 @@ const baseFileConfig: Partial<AgentConfig> = {
     leaseTtlMs: 60_000,
     workerIdleTimeoutMs: 300_000,
     leaseAdoptionBackoffMs: 5_000,
+    leaseNoProgressTimeoutMs: 360_000,
   },
   project: {
     profile: 'generic',
@@ -268,6 +269,7 @@ describe('buildConfig', () => {
             leaseTtlMs: 45_000,
             workerIdleTimeoutMs: 90_000,
             leaseAdoptionBackoffMs: 12_000,
+            leaseNoProgressTimeoutMs: 135_000,
           },
         },
         repoConfig: {},

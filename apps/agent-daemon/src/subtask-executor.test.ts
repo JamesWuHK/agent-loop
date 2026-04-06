@@ -34,6 +34,7 @@ const TEST_CONFIG: AgentConfig = {
     leaseTtlMs: 60_000,
     workerIdleTimeoutMs: 300_000,
     leaseAdoptionBackoffMs: 5_000,
+    leaseNoProgressTimeoutMs: 360_000,
   },
   worktreesBase: '/tmp',
   project: {

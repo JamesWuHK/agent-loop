@@ -53,6 +53,12 @@ export interface BackgroundRuntimeSnapshot {
   alive: boolean
 }
 
+export type BackgroundRuntimeRecordRemovalResult =
+  | 'removed'
+  | 'missing'
+  | 'not-owned'
+  | 'unreadable'
+
 export function buildBackgroundRuntimePaths(
   identity: BackgroundRuntimeIdentity,
   homeDir = homedir(),
@@ -183,6 +189,27 @@ export function isProcessAlive(pid: number): boolean {
 
 export function removeBackgroundRuntimeRecord(path: string): void {
   rmSync(path, { force: true })
+}
+
+export function removeBackgroundRuntimeRecordIfOwned(
+  path: string,
+  pid: number,
+): BackgroundRuntimeRecordRemovalResult {
+  if (!existsSync(path)) {
+    return 'missing'
+  }
+
+  const record = readBackgroundRuntimeRecord(path)
+  if (!record) {
+    return 'unreadable'
+  }
+
+  if (record.pid !== pid) {
+    return 'not-owned'
+  }
+
+  removeBackgroundRuntimeRecord(path)
+  return 'removed'
 }
 
 export function writeBackgroundRuntimeRecord(

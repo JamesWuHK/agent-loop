@@ -20,8 +20,10 @@ import {
   launchBackgroundRuntime,
   listBackgroundRuntimeRecords,
   removeBackgroundRuntimeRecord,
+  removeBackgroundRuntimeRecordIfOwned,
   resolveCurrentRuntimeSupervisor,
   resolveBackgroundRuntimeRecord,
+  sanitizeDaemonBackgroundArgs,
   stopBackgroundRuntime,
   writeBackgroundRuntimeRecord,
   type BackgroundRuntimeSnapshot,
@@ -90,6 +92,13 @@ export interface ManagedRuntimeLogResult {
   truncated: boolean
   message: string
 }
+
+export type ManagedRuntimeCleanupResult =
+  | 'skipped'
+  | 'removed'
+  | 'missing'
+  | 'not-owned'
+  | 'unreadable'
 
 interface RestartManagedRuntimeDependencies {
   platform: NodeJS.Platform
@@ -474,9 +483,15 @@ async function main() {
     const daemon = new AgentDaemon(config, console, healthServerConfig, metricsPort)
 
     const removeRuntimeFileIfManaged = () => {
-      const runtimeFile = process.env.AGENT_LOOP_RUNTIME_FILE
-      if (runtimeFile && shouldRemoveManagedRuntimeRecord(resolveCurrentRuntimeSupervisor())) {
-        removeBackgroundRuntimeRecord(runtimeFile)
+      const cleanupResult = cleanupManagedRuntimeRecord({
+        runtimeFile: process.env.AGENT_LOOP_RUNTIME_FILE,
+        supervisor: resolveCurrentRuntimeSupervisor(),
+      })
+
+      if (cleanupResult === 'not-owned') {
+        console.log('[agent-loop] preserving runtime record because a newer daemon instance already owns it')
+      } else if (cleanupResult === 'unreadable') {
+        console.warn('[agent-loop] skipped runtime record cleanup because the managed runtime record could not be parsed')
       }
     }
 
@@ -656,6 +671,101 @@ export function buildManagedRestartArgs(input: {
   ]
 }
 
+export function buildManagedRuntimeLaunchArgs(input: {
+  repo: string
+  machineId: string
+  healthPort: number
+  metricsPort: number
+  existingArgs?: string[]
+  overrideArgs?: string[]
+}): string[] {
+  const baseArgs = input.existingArgs && input.existingArgs.length > 0
+    ? [...input.existingArgs]
+    : buildManagedRestartArgs({
+        repo: input.repo,
+        machineId: input.machineId,
+        healthPort: input.healthPort,
+        metricsPort: input.metricsPort,
+      })
+  const overrides = sanitizeManagedRuntimeOverrideArgs(input.overrideArgs ?? [])
+  return overrides.length > 0
+    ? [...stripManagedRuntimeArgs(baseArgs, collectManagedRuntimeOverrideFlags(overrides)), ...overrides]
+    : baseArgs
+}
+
+function sanitizeManagedRuntimeOverrideArgs(args: string[]): string[] {
+  return sanitizeDaemonBackgroundArgs(args)
+}
+
+function collectManagedRuntimeOverrideFlags(args: string[]): Set<string> {
+  const flags = new Set<string>()
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]
+    if (!token?.startsWith('--')) continue
+
+    if (isManagedRuntimeValueFlag(token) || isManagedRuntimeBooleanFlag(token)) {
+      flags.add(token)
+    }
+
+    if (isManagedRuntimeValueFlag(token)) {
+      index += 1
+    }
+  }
+
+  return flags
+}
+
+function stripManagedRuntimeArgs(args: string[], flagsToStrip: Set<string>): string[] {
+  if (flagsToStrip.size === 0) {
+    return [...args]
+  }
+
+  const stripped: string[] = []
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]
+    if (!token) {
+      continue
+    }
+
+    if (!token.startsWith('--')) {
+      stripped.push(token)
+      continue
+    }
+
+    if (flagsToStrip.has(token)) {
+      if (isManagedRuntimeValueFlag(token)) {
+        index += 1
+      }
+      continue
+    }
+
+    stripped.push(token)
+    if (isManagedRuntimeValueFlag(token) && index + 1 < args.length) {
+      stripped.push(args[index + 1]!)
+      index += 1
+    }
+  }
+
+  return stripped
+}
+
+function isManagedRuntimeValueFlag(flag: string): boolean {
+  return flag === '--repo'
+    || flag === '--pat'
+    || flag === '--concurrency'
+    || flag === '--poll-interval'
+    || flag === '--machine-id'
+    || flag === '--metrics-port'
+    || flag === '--health-host'
+    || flag === '--health-port'
+}
+
+function isManagedRuntimeBooleanFlag(flag: string): boolean {
+  return flag === '--dry-run' || flag === '--once'
+}
+
 export function readManagedRuntimeLog(input: {
   discoveredRuntime: BackgroundRuntimeSnapshot | null
   repo?: string
@@ -764,6 +874,18 @@ export function shouldRemoveManagedRuntimeRecord(
   return supervisor !== 'launchd'
 }
 
+export function cleanupManagedRuntimeRecord(input: {
+  runtimeFile?: string
+  supervisor: ReturnType<typeof resolveCurrentRuntimeSupervisor>
+  pid?: number
+}): ManagedRuntimeCleanupResult {
+  if (!input.runtimeFile || !shouldRemoveManagedRuntimeRecord(input.supervisor)) {
+    return 'skipped'
+  }
+
+  return removeBackgroundRuntimeRecordIfOwned(input.runtimeFile, input.pid ?? process.pid)
+}
+
 export function startManagedRuntime(
   input: RestartManagedRuntimeInput,
   deps: RestartManagedRuntimeDependencies = DEFAULT_RESTART_DEPENDENCIES,
@@ -824,11 +946,13 @@ export function startManagedRuntime(
   )
   const healthPort = runtime?.record.healthPort ?? input.healthPort
   const metricsPort = runtime?.record.metricsPort ?? input.metricsPort ?? 9090
-  const launchArgs = buildManagedRestartArgs({
+  const launchArgs = buildManagedRuntimeLaunchArgs({
     repo: identity.repo,
     machineId: identity.machineId,
     healthPort,
     metricsPort,
+    existingArgs: runtime?.record.command.slice(2),
+    overrideArgs: input.argv,
   })
   const stopPrefix = runtime?.record.supervisor === 'detached' && !runtime.alive
     ? `${deps.stopBackgroundRuntime(runtime.recordPath).message}; `
@@ -1022,11 +1146,13 @@ export function restartManagedRuntime(
       },
       metricsPort: runtime.record.metricsPort,
       cwd: input.cwd,
-      argv: buildManagedRestartArgs({
+      argv: buildManagedRuntimeLaunchArgs({
         repo: runtime.record.repo,
         machineId: runtime.record.machineId,
         healthPort: runtime.record.healthPort,
         metricsPort: runtime.record.metricsPort,
+        existingArgs: runtime.record.command.slice(2),
+        overrideArgs: input.argv,
       }),
       scriptPath: input.scriptPath,
     })

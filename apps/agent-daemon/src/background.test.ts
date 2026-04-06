@@ -7,6 +7,7 @@ import {
   listBackgroundRuntimeRecords,
   readBackgroundRuntimeRecord,
   removeBackgroundRuntimeRecord,
+  removeBackgroundRuntimeRecordIfOwned,
   resolveCurrentRuntimeSupervisor,
   resolveBackgroundRuntimeRecord,
   sanitizeDaemonBackgroundArgs,
@@ -105,6 +106,47 @@ describe('background helpers', () => {
     expect(existsSync(path)).toBe(false)
     removeBackgroundRuntimeRecord(path)
     expect(existsSync(path)).toBe(false)
+  })
+
+  test('removes runtime records only when the expected pid still owns them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-background-owned-remove-test-'))
+    const path = join(dir, 'runtime.json')
+    writeFileSync(path, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-verify-20260405',
+      healthPort: 9311,
+      supervisor: 'detached',
+      pid: 12345,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T02:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+    }))
+
+    expect(removeBackgroundRuntimeRecordIfOwned(path, 12345)).toBe('removed')
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('preserves runtime records when another pid already replaced the owner', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-background-foreign-remove-test-'))
+    const path = join(dir, 'runtime.json')
+    writeFileSync(path, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-verify-20260405',
+      healthPort: 9311,
+      supervisor: 'detached',
+      pid: 67890,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T02:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+    }))
+
+    expect(removeBackgroundRuntimeRecordIfOwned(path, 12345)).toBe('not-owned')
+    expect(existsSync(path)).toBe(true)
+    expect(readBackgroundRuntimeRecord(path)?.pid).toBe(67890)
   })
 
   test('lists runtime records and marks alive processes', () => {

@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildManagedRestartArgs,
+  buildManagedRuntimeLaunchArgs,
+  cleanupManagedRuntimeRecord,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   startManagedRuntime,
@@ -31,10 +33,113 @@ describe('index helpers', () => {
     ])
   })
 
+  test('preserves existing managed runtime launch args and replaces explicit overrides', () => {
+    expect(buildManagedRuntimeLaunchArgs({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      existingArgs: [
+        '--repo', 'JamesWuHK/digital-employee',
+        '--machine-id', 'codex-dev',
+        '--health-port', '9311',
+        '--metrics-port', '9091',
+        '--concurrency', '1',
+        '--poll-interval', '45000',
+      ],
+      overrideArgs: ['--restart', '--concurrency', '2'],
+    })).toEqual([
+      '--repo', 'JamesWuHK/digital-employee',
+      '--machine-id', 'codex-dev',
+      '--health-port', '9311',
+      '--metrics-port', '9091',
+      '--poll-interval', '45000',
+      '--concurrency', '2',
+    ])
+  })
+
+  test('replaces selector flags instead of duplicating them during managed restart', () => {
+    expect(buildManagedRuntimeLaunchArgs({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      existingArgs: [
+        '--repo', 'JamesWuHK/digital-employee',
+        '--machine-id', 'codex-dev',
+        '--health-port', '9311',
+        '--metrics-port', '9091',
+        '--concurrency', '1',
+      ],
+      overrideArgs: [
+        '--restart',
+        '--repo', 'JamesWuHK/digital-employee',
+        '--machine-id', 'codex-dev',
+        '--health-port', '9311',
+        '--metrics-port', '9091',
+        '--concurrency', '2',
+      ],
+    })).toEqual([
+      '--repo', 'JamesWuHK/digital-employee',
+      '--machine-id', 'codex-dev',
+      '--health-port', '9311',
+      '--metrics-port', '9091',
+      '--concurrency', '2',
+    ])
+  })
+
   test('preserves launchd runtime records on managed shutdown for offline diagnostics', () => {
     expect(shouldRemoveManagedRuntimeRecord('launchd')).toBe(false)
     expect(shouldRemoveManagedRuntimeRecord('detached')).toBe(true)
     expect(shouldRemoveManagedRuntimeRecord('direct')).toBe(true)
+  })
+
+  test('removes detached runtime records only when the current process still owns them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-managed-cleanup-test-'))
+    const runtimeFile = join(dir, 'runtime.json')
+    writeFileSync(runtimeFile, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      supervisor: 'detached',
+      pid: 12345,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T03:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+    }))
+
+    expect(cleanupManagedRuntimeRecord({
+      runtimeFile,
+      supervisor: 'detached',
+      pid: 12345,
+    })).toBe('removed')
+    expect(existsSync(runtimeFile)).toBe(false)
+  })
+
+  test('preserves detached runtime records when a newer daemon instance already owns them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-managed-cleanup-foreign-test-'))
+    const runtimeFile = join(dir, 'runtime.json')
+    writeFileSync(runtimeFile, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      supervisor: 'detached',
+      pid: 67890,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T03:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+    }))
+
+    expect(cleanupManagedRuntimeRecord({
+      runtimeFile,
+      supervisor: 'detached',
+      pid: 12345,
+    })).toBe('not-owned')
+    expect(existsSync(runtimeFile)).toBe(true)
   })
 
   test('reads and tails managed daemon logs from a discovered runtime record', () => {
@@ -151,6 +256,90 @@ describe('index helpers', () => {
     expect(calls).toEqual([
       'launch:JamesWuHK/digital-employee:codex-dev:9311:9091',
     ])
+  })
+
+  test('starts stale detached runtimes with the recorded concurrency and poll interval when no overrides are provided', () => {
+    const result = startManagedRuntime({
+      discoveredRuntime: buildRuntimeSnapshot({
+        pid: 12345,
+        command: [
+          '/Users/wujames/.local/bin/bun',
+          '/Users/wujames/codeRepo/数字员工/apps/agent-daemon/src/index.ts',
+          '--repo', 'JamesWuHK/digital-employee',
+          '--machine-id', 'codex-dev',
+          '--health-port', '9311',
+          '--metrics-port', '9091',
+          '--concurrency', '2',
+          '--poll-interval', '45000',
+        ],
+      }, false),
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--start'],
+    }, {
+      platform: 'linux',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'unused',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/unused',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+      }),
+      inspectLaunchdService: () => ({
+        label: 'unused',
+        serviceTarget: 'gui/501/unused',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+        installed: false,
+        loaded: false,
+        detail: null,
+        runtime: null,
+      }),
+      startLaunchdService: () => ({
+        started: false,
+        message: 'unused',
+      }),
+      restartLaunchdService: () => ({
+        restarted: false,
+        message: 'unused',
+      }),
+      stopLaunchdService: () => ({
+        stopped: false,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: false,
+        message: 'Removed stale background runtime record for pid 12345',
+      }),
+      launchBackgroundRuntime: (input) => {
+        expect(input.argv).toEqual([
+          '--repo', 'JamesWuHK/digital-employee',
+          '--machine-id', 'codex-dev',
+          '--health-port', '9311',
+          '--metrics-port', '9091',
+          '--concurrency', '2',
+          '--poll-interval', '45000',
+        ])
+        return {
+          ...buildRuntimeSnapshot().record,
+          pid: 67890,
+        }
+      },
+    })
+
+    expect(result).toEqual({
+      kind: 'detached',
+      started: true,
+      message: 'Removed stale background runtime record for pid 12345; started detached daemon with pid 67890',
+    })
   })
 
   test('starts installed launchd services when they are currently stopped', () => {
@@ -356,6 +545,82 @@ describe('index helpers', () => {
       'stop:/Users/wujames/.agent-loop/runtime/runtime.json',
       'launch:JamesWuHK/digital-employee:codex-dev:9311:9091',
     ])
+  })
+
+  test('restarts detached runtimes with CLI concurrency overrides on top of the recorded launch args', () => {
+    const runtime = buildRuntimeSnapshot({
+      command: [
+        '/Users/wujames/.local/bin/bun',
+        '/Users/wujames/codeRepo/数字员工/apps/agent-daemon/src/index.ts',
+        '--repo', 'JamesWuHK/digital-employee',
+        '--machine-id', 'codex-dev',
+        '--health-port', '9311',
+        '--metrics-port', '9091',
+        '--concurrency', '1',
+      ],
+    })
+
+    const result = restartManagedRuntime({
+      discoveredRuntime: runtime,
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-dev',
+      healthPort: 9311,
+      metricsPort: 9091,
+      cwd: '/Users/wujames/codeRepo/digital-employee-main',
+      scriptPath: '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts',
+      argv: ['--restart', '--concurrency', '2', '--poll-interval', '45000'],
+    }, {
+      platform: 'linux',
+      resolveLocalDaemonIdentity: () => ({ repo: 'JamesWuHK/digital-employee', machineId: 'codex-dev' }),
+      buildLaunchdServicePaths: () => ({
+        label: 'unused',
+        launchAgentsDir: '/Users/wujames/Library/LaunchAgents',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        domain: 'gui/501',
+        serviceTarget: 'gui/501/unused',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+      }),
+      inspectLaunchdService: () => ({
+        label: 'unused',
+        serviceTarget: 'gui/501/unused',
+        plistPath: '/Users/wujames/Library/LaunchAgents/unused.plist',
+        runtimeRecordPath: '/tmp/unused.json',
+        logPath: '/tmp/unused.log',
+        installed: false,
+        loaded: false,
+        detail: null,
+        runtime: null,
+      }),
+      restartLaunchdService: () => ({
+        restarted: true,
+        message: 'unused',
+      }),
+      stopBackgroundRuntime: () => ({
+        stopped: true,
+        message: 'Sent SIGTERM to background daemon pid 12345',
+      }),
+      launchBackgroundRuntime: (input) => {
+        expect(input.argv).toEqual([
+          '--repo', 'JamesWuHK/digital-employee',
+          '--machine-id', 'codex-dev',
+          '--health-port', '9311',
+          '--metrics-port', '9091',
+          '--concurrency', '2',
+          '--poll-interval', '45000',
+        ])
+        return {
+          ...runtime.record,
+          pid: 67890,
+        }
+      },
+    })
+
+    expect(result).toEqual({
+      kind: 'detached',
+      restarted: true,
+      message: 'Sent SIGTERM to background daemon pid 12345; restarted detached daemon with pid 67890',
+    })
   })
 
   test('restarts installed launchd services even when no runtime record is currently discovered', () => {

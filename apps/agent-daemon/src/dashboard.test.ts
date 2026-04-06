@@ -107,8 +107,10 @@ function buildAgentConfig(): AgentConfig {
     requestedConcurrency: 1,
     concurrencyPolicy: {
       requested: 1,
-      limits: [],
       effective: 1,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
     },
     scheduling: {
       concurrencyByRepo: {},
@@ -119,6 +121,7 @@ function buildAgentConfig(): AgentConfig {
       leaseTtlMs: 60_000,
       workerIdleTimeoutMs: 300_000,
       leaseAdoptionBackoffMs: 5_000,
+      leaseNoProgressTimeoutMs: 360_000,
     },
     worktreesBase: '/tmp/agent-worktrees',
     project: {

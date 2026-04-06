@@ -162,9 +162,9 @@ export function buildConfig(
   })
   const agentFallback =
     repoConfig.agent && Object.prototype.hasOwnProperty.call(repoConfig.agent, 'fallback')
-      ? repoConfig.agent.fallback
+      ? (repoConfig.agent.fallback ?? null)
       : fileConfig.agent && Object.prototype.hasOwnProperty.call(fileConfig.agent, 'fallback')
-        ? fileConfig.agent.fallback
+        ? (fileConfig.agent.fallback ?? null)
         : 'claude'
 
   const config: AgentConfig = {

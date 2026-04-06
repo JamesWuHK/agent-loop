@@ -137,6 +137,12 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
     if (!Number.isFinite(parsed.healthPort) || !Number.isFinite(parsed.metricsPort)) return null
     if (!Number.isFinite(parsed.activeLeaseCount) || !Number.isFinite(parsed.activeWorktreeCount) || !Number.isFinite(parsed.effectiveActiveTasks)) return null
 
+    const healthPort = parsed.healthPort as number
+    const metricsPort = parsed.metricsPort as number
+    const activeLeaseCount = parsed.activeLeaseCount as number
+    const activeWorktreeCount = parsed.activeWorktreeCount as number
+    const effectiveActiveTasks = parsed.effectiveActiveTasks as number
+
     return {
       repo: parsed.repo,
       machineId: parsed.machineId,
@@ -145,11 +151,11 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       startedAt: parsed.startedAt,
       lastHeartbeatAt: parsed.lastHeartbeatAt,
       expiresAt: parsed.expiresAt,
-      healthPort: parsed.healthPort,
-      metricsPort: parsed.metricsPort,
-      activeLeaseCount: parsed.activeLeaseCount,
-      activeWorktreeCount: parsed.activeWorktreeCount,
-      effectiveActiveTasks: parsed.effectiveActiveTasks,
+      healthPort,
+      metricsPort,
+      activeLeaseCount,
+      activeWorktreeCount,
+      effectiveActiveTasks,
     }
   } catch {
     return null
