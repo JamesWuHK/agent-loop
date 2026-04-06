@@ -1929,6 +1929,15 @@ export class AgentDaemon {
       this.syncRuntimeMetrics()
 
       await restoreManagedWorktreeState(worktreePath, this.logger)
+      const refreshedBranch = await refreshResumableIssueBranchOntoDefault(
+        worktreePath,
+        branch,
+        this.config.git.defaultBranch,
+        this.logger,
+      )
+      if (!refreshedBranch.success) {
+        throw new Error(`issue recovery branch refresh failed: ${refreshedBranch.message}`)
+      }
       const monitor = this.buildManagedLeaseMonitor('issue-process', issueNumber, leaseHandle, {
         shouldAbort: async () => {
           const latestIssue = await getAgentIssueByNumber(issueNumber, this.config)
@@ -3873,6 +3882,32 @@ export async function rebaseManagedBranchOntoDefault(
 
   logger.log(`[worktree] rebuilt ${branch} on top of origin/${defaultBranch} in ${worktreePath}`)
   return { success: true }
+}
+
+export async function refreshResumableIssueBranchOntoDefault(
+  worktreePath: string,
+  branch: string,
+  defaultBranch: string,
+  logger = console,
+): Promise<
+  | { success: true; refreshed: boolean }
+  | { success: false; refreshed: false; message: string }
+> {
+  const syncState = await readWorktreeBaseSyncState(worktreePath, defaultBranch)
+  if (!syncState.behindDefault) {
+    return { success: true, refreshed: false }
+  }
+
+  const rebased = await rebaseManagedBranchOntoDefault(worktreePath, branch, defaultBranch, logger)
+  if (!rebased.success) {
+    return {
+      success: false,
+      refreshed: false,
+      message: rebased.message,
+    }
+  }
+
+  return { success: true, refreshed: true }
 }
 
 async function runGitInWorktree(
