@@ -1,4 +1,3 @@
-import { $ } from 'bun'
 import { writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -24,7 +23,6 @@ import { parseIssueContract } from './issue-contract'
 import { validateIssueContract } from './issue-contract-validator'
 
 const TMP_COMMENT_FILE = '/tmp/agent-loop-comment.txt'
-const TMP_BODY_FILE = '/tmp/agent-loop-body.txt'
 const TMP_PATCH_FILE = '/tmp/agent-loop-patch.json'
 const MANAGED_ISSUE_LABELS = Object.values(ISSUE_LABELS) as string[]
 const CLAIM_OWNERSHIP_SETTLE_DELAY_MS = 350
@@ -127,6 +125,17 @@ interface RawGitHubIssueConnection {
   }
 }
 
+interface RawRestGitHubIssue {
+  number?: number
+  title?: string
+  body?: string | null
+  state?: string
+  updated_at?: string
+  labels?: Array<{ name?: string }>
+  assignees?: Array<{ login?: string }>
+  pull_request?: unknown
+}
+
 export function deriveIssueStateFromRaw(
   labels: string[],
   issueState?: string,
@@ -153,6 +162,40 @@ function mapRawIssueNode(issue: RawGitHubIssueNode): AgentIssue {
     assignee,
     isClaimable: state === 'ready' && assignee === null && contractValidation.valid,
     updatedAt: issue.updatedAt,
+    dependencyIssueNumbers: dependencyMetadata.dependsOn,
+    hasDependencyMetadata: dependencyMetadata.hasDependencyMetadata,
+    dependencyParseError: dependencyMetadata.dependencyParseError,
+    claimBlockedBy: [],
+    hasExecutableContract: contractValidation.valid,
+    contractValidationErrors: contractValidation.errors,
+  }
+}
+
+function mapRawRestIssue(issue: RawRestGitHubIssue): AgentIssue | null {
+  if (issue.pull_request) return null
+  if (typeof issue.number !== 'number') return null
+
+  const labels = (issue.labels ?? [])
+    .map((label) => typeof label.name === 'string' ? label.name : '')
+    .filter(Boolean)
+  const state = deriveIssueStateFromRaw(labels, issue.state)
+  const assignee = (issue.assignees ?? [])
+    .map((candidate) => typeof candidate.login === 'string' ? candidate.login : '')
+    .find(Boolean) ?? null
+  const body = issue.body ?? ''
+  const dependencyMetadata = parseIssueDependencyMetadata(body, issue.number)
+  const contract = parseIssueContract(body)
+  const contractValidation = validateIssueContract(contract)
+
+  return {
+    number: issue.number,
+    title: typeof issue.title === 'string' ? issue.title : '',
+    body,
+    state,
+    labels,
+    assignee,
+    isClaimable: state === 'ready' && assignee === null && contractValidation.valid,
+    updatedAt: typeof issue.updated_at === 'string' ? issue.updated_at : '',
     dependencyIssueNumbers: dependencyMetadata.dependsOn,
     hasDependencyMetadata: dependencyMetadata.hasDependencyMetadata,
     dependencyParseError: dependencyMetadata.dependencyParseError,
@@ -198,6 +241,45 @@ export function applyDependencyClaimability(
   })
 }
 
+export function isGraphQlRateLimitErrorMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes('graphql') && normalized.includes('rate limit')
+}
+
+export function extractRestOpenIssueListPage(data: unknown): RawRestGitHubIssue[] {
+  return Array.isArray(data)
+    ? data.filter((item): item is RawRestGitHubIssue => typeof item === 'object' && item !== null)
+    : []
+}
+
+async function fetchIssuesByNumbersRest(
+  issueNumbers: number[],
+  config: AgentConfig,
+): Promise<Map<number, AgentIssue>> {
+  const resolved = new Map<number, AgentIssue>()
+
+  for (const issueNumber of issueNumbers) {
+    const { stdout, exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues/${issueNumber}`,
+    ], config)
+
+    if (exitCode !== 0) {
+      throw new GhError(
+        `api issues/${issueNumber}`,
+        exitCode,
+        parseGhApiErrorMessage(stdout, stderr),
+      )
+    }
+
+    const mapped = mapRawRestIssue(JSON.parse(stdout) as RawRestGitHubIssue)
+    if (mapped) {
+      resolved.set(mapped.number, mapped)
+    }
+  }
+
+  return resolved
+}
+
 async function fetchIssuesByNumbers(
   issueNumbers: number[],
   config: AgentConfig,
@@ -228,11 +310,19 @@ async function fetchIssuesByNumbers(
     `}`,
   ].join('\n')
 
-  const result = await $`gh api graphql --raw-field query=${query}`
-    .env(buildGhEnv(config))
-    .quiet()
+  const { stdout, exitCode, stderr } = await ghApiRaw([
+    'graphql',
+    '--raw-field',
+    `query=${query}`,
+  ], config)
+  if (exitCode !== 0) {
+    const errorMessage = parseGhApiErrorMessage(stdout, stderr)
+    if (isGraphQlRateLimitErrorMessage(errorMessage)) {
+      return fetchIssuesByNumbersRest(issueNumbers, config)
+    }
+    throw new GhError('api graphql issue lookup', exitCode, errorMessage)
+  }
 
-  const stdout = await new Response(result.stdout).text()
   const data = JSON.parse(stdout)
   const repo = data.data?.repository ?? {}
   const resolved = new Map<number, AgentIssue>()
@@ -323,6 +413,41 @@ export function extractOpenIssueConnectionPage(data: unknown): {
   }
 }
 
+async function listOpenAgentIssuesRest(
+  config: AgentConfig,
+): Promise<AgentIssue[]> {
+  const issues: AgentIssue[] = []
+
+  for (let page = 1; ; page += 1) {
+    const { stdout, exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues?state=open&per_page=100&page=${page}`,
+    ], config)
+
+    if (exitCode !== 0) {
+      throw new GhError(
+        `api issues?state=open&page=${page}`,
+        exitCode,
+        parseGhApiErrorMessage(stdout, stderr),
+      )
+    }
+
+    const pageItems = extractRestOpenIssueListPage(JSON.parse(stdout))
+    const mapped = pageItems
+      .map(mapRawRestIssue)
+      .filter((issue): issue is AgentIssue => issue !== null)
+      .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
+
+    issues.push(...mapped)
+
+    if (pageItems.length < 100) {
+      break
+    }
+  }
+
+  issues.sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt))
+  return enrichClaimability(issues, config)
+}
+
 export async function listOpenAgentIssues(
   config: AgentConfig,
 ): Promise<AgentIssue[]> {
@@ -346,7 +471,11 @@ export async function listOpenAgentIssues(
 
     const { stdout, exitCode, stderr } = await ghApiRaw(args, config)
     if (exitCode !== 0) {
-      throw new GhError('api graphql open issues', exitCode, stderr)
+      const errorMessage = parseGhApiErrorMessage(stdout, stderr)
+      if (isGraphQlRateLimitErrorMessage(errorMessage)) {
+        return listOpenAgentIssuesRest(config)
+      }
+      throw new GhError('api graphql open issues', exitCode, errorMessage)
     }
 
     const page = extractOpenIssueConnectionPage(JSON.parse(stdout))
@@ -519,6 +648,20 @@ interface RawPullRequestListItem {
   labels?: Array<{ name: string }>
 }
 
+interface RawRestPullRequest {
+  number?: number
+  title?: string
+  html_url?: string
+  state?: string
+  merged_at?: string | null
+  draft?: boolean
+  head?: {
+    ref?: string
+    sha?: string
+  }
+  labels?: Array<{ name?: string }>
+}
+
 interface RawIssueComment {
   id?: number
   body?: string
@@ -555,6 +698,102 @@ function withTempJsonFile<T>(
   return run(path).finally(() => {
     rmSync(path, { force: true })
   })
+}
+
+export function derivePullRequestStateFromRaw(
+  state?: string,
+  mergedAt?: string | null,
+): 'open' | 'merged' | 'closed' | null {
+  const normalized = typeof state === 'string' ? state.toLowerCase() : null
+  if (normalized === 'open') return 'open'
+  if (normalized === 'closed') return typeof mergedAt === 'string' && mergedAt.length > 0 ? 'merged' : 'closed'
+  return null
+}
+
+export function extractRestPullRequestListPage(data: unknown): RawRestPullRequest[] {
+  return Array.isArray(data)
+    ? data.filter((item): item is RawRestPullRequest => typeof item === 'object' && item !== null)
+    : []
+}
+
+function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | null {
+  if (typeof pr.number !== 'number') return null
+  if (typeof pr.title !== 'string') return null
+  if (typeof pr.html_url !== 'string') return null
+  if (typeof pr.head?.ref !== 'string') return null
+
+  return {
+    number: pr.number,
+    title: pr.title,
+    url: pr.html_url,
+    headRefName: pr.head.ref,
+    headRefOid: typeof pr.head.sha === 'string' && pr.head.sha.length > 0
+      ? pr.head.sha
+      : null,
+    isDraft: pr.draft === true,
+    labels: (pr.labels ?? [])
+      .map((label) => typeof label.name === 'string' ? label.name : '')
+      .filter(Boolean),
+  }
+}
+
+async function checkPrExistsRest(
+  branch: string,
+  config: AgentConfig,
+): Promise<PrCheckResult> {
+  const [owner] = config.repo.split('/')
+  const endpoint = `repos/${config.repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`
+  const { stdout, exitCode } = await ghApiRaw([endpoint], config)
+
+  if (exitCode !== 0) {
+    return { prNumber: null, prUrl: null, prState: null }
+  }
+
+  const data = extractRestPullRequestListPage(JSON.parse(stdout))
+  if (data.length === 0) {
+    return { prNumber: null, prUrl: null, prState: null }
+  }
+
+  const pr = data[0]!
+  return {
+    prNumber: typeof pr.number === 'number' ? pr.number : null,
+    prUrl: typeof pr.html_url === 'string' ? pr.html_url : null,
+    prState: derivePullRequestStateFromRaw(pr.state, pr.merged_at ?? null),
+  }
+}
+
+async function listOpenAgentPullRequestsRest(
+  config: AgentConfig,
+): Promise<ManagedPullRequest[]> {
+  const pullRequests: ManagedPullRequest[] = []
+
+  for (let page = 1; ; page += 1) {
+    const { stdout, exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/pulls?state=open&per_page=100&page=${page}`,
+    ], config)
+
+    if (exitCode !== 0) {
+      throw new GhError(
+        `api pulls?state=open&page=${page}`,
+        exitCode,
+        parseGhApiErrorMessage(stdout, stderr),
+      )
+    }
+
+    const pageItems = extractRestPullRequestListPage(JSON.parse(stdout))
+    pullRequests.push(
+      ...pageItems
+        .map(mapRawRestPullRequest)
+        .filter((pr): pr is ManagedPullRequest => pr !== null)
+        .filter((pr) => pr.headRefName.startsWith('agent/')),
+    )
+
+    if (pageItems.length < 100) {
+      break
+    }
+  }
+
+  return pullRequests
 }
 
 export function buildManagedLeaseComment(lease: ManagedLease): string {
@@ -722,54 +961,13 @@ export async function checkPrExists(
   branch: string,
   config: AgentConfig,
 ): Promise<PrCheckResult> {
-  const { stdout, exitCode } = await ghRaw(
-    `pr list --head ${branch} --state all --json number,url,state`,
-    config,
-  )
-
-  if (exitCode !== 0) {
-    return { prNumber: null, prUrl: null, prState: null }
-  }
-
-  const data = JSON.parse(stdout)
-  if (data.length === 0) {
-    return { prNumber: null, prUrl: null, prState: null }
-  }
-
-  const pr = data[0]!
-  return {
-    prNumber: pr.number,
-    prUrl: pr.url,
-    prState: pr.state.toLowerCase() as 'open' | 'merged' | 'closed',
-  }
+  return checkPrExistsRest(branch, config)
 }
 
 export async function listOpenAgentPullRequests(
   config: AgentConfig,
 ): Promise<ManagedPullRequest[]> {
-  const { stdout, exitCode, stderr } = await ghRaw(
-    'pr list --state open --limit 200 --json number,title,url,headRefName,headRefOid,isDraft,labels',
-    config,
-  )
-
-  if (exitCode !== 0) {
-    throw new GhError('pr list --state open', exitCode, stderr)
-  }
-
-  const data = JSON.parse(stdout) as RawPullRequestListItem[]
-  return data
-    .filter((pr) => typeof pr.headRefName === 'string' && pr.headRefName.startsWith('agent/'))
-    .map((pr) => ({
-      number: pr.number,
-      title: pr.title,
-      url: pr.url,
-      headRefName: pr.headRefName,
-      headRefOid: typeof pr.headRefOid === 'string' && pr.headRefOid.length > 0
-        ? pr.headRefOid
-        : null,
-      isDraft: pr.isDraft === true,
-      labels: (pr.labels ?? []).map((label) => label.name),
-    }))
+  return listOpenAgentPullRequestsRest(config)
 }
 
 export async function listIssueComments(
@@ -799,21 +997,30 @@ export async function createPr(
   body: string,
   config: AgentConfig,
 ): Promise<{ number: number; url: string }> {
-  writeFileSync(TMP_BODY_FILE, body, 'utf-8')
-  const { stdout, exitCode, stderr } = await ghRaw(
-    `pr create --title "Fix #${issueNumber}: ${issueTitle}" --body-file "${TMP_BODY_FILE}" --head ${branch}`,
-    config,
+  const response = await withTempJsonFile(
+    'agent-loop-pr-create',
+    {
+      title: `Fix #${issueNumber}: ${issueTitle}`,
+      head: branch,
+      base: config.git.defaultBranch,
+      body,
+    },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/pulls`,
+      '-X',
+      'POST',
+      '--input',
+      path,
+    ], config),
   )
 
-  if (exitCode !== 0) {
-    throw new GhError(`pr create`, exitCode, stderr)
+  if (response.exitCode !== 0) {
+    throw new GhError(`api pulls create`, response.exitCode, parseGhApiErrorMessage(response.stdout, response.stderr))
   }
 
-  // gh pr create returns the URL on stdout
-  const url = stdout.trim()
-  // Extract PR number from URL
-  const match = url.match(/\/pull\/(\d+)$/)
-  const number = match ? parseInt(match[1]!) : 0
+  const created = JSON.parse(response.stdout) as RawRestPullRequest
+  const url = typeof created.html_url === 'string' ? created.html_url : ''
+  const number = typeof created.number === 'number' ? created.number : 0
 
   return { number, url }
 }

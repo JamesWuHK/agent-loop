@@ -5,7 +5,10 @@ import {
   buildManagedLeaseComment,
   buildGhEnv,
   canDaemonAdoptManagedLease,
+  derivePullRequestStateFromRaw,
   deriveIssueStateFromRaw,
+  extractRestOpenIssueListPage,
+  extractRestPullRequestListPage,
   extractOpenIssueConnectionPage,
   extractManagedLeaseComment,
   getActiveManagedLease,
@@ -134,6 +137,72 @@ describe('open issue pagination helpers', () => {
       hasNextPage: false,
       endCursor: null,
     })
+  })
+})
+
+describe('REST pagination helpers', () => {
+  test('extracts open issue items from REST responses', () => {
+    expect(extractRestOpenIssueListPage([
+      {
+        number: 113,
+        title: 'artifact bridge',
+        state: 'open',
+        updated_at: '2026-04-06T11:59:25Z',
+        labels: [{ name: 'agent:failed' }],
+        assignees: [{ login: 'JamesWuHK' }],
+      },
+    ])).toEqual([
+      {
+        number: 113,
+        title: 'artifact bridge',
+        state: 'open',
+        updated_at: '2026-04-06T11:59:25Z',
+        labels: [{ name: 'agent:failed' }],
+        assignees: [{ login: 'JamesWuHK' }],
+      },
+    ])
+
+    expect(extractRestOpenIssueListPage({})).toEqual([])
+  })
+
+  test('extracts pull request items from REST responses', () => {
+    expect(extractRestPullRequestListPage([
+      {
+        number: 247,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/247',
+        state: 'open',
+        draft: false,
+        head: { ref: 'agent/125/codex-20260403', sha: 'abc123' },
+        labels: [{ name: 'agent:review-approved' }],
+      },
+    ])).toEqual([
+      {
+        number: 247,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/247',
+        state: 'open',
+        draft: false,
+        head: { ref: 'agent/125/codex-20260403', sha: 'abc123' },
+        labels: [{ name: 'agent:review-approved' }],
+      },
+    ])
+
+    expect(extractRestPullRequestListPage(null)).toEqual([])
+  })
+})
+
+describe('derivePullRequestStateFromRaw', () => {
+  test('returns open for open pull requests', () => {
+    expect(derivePullRequestStateFromRaw('open', null)).toBe('open')
+  })
+
+  test('returns merged when a closed pull request has merged_at', () => {
+    expect(derivePullRequestStateFromRaw('closed', '2026-04-06T11:51:11Z')).toBe('merged')
+  })
+
+  test('returns closed when a closed pull request has not merged', () => {
+    expect(derivePullRequestStateFromRaw('closed', null)).toBe('closed')
   })
 })
 
