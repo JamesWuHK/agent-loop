@@ -41,7 +41,7 @@ const EXECUTABLE_COMMAND_PREFIXES = [
   '../',
 ] as const
 
-function normalizeValidationEntry(entry: string): string {
+export function normalizeValidationEntry(entry: string): string {
   const trimmed = entry.trim()
   if (trimmed.startsWith('`') && trimmed.endsWith('`')) {
     return trimmed.slice(1, -1).trim()
@@ -50,20 +50,28 @@ function normalizeValidationEntry(entry: string): string {
   return trimmed
 }
 
-function looksLikeExecutableCommand(entry: string): boolean {
+export function looksLikeExecutableCommand(entry: string): boolean {
   const normalized = normalizeValidationEntry(entry)
   return EXECUTABLE_COMMAND_PREFIXES.some((prefix) =>
     normalized === prefix || normalized.startsWith(`${prefix} `),
   )
 }
 
-function looksLikeExecutableTestCommand(entry: string): boolean {
+export function looksLikeExecutableTestCommand(entry: string): boolean {
   if (!looksLikeExecutableCommand(entry)) {
     return false
   }
 
   const normalized = normalizeValidationEntry(entry)
   return /\b(test|tests|check|build|lint|verify|typecheck|coverage)\b/i.test(normalized)
+}
+
+export function getExecutableValidationCommands(
+  contract: Pick<IssueContract, 'validation'>,
+): string[] {
+  return contract.validation
+    .map(normalizeValidationEntry)
+    .filter((entry) => looksLikeExecutableCommand(entry))
 }
 
 export function validateIssueContract(contract: IssueContract): IssueContractValidationResult {

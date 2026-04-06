@@ -19,7 +19,7 @@ import type {
 import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
 import { pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
-import { runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
+import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
 import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeHumanNeededPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, shouldRestartAutomatedPrReviewOnIssueUpdate, shouldRestartAutomatedPrReviewOnNewHead, classifyPrReviewOutcome, type PrReviewResult } from './pr-reviewer'
 import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
@@ -1728,9 +1728,12 @@ export class AgentDaemon {
           `[daemon] marked linked PR #${linkedOpenPr.number} as retry because issue #${issueNumber} resumed local recovery`,
         )
       }
-      const recentBlockingReasons = prCheck.prNumber !== null
-        ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
-        : []
+      const recentBlockingReasons = [
+        ...extractAutomatedIssuePreflightReasons(await listIssueComments(issueNumber, this.config)),
+        ...(prCheck.prNumber !== null
+          ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
+          : []),
+      ]
       const recoveryResult = await runIssueRecovery(
         worktreePath,
         issueNumber,
@@ -2112,6 +2115,37 @@ export class AgentDaemon {
     worktreePath: string,
     branch: string,
   ): Promise<{ status: 'completed' | 'failed' | 'recoverable'; reason?: string }> {
+    const preflight = await runIssueBranchPreflight(worktreePath, issue.body, this.config, this.logger)
+    if (!preflight.valid) {
+      const reason = `Issue preflight failed before PR creation: ${preflight.violations.join('; ')}`
+      await commentOnIssue(
+        issue.number,
+        buildIssuePreflightFailureComment(issue.number, reason, preflight.violations),
+        this.config,
+      )
+      await transitionIssueState(
+        issue.number,
+        ISSUE_LABELS.FAILED,
+        ISSUE_LABELS.WORKING,
+        {
+          event: 'failed',
+          machine: this.config.machineId,
+          ts: new Date().toISOString(),
+          reason,
+        },
+        this.config,
+      )
+
+      this.logger.warn(`[daemon] issue #${issue.number} failed preflight before PR creation: ${preflight.violations.join('; ')}`)
+      recordIssueProcessed('failed')
+      this.activeWorktrees.delete(issue.number)
+      this.syncRuntimeMetrics()
+      return {
+        status: 'failed',
+        reason,
+      }
+    }
+
     const pr = await createOrFindPr(worktreePath, branch, issue.number, issue.title, this.config, this.logger)
     const reviewLease = await this.acquireLeaseForScope({
       targetNumber: pr.prNumber,
@@ -3135,6 +3169,68 @@ function buildPrMergeBlockedComment(prNumber: number, reason: string): string {
 - Reason: ${reason}
 
 Next step: stopping automation and leaving the PR open for a human.`
+}
+
+interface IssuePreflightFailureCommentPayload {
+  issue: number
+  valid: false
+  reason: string
+  violations: string[]
+}
+
+export function buildIssuePreflightFailureComment(
+  issueNumber: number,
+  reason: string,
+  violations: string[],
+): string {
+  const payload: IssuePreflightFailureCommentPayload = {
+    issue: issueNumber,
+    valid: false,
+    reason,
+    violations,
+  }
+
+  return `<!-- agent-loop:issue-preflight ${JSON.stringify(payload)} -->
+## Automated preflight blocked PR creation
+
+- Reason: ${reason}
+${violations.map((violation) => `- ${violation}`).join('\n')}
+
+Next step: fix the branch in the existing worktree until scope and validation commands both pass, then let daemon retry the issue.`
+}
+
+function extractIssuePreflightFailureComment(body: string): IssuePreflightFailureCommentPayload | null {
+  const match = body.match(/<!-- agent-loop:issue-preflight ([\s\S]*?) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<IssuePreflightFailureCommentPayload>
+    if (parsed.valid !== false) return null
+    if (typeof parsed.issue !== 'number' || !Number.isInteger(parsed.issue) || parsed.issue <= 0) return null
+    if (typeof parsed.reason !== 'string' || parsed.reason.trim().length === 0) return null
+
+    return {
+      issue: parsed.issue,
+      valid: false,
+      reason: parsed.reason.trim(),
+      violations: Array.isArray(parsed.violations)
+        ? parsed.violations.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [],
+    }
+  } catch {
+    return null
+  }
+}
+
+export function extractAutomatedIssuePreflightReasons(
+  comments: Array<Pick<IssueComment, 'body'>>,
+): string[] {
+  const reasons = comments
+    .map((comment) => extractIssuePreflightFailureComment(comment.body))
+    .filter((payload): payload is IssuePreflightFailureCommentPayload => payload !== null)
+    .map((payload) => payload.reason)
+
+  return reasons.length > 0 ? [reasons[reasons.length - 1]!] : []
 }
 
 export function buildPrMergeRetryComment(

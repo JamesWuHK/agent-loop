@@ -7,8 +7,10 @@ import {
   AgentDaemon,
   buildBlockedIssueResumeEscalationComment,
   buildDaemonRuntimeStatus,
+  buildIssuePreflightFailureComment,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  extractAutomatedIssuePreflightReasons,
   extractBlockedIssueResumeEscalationComment,
   getResumableIssueLinkedPrHandoff,
   getFailedIssueResumeBlock,
@@ -26,6 +28,29 @@ import {
   shouldResumeManagedIssue,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
+
+describe('issue preflight comments', () => {
+  test('extracts the latest automated preflight blocker from issue comments', () => {
+    const older = buildIssuePreflightFailureComment(
+      104,
+      'Issue preflight failed before PR creation: validation failed: bun test',
+      ['validation failed: bun test'],
+    )
+    const newer = buildIssuePreflightFailureComment(
+      104,
+      'Issue preflight failed before PR creation: changed forbidden files: apps/desktop/src/App.tsx',
+      ['changed forbidden files: apps/desktop/src/App.tsx'],
+    )
+
+    expect(extractAutomatedIssuePreflightReasons([
+      { body: older },
+      { body: 'plain comment' },
+      { body: newer },
+    ])).toEqual([
+      'Issue preflight failed before PR creation: changed forbidden files: apps/desktop/src/App.tsx',
+    ])
+  })
+})
 
 describe('daemon merge recovery helpers', () => {
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {

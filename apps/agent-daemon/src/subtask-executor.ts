@@ -3,6 +3,7 @@ import {
   buildPlanningPrompt,
   buildSubtaskPrompt,
   findNextSubtask,
+  getExecutableValidationCommands,
   getAgentIssueByNumber,
   getProjectPromptGuidance,
   parseIssueContract,
@@ -187,6 +188,23 @@ export interface ReviewAutoFixResult {
 export interface ReviewAutoFixScopeValidationResult {
   valid: boolean
   changedFiles: string[]
+  violations: string[]
+}
+
+export interface IssueBranchValidationCommandResult {
+  command: string
+  exitCode: number
+  stdout: string
+  stderr: string
+  timedOut: boolean
+}
+
+export interface IssueBranchPreflightResult {
+  valid: boolean
+  changedFiles: string[]
+  scopeViolations: string[]
+  validationFailures: IssueBranchValidationCommandResult[]
+  executableValidationCommands: string[]
   violations: string[]
 }
 
@@ -413,7 +431,7 @@ export async function runReviewAutoFix(
       return finalizeReviewAutoFixResult(
         worktreePath,
         issueBody,
-        config.git.defaultBranch,
+        config,
         logger,
         prNumber,
         salvagedCommit,
@@ -443,7 +461,7 @@ export async function runReviewAutoFix(
       return finalizeReviewAutoFixResult(
         worktreePath,
         issueBody,
-        config.git.defaultBranch,
+        config,
         logger,
         prNumber,
         salvagedCommit,
@@ -462,7 +480,7 @@ export async function runReviewAutoFix(
   return finalizeReviewAutoFixResult(
     worktreePath,
     issueBody,
-    config.git.defaultBranch,
+    config,
     logger,
     prNumber,
     afterHead,
@@ -551,25 +569,78 @@ export async function validateReviewAutoFixScope(
   }
 }
 
+export async function runIssueBranchPreflight(
+  worktreePath: string,
+  issueBody: string,
+  config: AgentConfig,
+  logger = console,
+  monitor?: TaskExecutionMonitor,
+): Promise<IssueBranchPreflightResult> {
+  const scopeValidation = await validateReviewAutoFixScope(
+    worktreePath,
+    issueBody,
+    config.git.defaultBranch,
+  )
+  const contract = parseIssueContract(issueBody)
+  const executableValidationCommands = getExecutableValidationCommands(contract)
+  const validationFailures: IssueBranchValidationCommandResult[] = []
+  const violations = [...scopeValidation.violations]
+
+  if (contract.validation.length > 0 && executableValidationCommands.length === 0) {
+    violations.push('issue contract has no executable validation commands to run in preflight')
+  }
+
+  for (const command of executableValidationCommands) {
+    monitor?.setPhase?.(`preflight:${command.slice(0, 48)}`)
+    const result = await runValidationCommand(worktreePath, command, config)
+    await monitor?.agentMonitor?.onActivity?.(result.stderr ? 'stderr' : 'stdout')
+
+    if (result.exitCode !== 0) {
+      validationFailures.push(result)
+      const failureMode = result.timedOut
+        ? `timed out after ${config.recovery.workerIdleTimeoutMs}ms`
+        : `exit ${result.exitCode}`
+      const output = summarizeValidationFailureOutput(result.stdout, result.stderr)
+      violations.push(
+        output
+          ? `validation failed: ${command} (${failureMode}) — ${output}`
+          : `validation failed: ${command} (${failureMode})`,
+      )
+      continue
+    }
+
+    logger.log(`[preflight] validation passed: ${command}`)
+  }
+
+  return {
+    valid: violations.length === 0,
+    changedFiles: scopeValidation.changedFiles,
+    scopeViolations: scopeValidation.violations,
+    validationFailures,
+    executableValidationCommands,
+    violations,
+  }
+}
+
 async function finalizeReviewAutoFixResult(
   worktreePath: string,
   issueBody: string,
-  defaultBranch: string,
+  config: AgentConfig,
   logger: typeof console,
   prNumber: number,
   commitSha: string,
   outcome: 'committed' | 'salvaged',
 ): Promise<ReviewAutoFixResult> {
-  const scopeValidation = await validateReviewAutoFixScope(worktreePath, issueBody, defaultBranch)
-  if (!scopeValidation.valid) {
+  const preflight = await runIssueBranchPreflight(worktreePath, issueBody, config, logger)
+  if (!preflight.valid) {
     logger.warn(
-      `[review-fix] auto-fix commit ${commitSha.slice(0, 7)} for PR #${prNumber} violates the linked issue contract: ${scopeValidation.violations.join('; ')}`,
+      `[review-fix] auto-fix commit ${commitSha.slice(0, 7)} for PR #${prNumber} failed issue preflight: ${preflight.violations.join('; ')}`,
     )
     return {
       success: false,
       exitCode: 1,
       outcome: 'agent_failed',
-      error: `Issue contract violation after auto-fix: ${scopeValidation.violations.join('; ')}`,
+      error: `Issue preflight failed after auto-fix: ${preflight.violations.join('; ')}`,
       commitSha,
     }
   }
@@ -599,6 +670,54 @@ async function readChangedFilesAgainstDefaultBranch(
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
+}
+
+async function runValidationCommand(
+  worktreePath: string,
+  command: string,
+  config: AgentConfig,
+): Promise<IssueBranchValidationCommandResult> {
+  const proc = Bun.spawn(['sh', '-lc', command], {
+    cwd: worktreePath,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: config.git.authorName,
+      GIT_COMMITTER_NAME: config.git.authorName,
+      GIT_AUTHOR_EMAIL: config.git.authorEmail,
+      GIT_COMMITTER_EMAIL: config.git.authorEmail,
+      GH_TOKEN: config.pat,
+      GITHUB_TOKEN: config.pat,
+    },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    proc.kill()
+  }, config.recovery.workerIdleTimeoutMs)
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  clearTimeout(timeout)
+
+  return {
+    command,
+    exitCode,
+    stdout,
+    stderr,
+    timedOut,
+  }
+}
+
+function summarizeValidationFailureOutput(stdout: string, stderr: string): string {
+  const text = (stderr || stdout).trim().replace(/\s+/g, ' ')
+  if (!text) return ''
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text
 }
 
 function matchesContractFilePattern(path: string, pattern: string): boolean {

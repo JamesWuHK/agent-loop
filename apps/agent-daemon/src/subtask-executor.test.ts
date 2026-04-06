@@ -6,6 +6,7 @@ import type { AgentConfig } from '@agent/shared'
 import {
   buildIssueRecoveryPrompt,
   buildReviewAutoFixPrompt,
+  runIssueBranchPreflight,
   salvageDirtyWorktree,
   shouldTreatCleanNoCommitSubtaskAsSuccess,
   validateReviewAutoFixScope,
@@ -264,5 +265,54 @@ describe('validateReviewAutoFixScope', () => {
 
     expect(result.valid).toBe(false)
     expect(result.violations).toContain('changed forbidden files: blocked.txt')
+  })
+})
+
+describe('runIssueBranchPreflight', () => {
+  it('runs executable validation commands and ignores narrative validation entries', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const result = await runIssueBranchPreflight(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### Validation
+- \`sh -lc "test -f demo.txt"\`
+- 观察页面是否正常`,
+      TEST_CONFIG,
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.scopeViolations).toEqual([])
+    expect(result.validationFailures).toEqual([])
+    expect(result.executableValidationCommands).toEqual(['sh -lc "test -f demo.txt"'])
+  })
+
+  it('fails preflight when an executable validation command fails', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const result = await runIssueBranchPreflight(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### Validation
+- \`sh -lc "test -f missing.txt"\``,
+      TEST_CONFIG,
+    )
+
+    expect(result.valid).toBe(false)
+    expect(result.validationFailures).toHaveLength(1)
+    expect(result.validationFailures[0]?.command).toBe('sh -lc "test -f missing.txt"')
+    expect(result.violations[0]).toContain('validation failed: sh -lc "test -f missing.txt"')
   })
 })
