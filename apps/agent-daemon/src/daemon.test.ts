@@ -1,21 +1,25 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentConfig } from '@agent/shared'
+import type { AgentConfig, ManagedLeaseComment } from '@agent/shared'
 import {
   AgentDaemon,
+  buildIssueWorkingTransitionEvent,
   buildBlockedIssueResumeEscalationComment,
   buildDaemonRuntimeStatus,
   buildIssuePreflightFailureComment,
   buildPrReviewRefreshFailureComment,
   canRetryPrReviewRefresh,
+  canResumeIssueFromLease,
   getEffectiveActiveTaskCount,
   buildPrMergeRetryComment,
+  createWorktreeFromRemoteBranch,
   extractAutomatedIssuePreflightReasons,
   extractBlockedIssueResumeEscalationComment,
   getResumableIssueLinkedPrHandoff,
   getFailedIssueResumeBlock,
+  isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   shouldEscalateBlockedIssueResume,
@@ -24,7 +28,6 @@ import {
   getStandaloneIssueTransitionForReviewLabels,
   isRetryableDaemonLoopError,
   isMergeabilityFailure,
-  refreshResumableIssueBranchOntoDefault,
   rebaseManagedBranchOntoDefault,
   shouldApplyStandaloneIssueTransition,
   shouldResetLinkedPrToRetryOnIssueResume,
@@ -58,6 +61,29 @@ describe('issue preflight comments', () => {
 })
 
 describe('daemon merge recovery helpers', () => {
+  test('skips duplicate claimed comments when a freshly claimed issue enters working', () => {
+    expect(buildIssueWorkingTransitionEvent('fresh-claim', 'codex-dev')).toBeNull()
+  })
+
+  test('emits structured claimed events for resume and recoverable working transitions', () => {
+    const resumed = buildIssueWorkingTransitionEvent('resume', 'codex-dev', 'resume-existing-worktree')
+    const recoverable = buildIssueWorkingTransitionEvent('recoverable', 'codex-dev', 'idle timeout')
+
+    expect(resumed).toMatchObject({
+      event: 'claimed',
+      machine: 'codex-dev',
+      reason: 'resume-existing-worktree',
+    })
+    expect(typeof resumed?.ts).toBe('string')
+
+    expect(recoverable).toMatchObject({
+      event: 'claimed',
+      machine: 'codex-dev',
+      reason: 'recoverable:idle timeout',
+    })
+    expect(typeof recoverable?.ts).toBe('string')
+  })
+
   test('includes effective concurrency policy and local endpoints in status snapshots', () => {
     const config: AgentConfig = {
       machineId: 'codex-dev',
@@ -493,6 +519,43 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(true)
   })
 
+  test('does not resume failed issues from leases that already recorded a missing remote recovery branch', () => {
+    const latestLease: ManagedLeaseComment = {
+      commentId: 11,
+      body: '',
+      createdAt: '2026-04-06T08:00:00.000Z',
+      updatedAt: '2026-04-06T08:01:00.000Z',
+      lease: {
+        leaseId: 'lease-111',
+        scope: 'issue-process',
+        issueNumber: 111,
+        machineId: 'codex-remote',
+        daemonInstanceId: 'daemon-remote',
+        branch: 'agent/111/codex-remote',
+        worktreeId: 'issue-111-codex-remote',
+        phase: 'issue-recovery',
+        startedAt: '2026-04-06T08:00:00.000Z',
+        lastHeartbeatAt: '2026-04-06T08:01:00.000Z',
+        expiresAt: '2026-04-06T08:02:00.000Z',
+        attempt: 2,
+        lastProgressAt: '2026-04-06T08:00:30.000Z',
+        status: 'recoverable' as const,
+        recoveryReason: 'missing-remote-branch:agent/111/codex-remote fatal: couldn\'t find remote ref agent/111/codex-remote',
+      },
+    }
+
+    expect(isMissingRemoteBranchRecoveryReason(latestLease.lease.recoveryReason)).toBe(true)
+    expect(canResumeIssueFromLease(latestLease, null, true)).toBe(false)
+
+    expect(canResumeIssueFromLease({
+      ...latestLease,
+      lease: {
+        ...latestLease.lease,
+        recoveryReason: undefined,
+      },
+    }, null, true)).toBe(true)
+  })
+
   test('respects failed-issue retry cooldowns while still requiring a local worktree', () => {
     const now = Date.now()
 
@@ -885,10 +948,11 @@ describe('daemon merge recovery helpers', () => {
     }
   })
 
-  test('refreshes resumed issue branches onto the latest default branch before recovery continues', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'daemon-issue-recovery-refresh-'))
+  test('treats missing remote recovery branches as recoverable adoption failures', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'daemon-missing-remote-branch-'))
     const remoteDir = join(tempDir, 'remote.git')
     const repoDir = join(tempDir, 'repo')
+    const previousCwd = process.cwd()
 
     try {
       mkdirSync(remoteDir, { recursive: true })
@@ -900,40 +964,71 @@ describe('daemon merge recovery helpers', () => {
       await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
       await Bun.$`git -C ${repoDir} remote add origin ${remoteDir}`.quiet()
 
-      writeFileSync(join(repoDir, 'base.txt'), 'base\n', 'utf-8')
-      await Bun.$`git -C ${repoDir} add base.txt`.quiet()
+      writeFileSync(join(repoDir, 'shared.txt'), 'base\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add shared.txt`.quiet()
       await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
       await Bun.$`git -C ${repoDir} push -u origin main`.quiet()
 
-      await Bun.$`git -C ${repoDir} checkout -b agent/129/codex-20260403`.quiet()
-      writeFileSync(join(repoDir, 'feature.txt'), 'issue-only\n', 'utf-8')
-      await Bun.$`git -C ${repoDir} add feature.txt`.quiet()
-      await Bun.$`git -C ${repoDir} commit -m "issue work"`.quiet()
-      await Bun.$`git -C ${repoDir} push -u origin agent/129/codex-20260403`.quiet()
+      process.chdir(repoDir)
+      const config: AgentConfig = {
+        machineId: 'test-machine',
+        repo: 'JamesWuHK/digital-employee',
+        pat: 'test-token',
+        pollIntervalMs: 60_000,
+        concurrency: 1,
+        requestedConcurrency: 1,
+        concurrencyPolicy: {
+          requested: 1,
+          effective: 1,
+          repoCap: null,
+          profileCap: null,
+          projectCap: null,
+        },
+        scheduling: {
+          concurrencyByRepo: {},
+          concurrencyByProfile: {},
+        },
+        recovery: {
+          heartbeatIntervalMs: 30_000,
+          leaseTtlMs: 60_000,
+          workerIdleTimeoutMs: 300_000,
+          leaseAdoptionBackoffMs: 5_000,
+          leaseNoProgressTimeoutMs: 360_000,
+        },
+        worktreesBase: join(tempDir, 'worktrees'),
+        project: {
+          profile: 'desktop-vite',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: null,
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 60_000,
+        },
+        git: {
+          defaultBranch: 'main',
+          authorName: 'agent-loop',
+          authorEmail: 'agent-loop@local',
+        },
+      }
 
-      await Bun.$`git -C ${repoDir} checkout main`.quiet()
-      writeFileSync(join(repoDir, 'base.txt'), 'base\nmain-update\n', 'utf-8')
-      await Bun.$`git -C ${repoDir} add base.txt`.quiet()
-      await Bun.$`git -C ${repoDir} commit -m "main update"`.quiet()
-      await Bun.$`git -C ${repoDir} push`.quiet()
-
-      await Bun.$`git -C ${repoDir} checkout agent/129/codex-20260403`.quiet()
-
-      const result = await refreshResumableIssueBranchOntoDefault(
-        repoDir,
-        'agent/129/codex-20260403',
-        'main',
+      const worktreePath = join(tempDir, 'worktrees', 'issue-111-test-machine')
+      const result = await createWorktreeFromRemoteBranch(
+        worktreePath,
+        'agent/111/codex-remote',
+        config,
         console,
       )
 
-      expect(result).toEqual({ success: true, refreshed: true })
-      expect((await Bun.$`git -C ${repoDir} status --short`.quiet().text()).trim()).toBe('')
-      expect((await Bun.$`cat ${join(repoDir, 'feature.txt')}`.text()).trim()).toBe('issue-only')
-      expect((await Bun.$`cat ${join(repoDir, 'base.txt')}`.text()).trim()).toBe('base\nmain-update')
-      expect(
-        Number.parseInt((await Bun.$`git -C ${repoDir} rev-list --count HEAD..origin/main`.quiet().text()).trim(), 10),
-      ).toBe(0)
+      expect(result.status).toBe('missing-remote-branch')
+      if (result.status === 'missing-remote-branch') {
+        expect(isMissingRemoteBranchRecoveryReason(result.reason)).toBe(true)
+        expect(result.reason).toContain('agent/111/codex-remote')
+      }
+      expect(existsSync(worktreePath)).toBe(false)
     } finally {
+      process.chdir(previousCwd)
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
