@@ -4,11 +4,13 @@ import {
   buildDashboardSummary,
   localizeDashboardDerivedIssueState,
   localizeDashboardIssueLifecycleState,
+  sortDashboardUnmanagedIssues,
   type DashboardIssueView,
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
   type DashboardPresenceView,
   type DashboardPullRequestView,
+  type DashboardUnmanagedIssueView,
   renderDashboardAppScript,
   renderDashboardHtml,
 } from './dashboard'
@@ -310,6 +312,30 @@ describe('dashboard machine aggregation', () => {
   })
 })
 
+describe('dashboard unmanaged issues', () => {
+  test('sorts unmanaged issue summaries in number-descending order', () => {
+    const issues: DashboardUnmanagedIssueView[] = [
+      {
+        number: 127,
+        title: '[Sprint H] 会话复用体验增强',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/127',
+        labels: ['enhancement', 'milestone/m4'],
+        updatedAt: '2026-04-05T09:10:00.000Z',
+      },
+      {
+        number: 232,
+        title: 'Agent Loop Presence',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/232',
+        labels: [],
+        updatedAt: '2026-04-07T08:10:00.000Z',
+      },
+    ]
+
+    const sorted = sortDashboardUnmanagedIssues(issues)
+    expect(sorted.map((issue) => issue.number)).toEqual([232, 127])
+  })
+})
+
 describe('dashboard localization', () => {
   test('provides server-side localized issue labels for snapshot assembly', () => {
     expect(localizeDashboardIssueLifecycleState('ready')).toBe('已入队')
@@ -329,6 +355,7 @@ describe('dashboard localization', () => {
     expect(html).toContain('立即刷新')
     expect(html).toContain('机器状态')
     expect(html).toContain('问题队列')
+    expect(html).toContain('未纳管 Open Issue')
     expect(html).toContain('日志')
 
     expect(script).toContain('仪表盘快照加载失败')
@@ -337,6 +364,7 @@ describe('dashboard localization', () => {
     expect(script).toContain('受管 Open')
     expect(script).toContain('未纳管 Open')
     expect(script).toContain('这些 issue 不会被 daemon 自动消费')
+    expect(script).toContain('当前仓库的 open issue 已全部纳入 agent-loop 状态机。')
     expect(script).toContain('机器数')
     expect(script).toContain('本地运行时')
     expect(script).toContain('已入队 Issue')

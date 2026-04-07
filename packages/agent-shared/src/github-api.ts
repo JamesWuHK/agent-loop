@@ -107,6 +107,13 @@ export class GhError extends Error {
   }
 }
 
+export interface OpenRepositoryIssueSummary {
+  number: number
+  title: string
+  updatedAt: string
+  labels: string[]
+}
+
 interface RawGitHubIssueNode {
   number: number
   title: string
@@ -142,6 +149,39 @@ export function deriveIssueStateFromRaw(
 ): AgentIssue['state'] {
   if (issueState?.toLowerCase() === 'closed') return 'done'
   return inferState(labels)
+}
+
+function isManagedIssueLabels(labels: string[]): boolean {
+  return labels.some((label) => label.startsWith('agent:'))
+}
+
+function mapRawIssueNodeToSummary(issue: RawGitHubIssueNode): OpenRepositoryIssueSummary {
+  return {
+    number: issue.number,
+    title: issue.title,
+    updatedAt: issue.updatedAt,
+    labels: issue.labels.nodes.map((label) => label.name),
+  }
+}
+
+function mapRawRestIssueToSummary(issue: RawRestGitHubIssue): OpenRepositoryIssueSummary | null {
+  if (issue.pull_request) return null
+  if (typeof issue.number !== 'number') return null
+
+  return {
+    number: issue.number,
+    title: typeof issue.title === 'string' ? issue.title : '',
+    updatedAt: typeof issue.updated_at === 'string' ? issue.updated_at : '',
+    labels: (issue.labels ?? [])
+      .map((label) => typeof label.name === 'string' ? label.name : '')
+      .filter(Boolean),
+  }
+}
+
+export function filterUnmanagedIssueSummaries(
+  issues: OpenRepositoryIssueSummary[],
+): OpenRepositoryIssueSummary[] {
+  return issues.filter((issue) => !isManagedIssueLabels(issue.labels))
 }
 
 function mapRawIssueNode(issue: RawGitHubIssueNode): AgentIssue {
@@ -493,6 +533,40 @@ async function countOpenRepositoryIssuesRest(
   return total
 }
 
+async function listOpenUnmanagedIssuesRest(
+  config: AgentConfig,
+): Promise<OpenRepositoryIssueSummary[]> {
+  const issues: OpenRepositoryIssueSummary[] = []
+
+  for (let page = 1; ; page += 1) {
+    const { stdout, exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues?state=open&per_page=100&page=${page}`,
+    ], config)
+
+    if (exitCode !== 0) {
+      throw new GhError(
+        `api issues?state=open&page=${page}`,
+        exitCode,
+        parseGhApiErrorMessage(stdout, stderr),
+      )
+    }
+
+    const pageItems = extractRestOpenIssueListPage(JSON.parse(stdout))
+    const mapped = pageItems
+      .map(mapRawRestIssueToSummary)
+      .filter((issue): issue is OpenRepositoryIssueSummary => issue !== null)
+
+    issues.push(...filterUnmanagedIssueSummaries(mapped))
+
+    if (pageItems.length < 100) {
+      break
+    }
+  }
+
+  issues.sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt))
+  return issues
+}
+
 export async function listOpenAgentIssues(
   config: AgentConfig,
 ): Promise<AgentIssue[]> {
@@ -538,6 +612,50 @@ export async function listOpenAgentIssues(
     .filter((issue: AgentIssue) => issue.labels.some(label => label.startsWith('agent:')))
 
   return enrichClaimability(mapped, config)
+}
+
+export async function listOpenUnmanagedIssues(
+  config: AgentConfig,
+): Promise<OpenRepositoryIssueSummary[]> {
+  const [owner, repoName] = config.repo.split('/')
+  if (!owner || !repoName) {
+    throw new Error(`Invalid repo slug: ${config.repo}`)
+  }
+  const query = buildListOpenIssuesQuery(owner, repoName)
+  const issues: RawGitHubIssueNode[] = []
+  let cursor: string | null = null
+
+  for (;;) {
+    const args = [
+      'graphql',
+      '--raw-field',
+      `query=${query}`,
+    ]
+    if (cursor) {
+      args.push('--raw-field', `cursor=${cursor}`)
+    }
+
+    const { stdout, exitCode, stderr } = await ghApiRaw(args, config)
+    if (exitCode !== 0) {
+      const errorMessage = parseGhApiErrorMessage(stdout, stderr)
+      if (isGraphQlRateLimitErrorMessage(errorMessage)) {
+        return listOpenUnmanagedIssuesRest(config)
+      }
+      throw new GhError('api graphql open unmanaged issues', exitCode, errorMessage)
+    }
+
+    const page = extractOpenIssueConnectionPage(JSON.parse(stdout))
+    issues.push(...page.nodes)
+
+    if (!page.hasNextPage || !page.endCursor) {
+      break
+    }
+
+    cursor = page.endCursor
+  }
+
+  const mapped = issues.map(mapRawIssueNodeToSummary)
+  return filterUnmanagedIssueSummaries(mapped)
 }
 
 export async function countOpenRepositoryIssues(

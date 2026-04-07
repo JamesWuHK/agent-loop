@@ -3,11 +3,13 @@ import {
   countOpenRepositoryIssues,
   deriveDashboardIssueState,
   type DashboardIssueDerivedState,
+  type OpenRepositoryIssueSummary,
   PR_REVIEW_LABELS,
   getActiveManagedLease,
   listIssueComments,
   listOpenAgentIssues,
   listOpenAgentPullRequests,
+  listOpenUnmanagedIssues,
   type AgentConfig,
   type AgentIssue,
   type ManagedLeaseComment,
@@ -182,12 +184,21 @@ export interface DashboardPullRequestView {
   mergeLease: DashboardLeaseView | null
 }
 
+export interface DashboardUnmanagedIssueView {
+  number: number
+  title: string
+  url: string
+  labels: string[]
+  updatedAt: string
+}
+
 export interface DashboardSnapshot {
   generatedAt: string
   repo: string
   summary: DashboardSummary
   machines: DashboardMachineCard[]
   issues: DashboardIssueView[]
+  unmanagedIssues: DashboardUnmanagedIssueView[]
   prs: DashboardPullRequestView[]
   notes: string[]
   errors: string[]
@@ -229,6 +240,7 @@ export interface DashboardLocalMachineSnapshot {
 interface DashboardGitHubCollection {
   openIssueCount: number
   issues: DashboardIssueView[]
+  unmanagedIssues: DashboardUnmanagedIssueView[]
   prs: DashboardPullRequestView[]
   remoteLeases: DashboardLeaseView[]
 }
@@ -256,6 +268,7 @@ export async function collectDashboardSnapshot(
   }
 
   let issues: DashboardIssueView[] = []
+  let unmanagedIssues: DashboardUnmanagedIssueView[] = []
   let prs: DashboardPullRequestView[] = []
   let remoteLeases: DashboardLeaseView[] = []
   let remotePresences: DashboardPresenceView[] = []
@@ -271,6 +284,7 @@ export async function collectDashboardSnapshot(
     })
     openIssueCount = githubCollection.openIssueCount
     issues = githubCollection.issues
+    unmanagedIssues = githubCollection.unmanagedIssues
     prs = githubCollection.prs
     remoteLeases = githubCollection.remoteLeases
   } catch (error) {
@@ -295,6 +309,7 @@ export async function collectDashboardSnapshot(
     summary: buildDashboardSummary(machines, issues, prs, openIssueCount),
     machines,
     issues,
+    unmanagedIssues,
     prs,
     notes,
     errors,
@@ -451,6 +466,12 @@ export function buildDashboardSummary(
     failedIssueCount: issues.filter((issue) => issue.state === 'failed').length,
     openPrCount: prs.length,
   }
+}
+
+export function sortDashboardUnmanagedIssues(
+  issues: DashboardUnmanagedIssueView[],
+): DashboardUnmanagedIssueView[] {
+  return [...issues].sort(compareUnmanagedIssues)
 }
 
 export function readDashboardLog(
@@ -641,9 +662,10 @@ async function collectGitHubDashboardData(input: {
   localLeaseIndex: Map<string, DashboardLeaseView>
 }): Promise<DashboardGitHubCollection> {
   const now = Date.now()
-  const [openIssueCount, issues, prs] = await Promise.all([
+  const [openIssueCount, issues, unmanagedIssues, prs] = await Promise.all([
     countOpenRepositoryIssues(input.config),
     listOpenAgentIssues(input.config),
+    listOpenUnmanagedIssues(input.config),
     listOpenAgentPullRequests(input.config),
   ])
 
@@ -782,11 +804,29 @@ async function collectGitHubDashboardData(input: {
     })
     .sort(comparePullRequests)
 
+  const unmanagedIssueViews = unmanagedIssues
+    .map((issue) => buildDashboardUnmanagedIssueView(input.config.repo, issue))
+    .sort(compareUnmanagedIssues)
+
   return {
     openIssueCount,
     issues: issueViews,
+    unmanagedIssues: unmanagedIssueViews,
     prs: prViews,
     remoteLeases,
+  }
+}
+
+function buildDashboardUnmanagedIssueView(
+  repo: string,
+  issue: OpenRepositoryIssueSummary,
+): DashboardUnmanagedIssueView {
+  return {
+    number: issue.number,
+    title: issue.title,
+    url: buildGitHubIssueUrl(repo, issue.number),
+    labels: issue.labels,
+    updatedAt: issue.updatedAt,
   }
 }
 
@@ -1007,6 +1047,11 @@ function comparePullRequests(left: DashboardPullRequestView, right: DashboardPul
   return left.number - right.number
 }
 
+function compareUnmanagedIssues(left: DashboardUnmanagedIssueView, right: DashboardUnmanagedIssueView): number {
+  if (left.number !== right.number) return right.number - left.number
+  return Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+}
+
 function parsePositiveInteger(value: string | null): number | null {
   if (!value) return null
   const parsed = Number.parseInt(value, 10)
@@ -1135,6 +1180,14 @@ export function renderDashboardHtml(): string {
               <tbody id="issues-body"></tbody>
             </table>
           </div>
+          <div class="section-header compact" style="margin-top:18px">
+            <div>
+              <p class="section-eyebrow">未纳管 Open</p>
+              <h2>未纳管 Open Issue</h2>
+            </div>
+            <p class="section-note">这部分 issue 没有任何 agent:* label，不会被 daemon 自动消费。</p>
+          </div>
+          <div id="unmanaged-issues" class="warning-list"></div>
         </div>
 
         <div class="panel">
@@ -1641,6 +1694,7 @@ const alertsEl = document.getElementById('alerts');
 const summaryEl = document.getElementById('summary');
 const machinesEl = document.getElementById('machines');
 const issuesBodyEl = document.getElementById('issues-body');
+const unmanagedIssuesEl = document.getElementById('unmanaged-issues');
 const prsBodyEl = document.getElementById('prs-body');
 const updatedAtEl = document.getElementById('updated-at');
 const runtimeSelectEl = document.getElementById('runtime-select');
@@ -1715,6 +1769,7 @@ function renderSnapshot(snapshot) {
   renderSummary(snapshot);
   renderMachines(snapshot.machines);
   renderIssues(snapshot.issues);
+  renderUnmanagedIssues(snapshot.unmanagedIssues);
   renderPullRequests(snapshot.prs);
 }
 
@@ -1875,6 +1930,34 @@ function renderIssues(issues) {
       '</tr>',
     ].join('');
   }).join('');
+}
+
+function renderUnmanagedIssues(issues) {
+  if (!Array.isArray(issues) || issues.length === 0) {
+    unmanagedIssuesEl.innerHTML = '<div class="empty-state">当前仓库的 open issue 已全部纳入 agent-loop 状态机。</div>';
+    return;
+  }
+
+  unmanagedIssuesEl.innerHTML = sortDashboardUnmanagedIssues(issues).map((issue) => {
+    const labels = issue.labels.length > 0
+      ? '<div class="chip-row" style="margin-top:8px">' + issue.labels.map((label) => renderChip(label, '')).join('') + '</div>'
+      : '<div class="chip-row" style="margin-top:8px">' + renderChip('无 agent 标签', 'gold') + '</div>';
+
+    return [
+      '<div class="warning-item">',
+      '<a class="table-title" target="_blank" rel="noreferrer" href="' + escapeAttribute(issue.url) + '">#' + issue.number + ' ' + escapeHtml(issue.title) + '</a>',
+      labels,
+      '<div class="muted" style="margin-top:8px">最近更新 ' + escapeHtml(formatTimestamp(issue.updatedAt)) + ' · ' + escapeHtml(formatRelative(issue.updatedAt)) + '</div>',
+      '</div>',
+    ].join('');
+  }).join('');
+}
+
+function sortDashboardUnmanagedIssues(issues) {
+  return [...issues].sort((left, right) => {
+    if (left.number !== right.number) return right.number - left.number;
+    return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  });
 }
 
 function renderPullRequests(prs) {

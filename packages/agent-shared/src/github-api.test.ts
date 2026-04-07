@@ -10,6 +10,7 @@ import {
   extractRestOpenIssueListPage,
   extractRestPullRequestListPage,
   extractOpenIssueConnectionPage,
+  filterUnmanagedIssueSummaries,
   extractManagedLeaseComment,
   getActiveManagedLease,
   getLatestManagedLease,
@@ -200,6 +201,44 @@ describe('REST pagination helpers', () => {
     ])
 
     expect(extractRestPullRequestListPage(null)).toEqual([])
+  })
+})
+
+describe('unmanaged issue helpers', () => {
+  test('filters unmanaged open issues by excluding any agent:* labels', () => {
+    expect(filterUnmanagedIssueSummaries([
+      {
+        number: 223,
+        title: '[CI-V1] 固定 next-review replan smoke tests',
+        updatedAt: '2026-04-07T08:00:00Z',
+        labels: ['agent:ready', 'enhancement'],
+      },
+      {
+        number: 224,
+        title: '[Sprint V] 回看结果采纳与下一轮计划重启',
+        updatedAt: '2026-04-07T08:01:00Z',
+        labels: ['enhancement'],
+      },
+      {
+        number: 232,
+        title: 'Agent Loop Presence',
+        updatedAt: '2026-04-07T08:02:00Z',
+        labels: [],
+      },
+    ])).toEqual([
+      {
+        number: 224,
+        title: '[Sprint V] 回看结果采纳与下一轮计划重启',
+        updatedAt: '2026-04-07T08:01:00Z',
+        labels: ['enhancement'],
+      },
+      {
+        number: 232,
+        title: 'Agent Loop Presence',
+        updatedAt: '2026-04-07T08:02:00Z',
+        labels: [],
+      },
+    ])
   })
 })
 
