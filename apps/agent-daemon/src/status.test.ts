@@ -908,6 +908,7 @@ describe('status helpers', () => {
           startedAt: '2026-04-05T08:00:00.000Z',
           command: ['bun', '/Users/wujames/codeRepo/agent-loop/apps/agent-daemon/src/index.ts'],
           logPath: '/Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9311.log',
+          buildInfo: null,
         },
       },
       launchdInspector: (runtime) => ({

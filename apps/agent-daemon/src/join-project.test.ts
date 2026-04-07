@@ -243,6 +243,7 @@ describe('join-project helpers', () => {
           startedAt: '2026-04-05T00:00:00.000Z',
           command: ['bun', 'index.ts'],
           logPath: '/tmp/runtime/linux-dev-b.log',
+          buildInfo: null,
         }
       },
     }))
@@ -307,6 +308,7 @@ function buildDeps(
       startedAt: '2026-04-05T00:00:00.000Z',
       command: ['bun', 'index.ts'],
       logPath: '/tmp/runtime/daemon.log',
+      buildInfo: null,
     }),
     buildLaunchdServicePaths: () => ({
       label: 'com.agentloop.example',

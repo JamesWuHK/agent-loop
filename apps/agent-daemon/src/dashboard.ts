@@ -45,6 +45,8 @@ export interface DashboardSummary {
   localRuntimeCount: number
   activeLeaseCount: number
   openIssueCount: number
+  managedOpenIssueCount: number
+  unmanagedOpenIssueCount: number
   queuedIssueCount: number
   runnableIssueCount: number
   dependencyBlockedIssueCount: number
@@ -371,6 +373,50 @@ export function buildDashboardMachineCards(
   })
 }
 
+export function localizeDashboardIssueLifecycleState(state: AgentIssue['state']): string {
+  switch (state) {
+    case 'ready':
+      return '已入队'
+    case 'working':
+      return '执行中'
+    case 'claimed':
+      return '已认领'
+    case 'failed':
+      return '失败'
+    case 'stale':
+      return '待恢复'
+    case 'done':
+      return '完成'
+    case 'unknown':
+    default:
+      return '未入队'
+  }
+}
+
+export function localizeDashboardDerivedIssueState(state: DashboardIssueDerivedState): string {
+  switch (state) {
+    case 'runnable':
+      return '可运行'
+    case 'dependency_blocked':
+      return '依赖阻塞'
+    case 'contract_invalid':
+      return '合同无效'
+    case 'waiting_review':
+      return '等待评审'
+    case 'waiting_merge':
+      return '等待合并'
+    case 'human_needed':
+      return '需要人工'
+    case 'recoverable':
+      return '可恢复'
+    case 'stalled':
+      return '执行卡住'
+    case 'idle':
+    default:
+      return '已入队'
+  }
+}
+
 export function buildDashboardSummary(
   machines: DashboardMachineCard[],
   issues: DashboardIssueView[],
@@ -392,6 +438,8 @@ export function buildDashboardSummary(
     localRuntimeCount,
     activeLeaseCount: activeLeaseKeys.size,
     openIssueCount,
+    managedOpenIssueCount: issues.length,
+    unmanagedOpenIssueCount: Math.max(0, openIssueCount - issues.length),
     queuedIssueCount: issues.filter((issue) => issue.state === 'ready').length,
     runnableIssueCount: issues.filter((issue) => issue.derivedState === 'runnable').length,
     dependencyBlockedIssueCount: issues.filter((issue) => issue.derivedState === 'dependency_blocked').length,
@@ -681,9 +729,9 @@ async function collectGitHubDashboardData(input: {
         title: issue.title,
         url: buildGitHubIssueUrl(input.config.repo, issue.number),
         state: issue.state,
-        lifecycleStateLabel: localizeIssueState(issue.state),
+        lifecycleStateLabel: localizeDashboardIssueLifecycleState(issue.state),
         derivedState: derived.derivedState,
-        derivedStateLabel: localizeDerivedIssueState(derived.derivedState),
+        derivedStateLabel: localizeDashboardDerivedIssueState(derived.derivedState),
         reasonSummary: derived.reasonSummary,
         labels: issue.labels,
         assignee: issue.assignee,
@@ -1691,6 +1739,8 @@ function renderSummary(snapshot) {
     { label: '本地运行时', value: snapshot.summary.localRuntimeCount, tone: '' },
     { label: '活跃租约', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
     { label: 'Open', value: snapshot.summary.openIssueCount, tone: '' },
+    { label: '受管 Open', value: snapshot.summary.managedOpenIssueCount, tone: '' },
+    { label: '未纳管 Open', value: snapshot.summary.unmanagedOpenIssueCount, tone: snapshot.summary.unmanagedOpenIssueCount > 0 ? 'gold' : '' },
     { label: '已入队 Issue', value: snapshot.summary.queuedIssueCount, tone: '' },
     { label: '可运行 Issue', value: snapshot.summary.runnableIssueCount, tone: snapshot.summary.runnableIssueCount > 0 ? 'accent' : '' },
     { label: '依赖阻塞', value: snapshot.summary.dependencyBlockedIssueCount, tone: snapshot.summary.dependencyBlockedIssueCount > 0 ? 'gold' : '' },

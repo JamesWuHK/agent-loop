@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildDashboardMachineCards,
   buildDashboardSummary,
+  localizeDashboardDerivedIssueState,
+  localizeDashboardIssueLifecycleState,
   type DashboardIssueView,
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
@@ -273,6 +275,8 @@ describe('dashboard machine aggregation', () => {
       localRuntimeCount: 1,
       activeLeaseCount: 2,
       openIssueCount: 5,
+      managedOpenIssueCount: 3,
+      unmanagedOpenIssueCount: 2,
       queuedIssueCount: 1,
       runnableIssueCount: 1,
       dependencyBlockedIssueCount: 0,
@@ -307,6 +311,15 @@ describe('dashboard machine aggregation', () => {
 })
 
 describe('dashboard localization', () => {
+  test('provides server-side localized issue labels for snapshot assembly', () => {
+    expect(localizeDashboardIssueLifecycleState('ready')).toBe('已入队')
+    expect(localizeDashboardIssueLifecycleState('working')).toBe('执行中')
+    expect(localizeDashboardIssueLifecycleState('failed')).toBe('失败')
+    expect(localizeDashboardDerivedIssueState('runnable')).toBe('可运行')
+    expect(localizeDashboardDerivedIssueState('waiting_merge')).toBe('等待合并')
+    expect(localizeDashboardDerivedIssueState('human_needed')).toBe('需要人工')
+  })
+
   test('serves Chinese copy for the dashboard shell and client script', () => {
     const html = renderDashboardHtml()
     const script = renderDashboardAppScript()
@@ -321,6 +334,8 @@ describe('dashboard localization', () => {
     expect(script).toContain('仪表盘快照加载失败')
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
     expect(script).toContain('Open')
+    expect(script).toContain('受管 Open')
+    expect(script).toContain('未纳管 Open')
     expect(script).toContain('机器数')
     expect(script).toContain('本地运行时')
     expect(script).toContain('已入队 Issue')

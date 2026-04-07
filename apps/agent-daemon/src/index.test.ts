@@ -1272,6 +1272,7 @@ function buildRuntimeSnapshot(
       startedAt: '2026-04-05T08:00:00.000Z',
       command: ['bun', 'apps/agent-daemon/src/index.ts'],
       logPath: '/Users/wujames/.agent-loop/runtime/runtime.log',
+      buildInfo: null,
       ...overrides,
     },
   }

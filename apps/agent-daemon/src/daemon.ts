@@ -652,7 +652,6 @@ export class AgentDaemon {
             status: this.running ? 'running' : 'stopped',
             mode: 'agent-loop-daemon',
             version: this.buildInfo.version,
-            build: this.buildInfo,
             ...this.getStatus(),
           })
         }
@@ -937,7 +936,7 @@ export class AgentDaemon {
       const claimedIssue = await pollAndClaim(this.config, this.logger)
 
       if (claimedIssue === null) {
-        recordPoll(startedWork ? 'success' : 'no_issues')
+        recordPoll(startedWork ? 'success' : 'no_runnable_issues')
         recordPollDuration(Date.now() - pollStartTime)
         this.scheduleNextPoll()
         return
