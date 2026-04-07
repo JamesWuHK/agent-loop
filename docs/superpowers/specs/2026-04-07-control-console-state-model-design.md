@@ -28,6 +28,7 @@
 - 统一 issue 生命周期、PR 状态、lease 状态、控制台派生状态的边界
 - 保留 GitHub 作为跨机器共享真相源
 - 明确哪些状态需要持久化，哪些应为派生视图
+- 建立 `agent-loop` 自身的版本号管理与运行时版本可见性
 - 为单一 control console 服务打下状态模型基础
 - 让 dashboard 能明确回答“为什么当前没有消费 issue”
 
@@ -65,6 +66,21 @@
 
 `no_issues` 这类指标与真实运行语义不一致。它表达的通常不是“仓库里没有 issue”，而是“当前没有可运行 issue”。
 
+### 4. 版本号缺少统一管理
+
+当前仓库根 `package.json`、`apps/agent-daemon/package.json`、`packages/agent-shared/package.json` 都写着 `0.1.0`，但运行态没有真正统一的版本管理：
+
+- health 接口直接硬编码 `0.1.0`
+- GitHub presence 心跳不带版本号
+- runtime record 不带版本号
+- dashboard 无法直接看出各台机器正在跑哪个 `agent-loop` 版本
+
+这会直接影响：
+
+- 多机运行时的版本核对
+- 灰度/回滚判断
+- “当前机器为什么行为不同”的排查效率
+
 ## 设计原则
 
 1. GitHub 只保存跨机器必须共享的事实
@@ -72,6 +88,7 @@
 3. dashboard 展示派生状态，不再把 GitHub label 直接等同于用户心智
 4. 本地数据库如果引入，只作为读模型，不参与 claim / resume / merge 仲裁
 5. 尽量减少新增 issue label，优先增加派生视图
+6. 版本号必须有单一真相源，并且所有对外心跳/监控入口都报告同一版本信息
 
 ## 三层状态模型
 
@@ -160,6 +177,120 @@
 | 历史快照与播报 | issue 视图快照、状态时间线、告警记录 | 本地 SQLite | 否 | Phase 2 引入 |
 | 指标 | poll、lease、恢复、卡住计数 | `/metrics` | 否 | 观测数据，不是主状态 |
 | 日志 | 原始过程日志 | 本机日志文件 | 否 | 诊断证据 |
+
+## 版本号管理方案
+
+### 结论
+
+`agent-loop` 必须把“自身版本”作为一类正式运行元数据管理，而不是只靠 `package.json` 文本存在。
+
+建议运行时统一暴露：
+
+- `version`
+- `gitCommit`
+- `gitCommitShort`
+- `gitBranch`
+- `buildSource`
+- `buildDirty`
+
+其中：
+
+- `version`：面向人类的主版本号
+- `gitCommit`：精确定位运行代码
+- `buildSource`：说明该版本来自 tag、package version，还是开发态
+- `buildDirty`：标记当前运行工作树是否带未提交修改
+
+### 单一真相源
+
+建议使用仓库根 `package.json` 的 `version` 作为 `agent-loop` 控制平面的单一主版本号。
+
+原因：
+
+- 当前 monorepo 是私有仓库，不是独立发布多个 npm package
+- daemon、shared、dashboard 作为同一控制平面一起演进
+- 对运维和监控来说，最重要的是“这台 daemon 跑的是哪版框架”，而不是 workspace 单独版本
+
+不建议在 Phase 1 同时引入多 package 独立版本策略。
+
+### 运行时版本元数据
+
+建议新增统一结构：
+
+```ts
+interface AgentLoopBuildInfo {
+  version: string
+  gitCommit: string | null
+  gitCommitShort: string | null
+  gitBranch: string | null
+  buildSource: 'tag' | 'package' | 'dev'
+  buildDirty: boolean | null
+}
+```
+
+### 版本解析规则
+
+启动时按以下顺序构造版本信息：
+
+1. 读取仓库根 `package.json.version`
+2. 读取当前 Git commit SHA
+3. 读取当前 branch
+4. 检查工作树是否 dirty
+5. 如果当前 commit 正好命中发布 tag，可将 `buildSource` 标记为 `tag`
+6. 如果无法读取 Git 信息，则至少保留 `version`
+
+### 必须带版本号的出口
+
+以下所有出口都必须报告同一份 `AgentLoopBuildInfo`：
+
+| 出口 | 当前状态 | 目标 |
+| --- | --- | --- |
+| health JSON | 只有硬编码 `version: 0.1.0` | 改为统一 build info |
+| GitHub presence 心跳 | 不带版本 | 增加 `version` / `gitCommitShort` |
+| runtime record json | 不带版本 | 增加 `buildInfo` |
+| dashboard 机器卡片 | 不显示版本 | 显示版本 + commit short |
+| status / doctor 输出 | 只显示 `v${health.version}` | 显示 `version + commit` |
+
+### 控制台展示要求
+
+dashboard 至少要能直接看到：
+
+- 当前机器运行的 `agent-loop` 版本号
+- 当前 commit short SHA
+- 是否为 dirty build
+
+建议展示方式：
+
+- 机器卡片 chip：`v0.1.0`
+- 机器卡片 chip：`a718d1e`
+- 若 dirty：额外显示 `dirty`
+
+### 心跳兼容性
+
+presence comment 新增版本字段时，解析逻辑必须向后兼容旧 comment：
+
+- 旧 comment 没有版本字段时，不判定为非法
+- dashboard 对旧 heartbeat 显示为 `版本未知`
+- 新版本 daemon 发布心跳后，新的 comment 自动覆盖旧 comment
+
+### 发布与回滚管理
+
+版本管理不仅用于显示，也用于回滚判断。
+
+建议规则：
+
+- 每次准备让新框架进入稳定运行前，打一个可回滚 tag
+- dashboard 和 health 必须能让人一眼看到当前实际运行的版本与 commit
+- 多机环境下，如果版本不一致，dashboard 必须能直接看出来
+
+### Phase 1 范围
+
+Phase 1 不需要建立完整发布流水线，但至少要完成：
+
+- 统一构建 `AgentLoopBuildInfo`
+- health 报告真实版本信息
+- presence 心跳带版本号
+- runtime record 带版本号
+- dashboard 机器卡片显示版本号
 
 ## 控制台状态字典
 
@@ -283,6 +414,12 @@
 - `waitingMergeIssueCount`
 - `humanNeededIssueCount`
 
+同时在机器维度新增：
+
+- `agentLoopVersion`
+- `agentLoopCommitShort`
+- `agentLoopBuildDirty`
+
 ### 包 C：改 dashboard 文案
 
 最低要求：
@@ -291,6 +428,7 @@
 - issue 表格拆分“生命周期”和“当前状态”
 - 当前状态列展示派生状态
 - 原因列给出中文摘要
+- 机器卡片明确展示 `agent-loop` 版本号与 commit short
 
 ### 包 D：改 metrics 口径
 
@@ -305,7 +443,17 @@
 
 - `当前无可运行 issue`
 
-### 包 E：补测试
+### 包 E：补运行时版本信息
+
+至少覆盖：
+
+- 统一 build info 解析模块
+- health 返回真实版本，不再硬编码 `0.1.0`
+- GitHub presence comment 带版本字段
+- background runtime record 带版本字段
+- dashboard / status / doctor 输出可见版本与 commit
+
+### 包 F：补测试
 
 至少覆盖：
 
@@ -316,6 +464,8 @@
 - `approved + 未 merge` => `等待合并`
 - `human-needed` => `需要人工`
 - 新旧 poll metrics label 的兼容聚合
+- 旧版 presence comment 无版本字段仍可解析
+- health / runtime record / dashboard 都能读到同一版本信息
 
 ## Phase 2 规划
 
