@@ -55,7 +55,7 @@ collectDefaultMetrics({ register: registry })
 /**
  * Total number of poll cycles executed.
  * Labels:
- *   - result: "success" | "skipped_concurrency" | "no_issues" | "error"
+ *   - result: "success" | "skipped_concurrency" | "no_runnable_issues" | "error"
  */
 export const pollsTotal = new Counter({
   name: 'agent_loop_polls_total',
@@ -460,7 +460,7 @@ export function getContentType(): string {
 /**
  * Record a poll cycle result.
  */
-export function recordPoll(result: 'success' | 'skipped_concurrency' | 'no_issues' | 'error'): void {
+export function recordPoll(result: 'success' | 'skipped_concurrency' | 'no_runnable_issues' | 'error'): void {
   pollsTotal.inc({ result })
 }
 

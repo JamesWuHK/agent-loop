@@ -30,11 +30,11 @@ export async function pollAndClaim(
   }
 
   if (issues.length === 0) {
-    logger.log(`[claimer] no claimable issues found`)
+    logger.log(`[claimer] no runnable issues found`)
     return null
   }
 
-  logger.log(`[claimer] found ${issues.length} claimable issues`)
+  logger.log(`[claimer] found ${issues.length} runnable issues`)
 
   // Try each issue in order with retry + jitter
   for (const issue of issues) {

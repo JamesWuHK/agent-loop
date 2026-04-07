@@ -52,14 +52,14 @@ describe('metrics', () => {
   describe('recordPoll', () => {
     test('increments polls_total counter with correct label', async () => {
       recordPoll('success')
-      recordPoll('no_issues')
+      recordPoll('no_runnable_issues')
       recordPoll('skipped_concurrency')
       recordPoll('error')
 
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_polls_total')
       expect(metrics).toContain('result="success"')
-      expect(metrics).toContain('result="no_issues"')
+      expect(metrics).toContain('result="no_runnable_issues"')
       expect(metrics).toContain('result="skipped_concurrency"')
       expect(metrics).toContain('result="error"')
     })

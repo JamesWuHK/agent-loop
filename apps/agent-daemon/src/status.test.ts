@@ -199,6 +199,7 @@ const metricsText = `
 agent_loop_polls_total{result="success"} 12
 agent_loop_polls_total{result="skipped_concurrency"} 3
 agent_loop_polls_total{result="no_issues"} 4
+agent_loop_polls_total{result="no_runnable_issues"} 2
 agent_loop_polls_total{result="error"} 1
 agent_loop_pr_reviews_total{stage="initial",outcome="approved"} 2
 agent_loop_pr_reviews_total{stage="post_fix",outcome="rejected"} 1
@@ -292,7 +293,7 @@ describe('status helpers', () => {
       polls: {
         success: 12,
         skipped_concurrency: 3,
-        no_issues: 4,
+        no_runnable_issues: 6,
         error: 1,
       },
       prReviews: {
@@ -390,7 +391,7 @@ describe('status helpers', () => {
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
     expect(report).toContain('launchd: loaded yes | state running | runs 2 | last signal Terminated: 15')
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
-    expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
+    expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_runnable_issues=6, error=1')
     expect(report).toContain('pr blockers: pr#239<-issue#105 attempt 5 @ 2026-04-06T01:23:45.000Z: The PR breaks the existing approval-bar flow')
     expect(report).toContain('warnings: startup recovery is still pending')
   })

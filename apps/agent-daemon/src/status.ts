@@ -40,7 +40,7 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
   'merged_after_refresh',
   'retry_merge_failed',
 ] as const
-const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
+const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_runnable_issues', 'error'] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
 const RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS = 5 * 60
 export interface DaemonHealthPayload extends DaemonStatus {
@@ -799,7 +799,12 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
   for (const sample of parsePrometheusSamples(metricsText)) {
     switch (sample.name) {
       case 'agent_loop_polls_total':
-        if (sample.labels.result) summary.polls[sample.labels.result] = sample.value
+        if (sample.labels.result) {
+          const normalizedResult = sample.labels.result === 'no_issues'
+            ? 'no_runnable_issues'
+            : sample.labels.result
+          summary.polls[normalizedResult] = (summary.polls[normalizedResult] ?? 0) + sample.value
+        }
         break
       case 'agent_loop_pr_reviews_total':
         if (!sample.labels.stage || !sample.labels.outcome) break
