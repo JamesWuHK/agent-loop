@@ -1,5 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  countOpenRepositoryIssues,
+  deriveDashboardIssueState,
+  type DashboardIssueDerivedState,
   PR_REVIEW_LABELS,
   getActiveManagedLease,
   listIssueComments,
@@ -32,6 +35,7 @@ export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
 export const DEFAULT_DASHBOARD_PORT = 9388
 export const DEFAULT_DASHBOARD_REFRESH_INTERVAL_MS = 10_000
 const DEFAULT_LOG_TAIL_LINES = 200
+const LEASE_PROGRESS_STALE_SECONDS = 5 * 60
 
 type DashboardMachineSource = 'local' | 'github' | 'mixed'
 type DashboardLeaseSource = 'local' | 'github'
@@ -40,7 +44,14 @@ export interface DashboardSummary {
   machineCount: number
   localRuntimeCount: number
   activeLeaseCount: number
-  readyIssueCount: number
+  openIssueCount: number
+  queuedIssueCount: number
+  runnableIssueCount: number
+  dependencyBlockedIssueCount: number
+  contractInvalidIssueCount: number
+  waitingReviewIssueCount: number
+  waitingMergeIssueCount: number
+  humanNeededIssueCount: number
   workingIssueCount: number
   failedIssueCount: number
   openPrCount: number
@@ -136,6 +147,10 @@ export interface DashboardIssueView {
   title: string
   url: string
   state: AgentIssue['state']
+  lifecycleStateLabel: string
+  derivedState: DashboardIssueDerivedState
+  derivedStateLabel: string
+  reasonSummary: string
   labels: string[]
   assignee: string | null
   isClaimable: boolean
@@ -210,6 +225,7 @@ export interface DashboardLocalMachineSnapshot {
 }
 
 interface DashboardGitHubCollection {
+  openIssueCount: number
   issues: DashboardIssueView[]
   prs: DashboardPullRequestView[]
   remoteLeases: DashboardLeaseView[]
@@ -241,6 +257,7 @@ export async function collectDashboardSnapshot(
   let prs: DashboardPullRequestView[] = []
   let remoteLeases: DashboardLeaseView[] = []
   let remotePresences: DashboardPresenceView[] = []
+  let openIssueCount = 0
 
   try {
     const githubCollection = await collectGitHubDashboardData({
@@ -250,6 +267,7 @@ export async function collectDashboardSnapshot(
       },
       localLeaseIndex,
     })
+    openIssueCount = githubCollection.openIssueCount
     issues = githubCollection.issues
     prs = githubCollection.prs
     remoteLeases = githubCollection.remoteLeases
@@ -272,7 +290,7 @@ export async function collectDashboardSnapshot(
   return {
     generatedAt,
     repo,
-    summary: buildDashboardSummary(machines, issues, prs),
+    summary: buildDashboardSummary(machines, issues, prs, openIssueCount),
     machines,
     issues,
     prs,
@@ -357,6 +375,7 @@ export function buildDashboardSummary(
   machines: DashboardMachineCard[],
   issues: DashboardIssueView[],
   prs: DashboardPullRequestView[],
+  openIssueCount = issues.length,
 ): DashboardSummary {
   const activeLeaseKeys = new Set<string>()
   let localRuntimeCount = 0
@@ -372,7 +391,14 @@ export function buildDashboardSummary(
     machineCount: machines.length,
     localRuntimeCount,
     activeLeaseCount: activeLeaseKeys.size,
-    readyIssueCount: issues.filter((issue) => issue.state === 'ready').length,
+    openIssueCount,
+    queuedIssueCount: issues.filter((issue) => issue.state === 'ready').length,
+    runnableIssueCount: issues.filter((issue) => issue.derivedState === 'runnable').length,
+    dependencyBlockedIssueCount: issues.filter((issue) => issue.derivedState === 'dependency_blocked').length,
+    contractInvalidIssueCount: issues.filter((issue) => issue.derivedState === 'contract_invalid').length,
+    waitingReviewIssueCount: issues.filter((issue) => issue.derivedState === 'waiting_review').length,
+    waitingMergeIssueCount: issues.filter((issue) => issue.derivedState === 'waiting_merge').length,
+    humanNeededIssueCount: issues.filter((issue) => issue.derivedState === 'human_needed').length,
     workingIssueCount: issues.filter((issue) => issue.state === 'working').length,
     failedIssueCount: issues.filter((issue) => issue.state === 'failed').length,
     openPrCount: prs.length,
@@ -567,7 +593,8 @@ async function collectGitHubDashboardData(input: {
   localLeaseIndex: Map<string, DashboardLeaseView>
 }): Promise<DashboardGitHubCollection> {
   const now = Date.now()
-  const [issues, prs] = await Promise.all([
+  const [openIssueCount, issues, prs] = await Promise.all([
+    countOpenRepositoryIssues(input.config),
     listOpenAgentIssues(input.config),
     listOpenAgentPullRequests(input.config),
   ])
@@ -621,25 +648,55 @@ async function collectGitHubDashboardData(input: {
   }
 
   const issueViews = issues
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      url: buildGitHubIssueUrl(input.config.repo, issue.number),
-      state: issue.state,
-      labels: issue.labels,
-      assignee: issue.assignee,
-      isClaimable: issue.isClaimable,
-      updatedAt: issue.updatedAt,
-      dependencyIssueNumbers: issue.dependencyIssueNumbers,
-      claimBlockedBy: issue.claimBlockedBy,
-      hasExecutableContract: issue.hasExecutableContract,
-      contractValidationErrors: issue.contractValidationErrors,
-      linkedPrNumbers: (linkedPrsByIssue.get(issue.number) ?? []).map((pr) => pr.number).sort((left, right) => left - right),
-      activeLease: preferLocalLease(
+    .map((issue) => {
+      const linkedPrs = linkedPrsByIssue.get(issue.number) ?? []
+      const linkedPrNumbers = linkedPrs
+        .map((pr) => pr.number)
+        .sort((left, right) => left - right)
+      const activeLease = preferLocalLease(
         input.localLeaseIndex,
         issueLeaseMap.get(issue.number) ?? null,
-      ),
-    }) satisfies DashboardIssueView)
+      )
+      const hasReviewApprovedPr = linkedPrs.some((pr) => pr.labels.includes(PR_REVIEW_LABELS.APPROVED))
+      const hasHumanNeededPr = linkedPrs.some((pr) => pr.labels.includes(PR_REVIEW_LABELS.HUMAN_NEEDED))
+      const activeLeaseProgressStale = activeLease?.progressAgeSeconds !== null
+        && activeLease?.progressAgeSeconds !== undefined
+        && activeLease.progressAgeSeconds >= LEASE_PROGRESS_STALE_SECONDS
+      const derived = deriveDashboardIssueState({
+        issue: {
+          state: issue.state,
+          isClaimable: issue.isClaimable,
+          claimBlockedBy: issue.claimBlockedBy,
+          hasExecutableContract: issue.hasExecutableContract,
+          linkedPrNumbers,
+          activeLease,
+        },
+        hasReviewApprovedPr,
+        hasHumanNeededPr,
+        activeLeaseProgressStale,
+      })
+
+      return {
+        number: issue.number,
+        title: issue.title,
+        url: buildGitHubIssueUrl(input.config.repo, issue.number),
+        state: issue.state,
+        lifecycleStateLabel: localizeIssueState(issue.state),
+        derivedState: derived.derivedState,
+        derivedStateLabel: localizeDerivedIssueState(derived.derivedState),
+        reasonSummary: derived.reasonSummary,
+        labels: issue.labels,
+        assignee: issue.assignee,
+        isClaimable: issue.isClaimable,
+        updatedAt: issue.updatedAt,
+        dependencyIssueNumbers: issue.dependencyIssueNumbers,
+        claimBlockedBy: issue.claimBlockedBy,
+        hasExecutableContract: issue.hasExecutableContract,
+        contractValidationErrors: issue.contractValidationErrors,
+        linkedPrNumbers,
+        activeLease,
+      } satisfies DashboardIssueView
+    })
     .sort(compareIssues)
 
   const prViews = prs
@@ -678,6 +735,7 @@ async function collectGitHubDashboardData(input: {
     .sort(comparePullRequests)
 
   return {
+    openIssueCount,
     issues: issueViews,
     prs: prViews,
     remoteLeases,
@@ -1017,13 +1075,14 @@ export function renderDashboardHtml(): string {
           <div class="table-shell">
             <table>
               <thead>
-                <tr>
-                  <th>Issue</th>
-                  <th>状态</th>
-                  <th>可认领</th>
-                  <th>租约</th>
-                  <th>更新时间</th>
-                </tr>
+                  <tr>
+                    <th>Issue</th>
+                    <th>生命周期</th>
+                    <th>当前状态</th>
+                    <th>原因</th>
+                    <th>租约</th>
+                    <th>更新时间</th>
+                  </tr>
               </thead>
               <tbody id="issues-body"></tbody>
             </table>
@@ -1631,8 +1690,15 @@ function renderSummary(snapshot) {
     { label: '机器数', value: snapshot.summary.machineCount, tone: 'accent' },
     { label: '本地运行时', value: snapshot.summary.localRuntimeCount, tone: '' },
     { label: '活跃租约', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
-    { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
-    { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
+    { label: 'Open', value: snapshot.summary.openIssueCount, tone: '' },
+    { label: '已入队 Issue', value: snapshot.summary.queuedIssueCount, tone: '' },
+    { label: '可运行 Issue', value: snapshot.summary.runnableIssueCount, tone: snapshot.summary.runnableIssueCount > 0 ? 'accent' : '' },
+    { label: '依赖阻塞', value: snapshot.summary.dependencyBlockedIssueCount, tone: snapshot.summary.dependencyBlockedIssueCount > 0 ? 'gold' : '' },
+    { label: '合同无效', value: snapshot.summary.contractInvalidIssueCount, tone: snapshot.summary.contractInvalidIssueCount > 0 ? 'error' : '' },
+    { label: '等待评审', value: snapshot.summary.waitingReviewIssueCount, tone: '' },
+    { label: '等待合并', value: snapshot.summary.waitingMergeIssueCount, tone: '' },
+    { label: '需要人工', value: snapshot.summary.humanNeededIssueCount, tone: snapshot.summary.humanNeededIssueCount > 0 ? 'error' : '' },
+    { label: '执行中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
     { label: '失败 Issue', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },
     { label: '开放 PR', value: snapshot.summary.openPrCount, tone: '' },
   ];
@@ -1668,11 +1734,32 @@ function renderMachines(machines) {
       '<div class="machine-top">',
       '<div>',
       '<h3 class="machine-title">' + escapeHtml(machine.machineId) + '</h3>',
-      '<div class="chip-row">',
-      renderChip(localizeMachineSource(machine.source), machine.source === 'mixed' ? 'accent' : machine.source === 'local' ? 'gold' : ''),
-      machine.presence ? renderChip(localizePresenceStatus(machine.presence.status), machine.presence.status === 'busy' ? 'accent' : 'gold') : '',
-      machine.daemonInstanceIds.map((daemonId) => renderChip(shortDaemonId(daemonId), '')).join(''),
-      '</div>',
+      (() => {
+        const versionChips = [
+          machine.localRuntimes[0]?.buildInfo?.version
+            ? renderChip('v' + machine.localRuntimes[0].buildInfo.version, 'gold')
+            : machine.presence?.buildInfo?.version
+              ? renderChip('v' + machine.presence.buildInfo.version, 'gold')
+              : '',
+          machine.localRuntimes[0]?.buildInfo?.gitCommitShort
+            ? renderChip(machine.localRuntimes[0].buildInfo.gitCommitShort, '')
+            : machine.presence?.buildInfo?.gitCommitShort
+              ? renderChip(machine.presence.buildInfo.gitCommitShort, '')
+              : '',
+          machine.localRuntimes[0]?.buildInfo?.buildDirty
+            ? renderChip('dirty', 'error')
+            : machine.presence?.buildInfo?.buildDirty
+              ? renderChip('dirty', 'error')
+              : '',
+        ].join('');
+
+        return '<div class="chip-row">' +
+          renderChip(localizeMachineSource(machine.source), machine.source === 'mixed' ? 'accent' : machine.source === 'local' ? 'gold' : '') +
+          (machine.presence ? renderChip(localizePresenceStatus(machine.presence.status), machine.presence.status === 'busy' ? 'accent' : 'gold') : '') +
+          versionChips +
+          machine.daemonInstanceIds.map((daemonId) => renderChip(shortDaemonId(daemonId), '')).join('') +
+          '</div>';
+      })(),
       '</div>',
       '<div class="chip-row">',
       renderChip('租约 ' + machine.activeLeases.length, machine.activeLeases.length > 0 ? 'accent' : ''),
@@ -1691,14 +1778,14 @@ function renderMachines(machines) {
 
 function renderIssues(issues) {
   if (!Array.isArray(issues) || issues.length === 0) {
-    issuesBodyEl.innerHTML = '<tr><td colspan="5"><div class="empty-state">当前仓库没有返回开放的 Agent Issue。</div></td></tr>';
+    issuesBodyEl.innerHTML = '<tr><td colspan="6"><div class="empty-state">当前仓库没有返回开放的 Agent Issue。</div></td></tr>';
     return;
   }
 
   issuesBodyEl.innerHTML = issues.map((issue) => {
     const claimability = issue.isClaimable
       ? renderChip('可认领', 'accent')
-      : renderChip('阻塞', issue.state === 'failed' ? 'error' : 'gold');
+      : renderChip('待调度', issue.state === 'failed' ? 'error' : 'gold');
     const deps = issue.claimBlockedBy.length > 0
       ? '被 #' + issue.claimBlockedBy.join(', #') + ' 阻塞'
       : issue.dependencyIssueNumbers.length > 0
@@ -1719,8 +1806,9 @@ function renderIssues(issues) {
       '<div class="chip-row">' + issue.labels.map((label) => renderChip(label, '')).join('') + '</div>',
       linkedPrs,
       '</td>',
-      '<td>' + renderChip(localizeIssueState(issue.state), issue.state === 'working' ? 'accent' : issue.state === 'failed' ? 'error' : issue.state === 'ready' ? 'gold' : '') + '</td>',
-      '<td>' + claimability + '<div class="muted" style="margin-top:8px">' + escapeHtml(deps) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(contract) + '</div></td>',
+      '<td>' + renderChip(issue.lifecycleStateLabel, issue.state === 'working' ? 'accent' : issue.state === 'failed' ? 'error' : issue.state === 'ready' ? 'gold' : '') + '</td>',
+      '<td>' + renderChip(issue.derivedStateLabel, toneForDerivedIssueState(issue.derivedState)) + '</td>',
+      '<td><div>' + escapeHtml(issue.reasonSummary) + '</div><div class="chip-row" style="margin-top:8px">' + claimability + '</div><div class="muted" style="margin-top:8px">' + escapeHtml(deps) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(contract) + '</div></td>',
       '<td>' + lease + '</td>',
       '<td><div>' + escapeHtml(formatTimestamp(issue.updatedAt)) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(formatRelative(issue.updatedAt)) + '</div></td>',
       '</tr>',
@@ -1884,21 +1972,64 @@ function localizeMachineSource(source) {
 function localizeIssueState(state) {
   switch (state) {
     case 'ready':
-      return '就绪';
+      return '已入队';
     case 'working':
-      return '处理中';
+      return '执行中';
     case 'claimed':
       return '已认领';
     case 'failed':
       return '失败';
     case 'stale':
-      return '陈旧';
+      return '待恢复';
     case 'done':
       return '完成';
     case 'unknown':
-      return '未知';
+      return '未入队';
     default:
       return state || '未知';
+  }
+}
+
+function localizeDerivedIssueState(state) {
+  switch (state) {
+    case 'runnable':
+      return '可运行';
+    case 'dependency_blocked':
+      return '依赖阻塞';
+    case 'contract_invalid':
+      return '合同无效';
+    case 'waiting_review':
+      return '等待评审';
+    case 'waiting_merge':
+      return '等待合并';
+    case 'human_needed':
+      return '需要人工';
+    case 'recoverable':
+      return '可恢复';
+    case 'stalled':
+      return '执行卡住';
+    case 'idle':
+    default:
+      return '已入队';
+  }
+}
+
+function toneForDerivedIssueState(state) {
+  switch (state) {
+    case 'runnable':
+    case 'waiting_merge':
+      return 'accent';
+    case 'dependency_blocked':
+    case 'waiting_review':
+    case 'recoverable':
+      return 'gold';
+    case 'contract_invalid':
+    case 'human_needed':
+    case 'stalled':
+      return 'error';
+    case 'idle':
+    default:
+      return '';
   }
 }
 

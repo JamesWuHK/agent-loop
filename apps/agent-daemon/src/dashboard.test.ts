@@ -186,6 +186,10 @@ describe('dashboard machine aggregation', () => {
         title: 'Working issue',
         url: 'https://github.com/JamesWuHK/digital-employee/issues/92',
         state: 'working',
+        lifecycleStateLabel: '执行中',
+        derivedState: 'waiting_merge',
+        derivedStateLabel: '等待合并',
+        reasonSummary: '评审已通过，等待自动合并',
         labels: ['agent:working'],
         assignee: 'bot',
         isClaimable: false,
@@ -202,6 +206,10 @@ describe('dashboard machine aggregation', () => {
         title: 'Ready issue',
         url: 'https://github.com/JamesWuHK/digital-employee/issues/93',
         state: 'ready',
+        lifecycleStateLabel: '已入队',
+        derivedState: 'runnable',
+        derivedStateLabel: '可运行',
+        reasonSummary: '当前可认领并可开始执行',
         labels: ['agent:ready'],
         assignee: null,
         isClaimable: true,
@@ -218,6 +226,10 @@ describe('dashboard machine aggregation', () => {
         title: 'Failed issue',
         url: 'https://github.com/JamesWuHK/digital-employee/issues/94',
         state: 'failed',
+        lifecycleStateLabel: '失败',
+        derivedState: 'human_needed',
+        derivedStateLabel: '需要人工',
+        reasonSummary: '关联 PR 需要人工处理',
         labels: ['agent:failed'],
         assignee: null,
         isClaimable: false,
@@ -256,11 +268,18 @@ describe('dashboard machine aggregation', () => {
       },
     ]
 
-    expect(buildDashboardSummary(machines, issues, prs)).toEqual({
+    expect(buildDashboardSummary(machines, issues, prs, 5)).toEqual({
       machineCount: 1,
       localRuntimeCount: 1,
       activeLeaseCount: 2,
-      readyIssueCount: 1,
+      openIssueCount: 5,
+      queuedIssueCount: 1,
+      runnableIssueCount: 1,
+      dependencyBlockedIssueCount: 0,
+      contractInvalidIssueCount: 0,
+      waitingReviewIssueCount: 0,
+      waitingMergeIssueCount: 1,
+      humanNeededIssueCount: 1,
       workingIssueCount: 1,
       failedIssueCount: 1,
       openPrCount: 1,
@@ -301,10 +320,21 @@ describe('dashboard localization', () => {
 
     expect(script).toContain('仪表盘快照加载失败')
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
+    expect(script).toContain('Open')
     expect(script).toContain('机器数')
     expect(script).toContain('本地运行时')
-    expect(script).toContain('可认领')
+    expect(script).toContain('已入队 Issue')
+    expect(script).toContain('可运行 Issue')
+    expect(script).toContain('依赖阻塞')
+    expect(script).toContain('合同无效')
+    expect(script).toContain('等待评审')
+    expect(script).toContain('等待合并')
+    expect(script).toContain('需要人工')
+    expect(script).toContain('buildInfo.version')
     expect(script).toContain('阻塞原因')
     expect(script).toContain('无本地运行时')
+    expect(html).toContain('<th>生命周期</th>')
+    expect(html).toContain('<th>当前状态</th>')
+    expect(html).toContain('<th>原因</th>')
   })
 })

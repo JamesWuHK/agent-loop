@@ -395,6 +395,18 @@ export function buildListOpenIssuesQuery(owner: string, repoName: string): strin
   ].join('\n')
 }
 
+function buildCountOpenIssuesQuery(owner: string, repoName: string): string {
+  return [
+    `query {`,
+    `  repository(owner: "${owner}", name: "${repoName}") {`,
+    `    issues(states: OPEN) {`,
+    `      totalCount`,
+    `    }`,
+    `  }`,
+    `}`,
+  ].join('\n')
+}
+
 export function extractOpenIssueConnectionPage(data: unknown): {
   nodes: RawGitHubIssueNode[]
   hasNextPage: boolean
@@ -452,6 +464,35 @@ async function listOpenAgentIssuesRest(
   return enrichClaimability(issues, config)
 }
 
+async function countOpenRepositoryIssuesRest(
+  config: AgentConfig,
+): Promise<number> {
+  let total = 0
+
+  for (let page = 1; ; page += 1) {
+    const { stdout, exitCode, stderr } = await ghApiRaw([
+      `repos/${config.repo}/issues?state=open&per_page=100&page=${page}`,
+    ], config)
+
+    if (exitCode !== 0) {
+      throw new GhError(
+        `api issues?state=open&page=${page}`,
+        exitCode,
+        parseGhApiErrorMessage(stdout, stderr),
+      )
+    }
+
+    const pageItems = extractRestOpenIssueListPage(JSON.parse(stdout))
+    total += pageItems.filter((issue) => !issue.pull_request && typeof issue.number === 'number').length
+
+    if (pageItems.length < 100) {
+      break
+    }
+  }
+
+  return total
+}
+
 export async function listOpenAgentIssues(
   config: AgentConfig,
 ): Promise<AgentIssue[]> {
@@ -497,6 +538,42 @@ export async function listOpenAgentIssues(
     .filter((issue: AgentIssue) => issue.labels.some(label => label.startsWith('agent:')))
 
   return enrichClaimability(mapped, config)
+}
+
+export async function countOpenRepositoryIssues(
+  config: AgentConfig,
+): Promise<number> {
+  const [owner, repoName] = config.repo.split('/')
+  if (!owner || !repoName) {
+    throw new Error(`Invalid repo slug: ${config.repo}`)
+  }
+
+  const query = buildCountOpenIssuesQuery(owner, repoName)
+  const { stdout, exitCode, stderr } = await ghApiRaw([
+    'graphql',
+    '--raw-field',
+    `query=${query}`,
+  ], config)
+
+  if (exitCode !== 0) {
+    const errorMessage = parseGhApiErrorMessage(stdout, stderr)
+    if (isGraphQlRateLimitErrorMessage(errorMessage)) {
+      return countOpenRepositoryIssuesRest(config)
+    }
+    throw new GhError('api graphql open issue count', exitCode, errorMessage)
+  }
+
+  const totalCount = (JSON.parse(stdout) as {
+    data?: {
+      repository?: {
+        issues?: {
+          totalCount?: unknown
+        }
+      }
+    }
+  })?.data?.repository?.issues?.totalCount
+
+  return typeof totalCount === 'number' ? totalCount : 0
 }
 
 // ─── GraphQL: fetch claimable issues ─────────────────────────────────────────
