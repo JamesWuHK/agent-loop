@@ -67,6 +67,7 @@ function buildPresence(overrides: Partial<ManagedDaemonPresence> = {}): ManagedD
     activeLeaseCount: 0,
     activeWorktreeCount: 0,
     effectiveActiveTasks: 0,
+    buildInfo: null,
     ...overrides,
   }
 }
@@ -130,6 +131,16 @@ describe('managed daemon presence helpers', () => {
     const body = buildManagedDaemonPresenceComment(presence)
 
     expect(extractManagedDaemonPresenceComment(body)).toEqual(presence)
+  })
+
+  test('keeps parsing legacy presence comments that do not include build info', () => {
+    const legacyBody = `<!-- agent-loop:presence {"repo":"JamesWuHK/digital-employee","machineId":"machine-a","daemonInstanceId":"daemon-a","status":"idle","startedAt":"2026-04-05T08:00:00.000Z","lastHeartbeatAt":"2026-04-05T08:00:30.000Z","expiresAt":"2026-04-05T08:02:00.000Z","healthPort":9312,"metricsPort":9092,"activeLeaseCount":0,"activeWorktreeCount":0,"effectiveActiveTasks":0} -->
+## Managed daemon presence`
+
+    expect(extractManagedDaemonPresenceComment(legacyBody)).toMatchObject({
+      machineId: 'machine-a',
+      buildInfo: null,
+    })
   })
 
   test('filters active managed daemon presence comments by repo and expiry', () => {

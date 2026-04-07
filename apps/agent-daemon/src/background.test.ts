@@ -66,6 +66,33 @@ describe('background helpers', () => {
     })
   })
 
+  test('reads runtime records with build info', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-background-build-test-'))
+    const path = join(dir, 'runtime.json')
+    writeFileSync(path, JSON.stringify({
+      repo: 'JamesWuHK/digital-employee',
+      machineId: 'codex-verify-20260405',
+      healthPort: 9311,
+      supervisor: 'launchd',
+      pid: 12345,
+      metricsPort: 9091,
+      cwd: '/tmp/workdir',
+      startedAt: '2026-04-05T02:00:00.000Z',
+      command: ['bun', 'apps/agent-daemon/src/index.ts'],
+      logPath: '/tmp/daemon.log',
+      buildInfo: {
+        version: '0.1.0',
+        gitCommit: '49fa8f3c8b14c4f84f2b3e44d31ad7b9d29b0abc',
+        gitCommitShort: '49fa8f3',
+        gitBranch: 'feat/control-console',
+        buildSource: 'dev',
+        buildDirty: false,
+      },
+    }))
+
+    expect(readBackgroundRuntimeRecord(path)?.buildInfo?.gitCommitShort).toBe('49fa8f3')
+  })
+
   test('defaults missing runtime supervisor to detached for older records', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-loop-background-legacy-test-'))
     const path = join(dir, 'runtime.json')

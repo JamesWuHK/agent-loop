@@ -18,6 +18,14 @@ const baseHealth: DaemonStatus & {
   status: 'running',
   mode: 'agent-loop-daemon',
   version: '0.1.0',
+  build: {
+    version: '0.1.0',
+    gitCommit: '49fa8f3c8b14c4f84f2b3e44d31ad7b9d29b0abc',
+    gitCommitShort: '49fa8f3',
+    gitBranch: 'feat/control-console',
+    buildSource: 'dev',
+    buildDirty: false,
+  },
   running: true,
   machineId: 'codex-dev',
   daemonInstanceId: 'daemon-codex-dev-1',
@@ -368,6 +376,8 @@ describe('status helpers', () => {
     })
 
     expect(report).toContain('repo: JamesWuHK/digital-employee')
+    expect(report).toContain('daemon: running v0.1.0 (agent-loop-daemon)')
+    expect(report).toContain('build: 0.1.0 49fa8f3 feat/control-console')
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('process: launchd | pid 12345 | cwd /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')

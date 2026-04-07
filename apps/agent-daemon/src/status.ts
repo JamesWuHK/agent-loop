@@ -407,8 +407,17 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
   const transientLoopErrorCount = health.runtime.transientLoopErrorCount ?? 0
   const startupRecoveryDeferredCount = health.runtime.startupRecoveryDeferredCount ?? 0
+  const build = health.build ?? {
+    version: health.version,
+    gitCommit: null,
+    gitCommitShort: null,
+    gitBranch: null,
+    buildSource: 'package' as const,
+    buildDirty: null,
+  }
   const lines = [
     `daemon: ${health.status} v${health.version} (${health.mode})`,
+    `build: ${build.version} ${build.gitCommitShort ?? 'no-commit'} ${build.gitBranch ?? 'no-branch'}${build.buildDirty ? ' dirty' : ''}`,
     `repo: ${health.repo}`,
     `project: ${health.project.profile} | agents: ${health.agent.primary} -> ${health.agent.fallback ?? 'none'}`,
     `daemon: ${health.machineId} / ${health.daemonInstanceId}`,

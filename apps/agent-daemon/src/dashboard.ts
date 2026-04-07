@@ -77,6 +77,7 @@ export interface DashboardLocalRuntimeView {
   startedAt: string
   healthPort: number
   metricsPort: number
+  buildInfo: BackgroundRuntimeSnapshot['record']['buildInfo']
 }
 
 export interface DashboardRuntimeObservabilityView {
@@ -115,6 +116,7 @@ export interface DashboardPresenceView {
   activeLeaseCount: number
   activeWorktreeCount: number
   effectiveActiveTasks: number
+  buildInfo: ManagedDaemonPresenceComment['presence']['buildInfo']
   source: 'github'
 }
 
@@ -551,6 +553,7 @@ async function collectLocalMachineSnapshots(input: {
         startedAt: runtime.record.startedAt,
         healthPort: runtime.record.healthPort,
         metricsPort: runtime.record.metricsPort,
+        buildInfo: runtime.record.buildInfo,
       },
       observability: buildDashboardRuntimeObservability(runtimeKey, observability),
       activeLeases,
@@ -962,6 +965,7 @@ function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): Dash
     activeLeaseCount: comment.presence.activeLeaseCount,
     activeWorktreeCount: comment.presence.activeWorktreeCount,
     effectiveActiveTasks: comment.presence.effectiveActiveTasks,
+    buildInfo: comment.presence.buildInfo,
     source: 'github',
   }
 }

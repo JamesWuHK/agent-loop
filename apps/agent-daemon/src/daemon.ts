@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type {
   ActiveLeaseRuntimeDetail,
+  AgentLoopBuildInfo,
   AgentConfig,
   AgentIssue,
   BlockedIssueResumeRuntimeDetail,
@@ -63,6 +64,7 @@ import {
   type MetricsServer,
 } from './metrics'
 import { resolveCurrentRuntimeSupervisor } from './background'
+import { resolveAgentLoopBuildInfo } from './build-info'
 import {
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresenceRuntimeState,
@@ -214,6 +216,7 @@ export class AgentDaemon {
   private nextPollReason: string | null = null
   private nextPollDelayMs: number | null = null
   private healthServer: ReturnType<typeof Bun.serve> | null = null
+  private readonly buildInfo: AgentLoopBuildInfo
   private healthServerConfig: HealthServerConfig = {
     host: DEFAULT_HEALTH_SERVER_HOST,
     port: DEFAULT_HEALTH_SERVER_PORT,
@@ -236,11 +239,13 @@ export class AgentDaemon {
     private logger = console,
     healthServerConfig?: Partial<HealthServerConfig>,
     metricsPort?: number,
+    buildInfo?: AgentLoopBuildInfo,
   ) {
     if (healthServerConfig) {
       this.healthServerConfig = { ...this.healthServerConfig, ...healthServerConfig }
     }
     this.metricsPort = metricsPort ?? 9090
+    this.buildInfo = buildInfo ?? resolveAgentLoopBuildInfo(process.cwd())
   }
 
   private buildLeaseKey(scope: ManagedLeaseScope, targetNumber: number): string {
@@ -521,7 +526,7 @@ export class AgentDaemon {
   }
 
   async start(): Promise<void> {
-    this.logger.log(`[daemon] starting agent-loop v0.1.0`)
+    this.logger.log(`[daemon] starting agent-loop v${this.buildInfo.version}`)
     this.logger.log(`[daemon] machineId: ${this.config.machineId}`)
     this.logger.log(`[daemon] repo: ${this.config.repo}`)
     this.logger.log(
@@ -559,6 +564,7 @@ export class AgentDaemon {
       daemonInstanceId: this.daemonInstanceId,
       healthPort: this.healthServerConfig.port,
       metricsPort: this.metricsPort,
+      buildInfo: this.buildInfo,
       readRuntimeState: () => this.readPresenceRuntimeState(),
       logger: this.logger,
     })
@@ -645,7 +651,8 @@ export class AgentDaemon {
           return Response.json({
             status: this.running ? 'running' : 'stopped',
             mode: 'agent-loop-daemon',
-            version: '0.1.0',
+            version: this.buildInfo.version,
+            build: this.buildInfo,
             ...this.getStatus(),
           })
         }
@@ -724,6 +731,7 @@ export class AgentDaemon {
       machineId: this.config.machineId,
       daemonInstanceId: this.daemonInstanceId,
       repo: this.config.repo,
+      build: this.buildInfo,
       pollIntervalMs: this.config.pollIntervalMs,
       concurrency: this.config.concurrency,
       requestedConcurrency: this.config.requestedConcurrency,

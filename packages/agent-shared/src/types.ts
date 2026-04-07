@@ -62,6 +62,15 @@ export interface ManagedPullRequest {
   labels: string[]
 }
 
+export interface AgentLoopBuildInfo {
+  version: string
+  gitCommit: string | null
+  gitCommitShort: string | null
+  gitBranch: string | null
+  buildSource: 'tag' | 'package' | 'dev'
+  buildDirty: boolean | null
+}
+
 // ─── Internal Issue (derived) ───────────────────────────────────────────────
 
 export interface AgentIssue {
@@ -300,6 +309,7 @@ export interface DaemonStatus {
   machineId: string
   daemonInstanceId: string
   repo: string
+  build: AgentLoopBuildInfo
   pollIntervalMs: number
   concurrency: number
   requestedConcurrency: number

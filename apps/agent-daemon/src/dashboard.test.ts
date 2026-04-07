@@ -49,6 +49,14 @@ function buildLocalSnapshot(overrides: Partial<DashboardLocalMachineSnapshot> = 
       startedAt: '2026-04-05T09:00:00.000Z',
       healthPort: 9312,
       metricsPort: 9092,
+      buildInfo: {
+        version: '0.1.0',
+        gitCommit: '49fa8f3c8b14c4f84f2b3e44d31ad7b9d29b0abc',
+        gitCommitShort: '49fa8f3',
+        gitBranch: 'feat/control-console',
+        buildSource: 'dev',
+        buildDirty: false,
+      },
     },
     observability: {
       runtimeKey: 'codex-20260403:9312',
@@ -92,6 +100,14 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
     activeLeaseCount: 0,
     activeWorktreeCount: 0,
     effectiveActiveTasks: 0,
+    buildInfo: {
+      version: '0.1.0',
+      gitCommit: '49fa8f3c8b14c4f84f2b3e44d31ad7b9d29b0abc',
+      gitCommitShort: '49fa8f3',
+      gitBranch: 'feat/control-console',
+      buildSource: 'dev',
+      buildDirty: false,
+    },
     source: 'github',
     ...overrides,
   }
@@ -137,6 +153,7 @@ describe('dashboard machine aggregation', () => {
     expect(localMachine?.source).toBe('mixed')
     expect(localMachine?.localRuntimes).toHaveLength(1)
     expect(localMachine?.daemonInstanceIds).toEqual(['daemon-local-1'])
+    expect(localMachine?.localRuntimes[0]?.buildInfo?.gitCommitShort).toBe('49fa8f3')
     expect(localMachine?.warnings).toEqual(['local warning'])
     expect(localMachine?.activeLeases).toHaveLength(2)
     expect(localMachine?.activeLeases.find((lease) => lease.scope === 'issue-process')?.source).toBe('local')
@@ -265,6 +282,7 @@ describe('dashboard machine aggregation', () => {
     expect(remoteMachine?.localRuntimes).toHaveLength(0)
     expect(remoteMachine?.activeLeases).toHaveLength(0)
     expect(remoteMachine?.presence?.status).toBe('idle')
+    expect(remoteMachine?.presence?.buildInfo?.gitCommitShort).toBe('49fa8f3')
     expect(remoteMachine?.daemonInstanceIds).toEqual(['daemon-remote-1'])
   })
 })

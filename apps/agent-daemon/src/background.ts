@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
-import type { DaemonRuntimeSupervisor } from '@agent/shared'
+import type { AgentLoopBuildInfo, DaemonRuntimeSupervisor } from '@agent/shared'
+import { coerceAgentLoopBuildInfo } from './build-info'
 
 const RUNTIME_DIR_NAME = '.agent-loop/runtime'
 const AGENT_LOOP_RUNTIME_MANAGER_ENV = 'AGENT_LOOP_RUNTIME_MANAGER'
@@ -48,6 +49,7 @@ export interface BackgroundRuntimeRecord extends BackgroundRuntimeIdentity {
   startedAt: string
   command: string[]
   logPath: string
+  buildInfo: AgentLoopBuildInfo | null
 }
 
 export interface BackgroundRuntimeSnapshot {
@@ -130,6 +132,7 @@ export function readBackgroundRuntimeRecord(path: string): BackgroundRuntimeReco
       startedAt: parsed.startedAt,
       command: parsed.command.filter((value): value is string => typeof value === 'string'),
       logPath: parsed.logPath,
+      buildInfo: coerceAgentLoopBuildInfo(parsed.buildInfo),
     }
   } catch {
     return null
@@ -232,6 +235,7 @@ export function buildCurrentProcessRuntimeRecord(input: {
   metricsPort: number
   cwd: string
   logPath: string
+  buildInfo?: AgentLoopBuildInfo | null
   command?: string[]
   supervisor?: ManagedDaemonRuntimeSupervisor
   env?: NodeJS.ProcessEnv
@@ -245,6 +249,7 @@ export function buildCurrentProcessRuntimeRecord(input: {
     startedAt: new Date().toISOString(),
     command: input.command ?? [process.execPath, ...process.argv.slice(1)],
     logPath: input.logPath,
+    buildInfo: input.buildInfo ?? null,
   }
 }
 
@@ -291,6 +296,7 @@ export function launchBackgroundRuntime(input: {
   identity: BackgroundRuntimeIdentity
   metricsPort: number
   cwd: string
+  buildInfo?: AgentLoopBuildInfo | null
   argv: string[]
   scriptPath: string
   env?: NodeJS.ProcessEnv
@@ -330,6 +336,7 @@ export function launchBackgroundRuntime(input: {
       metricsPort: input.metricsPort,
       cwd: input.cwd,
       logPath: paths.logPath,
+      buildInfo: input.buildInfo,
       command,
       supervisor: 'detached',
     }),

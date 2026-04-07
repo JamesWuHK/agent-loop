@@ -6,8 +6,10 @@ import {
   commentOnIssue,
   listIssueComments,
   type AgentConfig,
+  type AgentLoopBuildInfo,
   type IssueComment,
 } from '@agent/shared'
+import { coerceAgentLoopBuildInfo } from './build-info'
 
 const MANAGED_DAEMON_PRESENCE_ISSUE_TITLE = 'Agent Loop Presence'
 const MANAGED_DAEMON_PRESENCE_ISSUE_MARKER = '<!-- agent-loop:presence-registry -->'
@@ -28,6 +30,7 @@ export interface ManagedDaemonPresence {
   activeLeaseCount: number
   activeWorktreeCount: number
   effectiveActiveTasks: number
+  buildInfo: AgentLoopBuildInfo | null
 }
 
 export interface ManagedDaemonPresenceComment extends IssueComment {
@@ -129,7 +132,8 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Metrics port: ${presence.metricsPort}
 - Worktrees: ${presence.activeWorktreeCount}
 - Leases: ${presence.activeLeaseCount}
-- Effective tasks: ${presence.effectiveActiveTasks}`
+- Effective tasks: ${presence.effectiveActiveTasks}
+- Build: ${presence.buildInfo ? `v${presence.buildInfo.version} ${presence.buildInfo.gitCommitShort ?? 'no-commit'}` : 'unknown'}`
 }
 
 export function extractManagedDaemonPresenceComment(body: string): ManagedDaemonPresence | null {
@@ -165,6 +169,7 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       activeLeaseCount,
       activeWorktreeCount,
       effectiveActiveTasks,
+      buildInfo: coerceAgentLoopBuildInfo(parsed.buildInfo),
     }
   } catch {
     return null
@@ -364,6 +369,7 @@ export class ManagedDaemonPresencePublisher {
     daemonInstanceId: string
     healthPort: number
     metricsPort: number
+    buildInfo?: AgentLoopBuildInfo | null
     readRuntimeState: () => ManagedDaemonPresenceRuntimeState
     api?: PresenceApiAdapter
     logger?: Pick<Console, 'warn'>
@@ -441,6 +447,7 @@ export class ManagedDaemonPresencePublisher {
       activeLeaseCount: runtime.activeLeaseCount,
       activeWorktreeCount: runtime.activeWorktreeCount,
       effectiveActiveTasks: runtime.effectiveActiveTasks,
+      buildInfo: this.input.buildInfo ?? null,
     }
   }
 

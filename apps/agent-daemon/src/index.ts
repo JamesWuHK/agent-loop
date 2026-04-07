@@ -40,6 +40,7 @@ import {
   uninstallLaunchdService,
 } from './launchd'
 import { formatJoinProjectResult, joinProjectMachine } from './join-project'
+import { resolveAgentLoopBuildInfo } from './build-info'
 import {
   DEFAULT_DASHBOARD_HOST,
   DEFAULT_DASHBOARD_PORT,
@@ -436,6 +437,7 @@ async function main() {
     }
 
     const config = loadConfig(cliArgs)
+    const buildInfo = resolveAgentLoopBuildInfo(process.cwd())
 
     const runtimePaths = buildBackgroundRuntimePaths({
       repo: config.repo,
@@ -456,6 +458,7 @@ async function main() {
           metricsPort: metricsPort ?? 9090,
           cwd: process.cwd(),
           logPath: process.env.AGENT_LOOP_LOG_FILE ?? runtimePaths.logPath,
+          buildInfo,
           supervisor: resolveCurrentRuntimeSupervisor() === 'launchd' ? 'launchd' : 'detached',
           env: process.env,
         }),
@@ -471,6 +474,7 @@ async function main() {
         },
         metricsPort: metricsPort ?? 9090,
         cwd: process.cwd(),
+        buildInfo,
         argv: process.argv.slice(2),
         scriptPath: process.argv[1]!,
       })
@@ -481,7 +485,7 @@ async function main() {
       process.exit(0)
     }
 
-    const daemon = new AgentDaemon(config, console, healthServerConfig, metricsPort)
+    const daemon = new AgentDaemon(config, console, healthServerConfig, metricsPort, buildInfo)
 
     const removeRuntimeFileIfManaged = () => {
       const cleanupResult = cleanupManagedRuntimeRecord({
