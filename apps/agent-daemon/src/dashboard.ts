@@ -1725,6 +1725,17 @@ function renderAlerts(snapshot) {
       blocks.push(renderAlert('error', '错误', escapeHtml(error)));
     });
   }
+  if (snapshot.summary?.unmanagedOpenIssueCount > 0) {
+    blocks.push(renderAlert(
+      'note',
+      '未纳管 Open',
+      escapeHtml(
+        '当前有 '
+        + snapshot.summary.unmanagedOpenIssueCount
+        + ' 个 open issue 尚未纳入 agent-loop 状态机；这些 issue 不会被 daemon 自动消费。'
+      ),
+    ));
+  }
   if (Array.isArray(snapshot.notes)) {
     snapshot.notes.forEach((note) => {
       blocks.push(renderAlert('note', '提示', escapeHtml(note)));

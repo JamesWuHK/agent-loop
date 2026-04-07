@@ -336,6 +336,7 @@ describe('dashboard localization', () => {
     expect(script).toContain('Open')
     expect(script).toContain('受管 Open')
     expect(script).toContain('未纳管 Open')
+    expect(script).toContain('这些 issue 不会被 daemon 自动消费')
     expect(script).toContain('机器数')
     expect(script).toContain('本地运行时')
     expect(script).toContain('已入队 Issue')
