@@ -49,6 +49,8 @@ export interface DashboardSummary {
   openIssueCount: number
   managedOpenIssueCount: number
   unmanagedOpenIssueCount: number
+  unmanagedExecutionCandidateCount: number
+  unmanagedPlanningCount: number
   queuedIssueCount: number
   runnableIssueCount: number
   dependencyBlockedIssueCount: number
@@ -190,6 +192,8 @@ export interface DashboardUnmanagedIssueView {
   url: string
   labels: string[]
   updatedAt: string
+  category: 'execution_candidate' | 'planning'
+  categoryLabel: string
 }
 
 export interface DashboardSnapshot {
@@ -306,7 +310,7 @@ export async function collectDashboardSnapshot(
   return {
     generatedAt,
     repo,
-    summary: buildDashboardSummary(machines, issues, prs, openIssueCount),
+    summary: buildDashboardSummary(machines, issues, unmanagedIssues, prs, openIssueCount),
     machines,
     issues,
     unmanagedIssues,
@@ -435,6 +439,7 @@ export function localizeDashboardDerivedIssueState(state: DashboardIssueDerivedS
 export function buildDashboardSummary(
   machines: DashboardMachineCard[],
   issues: DashboardIssueView[],
+  unmanagedIssues: DashboardUnmanagedIssueView[],
   prs: DashboardPullRequestView[],
   openIssueCount = issues.length,
 ): DashboardSummary {
@@ -454,7 +459,9 @@ export function buildDashboardSummary(
     activeLeaseCount: activeLeaseKeys.size,
     openIssueCount,
     managedOpenIssueCount: issues.length,
-    unmanagedOpenIssueCount: Math.max(0, openIssueCount - issues.length),
+    unmanagedOpenIssueCount: unmanagedIssues.length,
+    unmanagedExecutionCandidateCount: unmanagedIssues.filter((issue) => issue.category === 'execution_candidate').length,
+    unmanagedPlanningCount: unmanagedIssues.filter((issue) => issue.category === 'planning').length,
     queuedIssueCount: issues.filter((issue) => issue.state === 'ready').length,
     runnableIssueCount: issues.filter((issue) => issue.derivedState === 'runnable').length,
     dependencyBlockedIssueCount: issues.filter((issue) => issue.derivedState === 'dependency_blocked').length,
@@ -472,6 +479,28 @@ export function sortDashboardUnmanagedIssues(
   issues: DashboardUnmanagedIssueView[],
 ): DashboardUnmanagedIssueView[] {
   return [...issues].sort(compareUnmanagedIssues)
+}
+
+export function classifyDashboardUnmanagedIssue(
+  issue: Pick<DashboardUnmanagedIssueView, 'number' | 'title' | 'url' | 'labels' | 'updatedAt'>,
+): DashboardUnmanagedIssueView {
+  const normalized = issue.title.toLowerCase()
+  const planning = (
+    normalized.startsWith('[sprint ')
+    || normalized.includes('presence')
+    || issue.title.includes('计划')
+    || issue.title.includes('回看')
+    || issue.title.includes('复盘')
+    || issue.title.includes('导出')
+    || issue.title.includes('快照')
+    || issue.title.includes('检查点')
+  )
+
+  return {
+    ...issue,
+    category: planning ? 'planning' : 'execution_candidate',
+    categoryLabel: planning ? '管理/规划' : '候选执行',
+  }
 }
 
 export function readDashboardLog(
@@ -821,13 +850,13 @@ function buildDashboardUnmanagedIssueView(
   repo: string,
   issue: OpenRepositoryIssueSummary,
 ): DashboardUnmanagedIssueView {
-  return {
+  return classifyDashboardUnmanagedIssue({
     number: issue.number,
     title: issue.title,
     url: buildGitHubIssueUrl(repo, issue.number),
     labels: issue.labels,
     updatedAt: issue.updatedAt,
-  }
+  })
 }
 
 function buildDashboardPrBlocker(
@@ -1807,6 +1836,8 @@ function renderSummary(snapshot) {
     { label: 'Open', value: snapshot.summary.openIssueCount, tone: '' },
     { label: '受管 Open', value: snapshot.summary.managedOpenIssueCount, tone: '' },
     { label: '未纳管 Open', value: snapshot.summary.unmanagedOpenIssueCount, tone: snapshot.summary.unmanagedOpenIssueCount > 0 ? 'gold' : '' },
+    { label: '未纳管候选执行', value: snapshot.summary.unmanagedExecutionCandidateCount, tone: snapshot.summary.unmanagedExecutionCandidateCount > 0 ? 'gold' : '' },
+    { label: '未纳管管理/规划', value: snapshot.summary.unmanagedPlanningCount, tone: '' },
     { label: '已入队 Issue', value: snapshot.summary.queuedIssueCount, tone: '' },
     { label: '可运行 Issue', value: snapshot.summary.runnableIssueCount, tone: snapshot.summary.runnableIssueCount > 0 ? 'accent' : '' },
     { label: '依赖阻塞', value: snapshot.summary.dependencyBlockedIssueCount, tone: snapshot.summary.dependencyBlockedIssueCount > 0 ? 'gold' : '' },
@@ -1938,19 +1969,14 @@ function renderUnmanagedIssues(issues) {
     return;
   }
 
-  unmanagedIssuesEl.innerHTML = sortDashboardUnmanagedIssues(issues).map((issue) => {
-    const labels = issue.labels.length > 0
-      ? '<div class="chip-row" style="margin-top:8px">' + issue.labels.map((label) => renderChip(label, '')).join('') + '</div>'
-      : '<div class="chip-row" style="margin-top:8px">' + renderChip('无 agent 标签', 'gold') + '</div>';
+  const sorted = sortDashboardUnmanagedIssues(issues);
+  const executionCandidates = sorted.filter((issue) => issue.category === 'execution_candidate');
+  const planningItems = sorted.filter((issue) => issue.category === 'planning');
 
-    return [
-      '<div class="warning-item">',
-      '<a class="table-title" target="_blank" rel="noreferrer" href="' + escapeAttribute(issue.url) + '">#' + issue.number + ' ' + escapeHtml(issue.title) + '</a>',
-      labels,
-      '<div class="muted" style="margin-top:8px">最近更新 ' + escapeHtml(formatTimestamp(issue.updatedAt)) + ' · ' + escapeHtml(formatRelative(issue.updatedAt)) + '</div>',
-      '</div>',
-    ].join('');
-  }).join('');
+  unmanagedIssuesEl.innerHTML = [
+    renderUnmanagedIssueGroup('候选执行', executionCandidates, '暂无候选执行 issue'),
+    renderUnmanagedIssueGroup('管理/规划', planningItems, '暂无管理/规划 issue'),
+  ].join('');
 }
 
 function sortDashboardUnmanagedIssues(issues) {
@@ -1958,6 +1984,37 @@ function sortDashboardUnmanagedIssues(issues) {
     if (left.number !== right.number) return right.number - left.number;
     return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
   });
+}
+
+function renderUnmanagedIssueGroup(title, issues, emptyText) {
+  const body = issues.length > 0
+    ? issues.map((issue) => renderUnmanagedIssueItem(issue)).join('')
+    : '<div class="empty-state">' + escapeHtml(emptyText) + '</div>';
+
+  return [
+    '<section style="display:grid;gap:10px">',
+    '<div class="chip-row">',
+    renderChip(title, title === '候选执行' ? 'gold' : ''),
+    renderChip('数量 ' + issues.length, ''),
+    '</div>',
+    body,
+    '</section>',
+  ].join('');
+}
+
+function renderUnmanagedIssueItem(issue) {
+  const labels = issue.labels.length > 0
+    ? '<div class="chip-row" style="margin-top:8px">' + issue.labels.map((label) => renderChip(label, '')).join('') + '</div>'
+    : '<div class="chip-row" style="margin-top:8px">' + renderChip('无 agent 标签', 'gold') + '</div>';
+
+  return [
+    '<div class="warning-item">',
+    '<a class="table-title" target="_blank" rel="noreferrer" href="' + escapeAttribute(issue.url) + '">#' + issue.number + ' ' + escapeHtml(issue.title) + '</a>',
+    '<div class="chip-row" style="margin-top:8px">' + renderChip(issue.categoryLabel, issue.category === 'execution_candidate' ? 'gold' : '') + '</div>',
+    labels,
+    '<div class="muted" style="margin-top:8px">最近更新 ' + escapeHtml(formatTimestamp(issue.updatedAt)) + ' · ' + escapeHtml(formatRelative(issue.updatedAt)) + '</div>',
+    '</div>',
+  ].join('');
 }
 
 function renderPullRequests(prs) {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildDashboardMachineCards,
   buildDashboardSummary,
+  classifyDashboardUnmanagedIssue,
   localizeDashboardDerivedIssueState,
   localizeDashboardIssueLifecycleState,
   sortDashboardUnmanagedIssues,
@@ -272,13 +273,32 @@ describe('dashboard machine aggregation', () => {
       },
     ]
 
-    expect(buildDashboardSummary(machines, issues, prs, 5)).toEqual({
+    const unmanagedIssues = [
+      classifyDashboardUnmanagedIssue({
+        number: 232,
+        title: 'Agent Loop Presence',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/232',
+        labels: [],
+        updatedAt: '2026-04-07T08:10:00.000Z',
+      }),
+      classifyDashboardUnmanagedIssue({
+        number: 301,
+        title: '桌面端登录错误提示补测',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/301',
+        labels: ['enhancement'],
+        updatedAt: '2026-04-07T08:08:00.000Z',
+      }),
+    ]
+
+    expect(buildDashboardSummary(machines, issues, unmanagedIssues, prs, 5)).toEqual({
       machineCount: 1,
       localRuntimeCount: 1,
       activeLeaseCount: 2,
       openIssueCount: 5,
       managedOpenIssueCount: 3,
       unmanagedOpenIssueCount: 2,
+      unmanagedExecutionCandidateCount: 1,
+      unmanagedPlanningCount: 1,
       queuedIssueCount: 1,
       runnableIssueCount: 1,
       dependencyBlockedIssueCount: 0,
@@ -313,26 +333,84 @@ describe('dashboard machine aggregation', () => {
 })
 
 describe('dashboard unmanaged issues', () => {
+  test('classifies unmanaged issues into execution candidates and planning items', () => {
+    expect(classifyDashboardUnmanagedIssue({
+      number: 232,
+      title: 'Agent Loop Presence',
+      url: 'https://github.com/JamesWuHK/digital-employee/issues/232',
+      labels: [],
+      updatedAt: '2026-04-07T08:10:00.000Z',
+    }).category).toBe('planning')
+
+    expect(classifyDashboardUnmanagedIssue({
+      number: 224,
+      title: '[Sprint V] 回看结果采纳与下一轮计划重启',
+      url: 'https://github.com/JamesWuHK/digital-employee/issues/224',
+      labels: [],
+      updatedAt: '2026-04-07T08:10:00.000Z',
+    }).category).toBe('planning')
+
+    expect(classifyDashboardUnmanagedIssue({
+      number: 301,
+      title: '桌面端登录错误提示补测',
+      url: 'https://github.com/JamesWuHK/digital-employee/issues/301',
+      labels: ['enhancement'],
+      updatedAt: '2026-04-07T08:10:00.000Z',
+    }).category).toBe('execution_candidate')
+  })
+
   test('sorts unmanaged issue summaries in number-descending order', () => {
     const issues: DashboardUnmanagedIssueView[] = [
-      {
+      classifyDashboardUnmanagedIssue({
         number: 127,
         title: '[Sprint H] 会话复用体验增强',
         url: 'https://github.com/JamesWuHK/digital-employee/issues/127',
         labels: ['enhancement', 'milestone/m4'],
         updatedAt: '2026-04-05T09:10:00.000Z',
-      },
-      {
+      }),
+      classifyDashboardUnmanagedIssue({
         number: 232,
         title: 'Agent Loop Presence',
         url: 'https://github.com/JamesWuHK/digital-employee/issues/232',
         labels: [],
         updatedAt: '2026-04-07T08:10:00.000Z',
-      },
+      }),
     ]
 
     const sorted = sortDashboardUnmanagedIssues(issues)
     expect(sorted.map((issue) => issue.number)).toEqual([232, 127])
+  })
+
+  test('counts unmanaged issue categories in dashboard summary', () => {
+    const unmanaged: DashboardUnmanagedIssueView[] = [
+      classifyDashboardUnmanagedIssue({
+        number: 232,
+        title: 'Agent Loop Presence',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/232',
+        labels: [],
+        updatedAt: '2026-04-07T08:10:00.000Z',
+      }),
+      classifyDashboardUnmanagedIssue({
+        number: 224,
+        title: '[Sprint V] 回看结果采纳与下一轮计划重启',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/224',
+        labels: [],
+        updatedAt: '2026-04-07T08:09:00.000Z',
+      }),
+      classifyDashboardUnmanagedIssue({
+        number: 301,
+        title: '桌面端登录错误提示补测',
+        url: 'https://github.com/JamesWuHK/digital-employee/issues/301',
+        labels: ['enhancement'],
+        updatedAt: '2026-04-07T08:08:00.000Z',
+      }),
+    ]
+
+    expect(buildDashboardSummary([], [], unmanaged, [], 3)).toMatchObject({
+      unmanagedOpenIssueCount: 3,
+      unmanagedExecutionCandidateCount: 1,
+      unmanagedPlanningCount: 2,
+    })
   })
 })
 
@@ -363,8 +441,12 @@ describe('dashboard localization', () => {
     expect(script).toContain('Open')
     expect(script).toContain('受管 Open')
     expect(script).toContain('未纳管 Open')
+    expect(script).toContain('未纳管候选执行')
+    expect(script).toContain('未纳管管理/规划')
     expect(script).toContain('这些 issue 不会被 daemon 自动消费')
     expect(script).toContain('当前仓库的 open issue 已全部纳入 agent-loop 状态机。')
+    expect(script).toContain('暂无候选执行 issue')
+    expect(script).toContain('暂无管理/规划 issue')
     expect(script).toContain('机器数')
     expect(script).toContain('本地运行时')
     expect(script).toContain('已入队 Issue')
