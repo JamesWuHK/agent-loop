@@ -34,6 +34,7 @@ import {
   isMergeabilityFailure,
   refreshResumableIssueBranchOntoDefault,
   rebaseManagedBranchOntoDefault,
+  runIssueCleanupWithGuaranteedRelease,
   shouldApplyStandaloneIssueTransition,
   shouldResetLinkedPrToRetryOnIssueResume,
   shouldCompleteIssueRecoveryOnRemoteClose,
@@ -281,6 +282,22 @@ describe('daemon merge recovery helpers', () => {
       activePrReviewCount: 1,
       inFlightPrReviewCount: 1,
     })).toBe(2)
+  })
+
+  test('releases issue worktree tracking even when cleanup throws', async () => {
+    const steps: string[] = []
+
+    await expect(runIssueCleanupWithGuaranteedRelease(
+      async () => {
+        steps.push('cleanup')
+        throw new Error('error connecting to api.github.com')
+      },
+      () => {
+        steps.push('release')
+      },
+    )).rejects.toThrow('error connecting to api.github.com')
+
+    expect(steps).toEqual(['cleanup', 'release'])
   })
 
   test('builds runtime status snapshots for health and metrics surfaces', () => {

@@ -2076,32 +2076,37 @@ export class AgentDaemon {
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
       this.logger.error(`[daemon] failed to resume issue #${issueNumber}:`, err)
-      if (leaseHandle && isRetryableDaemonLoopError(err)) {
-        await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
-        await this.completeManagedLease(
-          'issue-process',
-          issueNumber,
-          leaseHandle,
-          'recoverable',
-          formatDaemonError(err),
-          'issue-process-retryable-error',
-        )
-      } else {
-        this.registerFailedIssueResume(issueNumber)
+      await runIssueCleanupWithGuaranteedRelease(
+        async () => {
+          if (leaseHandle && isRetryableDaemonLoopError(err)) {
+            await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
+            await this.completeManagedLease(
+              'issue-process',
+              issueNumber,
+              leaseHandle,
+              'recoverable',
+              formatDaemonError(err),
+              'issue-process-retryable-error',
+            )
+          } else {
+            this.registerFailedIssueResume(issueNumber)
 
-        try {
-          await this.markIssueFailed(issueNumber, String(err))
-        } catch {
-          // ignore
-        }
-        if (leaseHandle) {
-          await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
-        }
-      }
-
-      this.activeWorktrees.delete(issueNumber)
-      this.syncRuntimeMetrics()
-      recordIssueProcessingDuration(Date.now() - processingStartTime)
+            try {
+              await this.markIssueFailed(issueNumber, String(err))
+            } catch {
+              // ignore
+            }
+            if (leaseHandle) {
+              await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+            }
+          }
+        },
+        () => {
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+        },
+      )
     }
   }
 
@@ -2722,44 +2727,49 @@ export class AgentDaemon {
       recordIssueProcessingDuration(Date.now() - processingStartTime)
     } catch (err) {
       this.logger.error(`[daemon] failed to process issue #${issueNumber}:`, err)
-      if (leaseHandle && isRetryableDaemonLoopError(err)) {
-        await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
-        await this.completeManagedLease(
-          'issue-process',
-          issueNumber,
-          leaseHandle,
-          'recoverable',
-          formatDaemonError(err),
-          'issue-process-retryable-error',
-        )
-      } else {
-        recordIssueProcessed('error')
-        this.syncRuntimeMetrics()
+      await runIssueCleanupWithGuaranteedRelease(
+        async () => {
+          if (leaseHandle && isRetryableDaemonLoopError(err)) {
+            await this.markIssueRecoverable(issueNumber, formatDaemonError(err))
+            await this.completeManagedLease(
+              'issue-process',
+              issueNumber,
+              leaseHandle,
+              'recoverable',
+              formatDaemonError(err),
+              'issue-process-retryable-error',
+            )
+          } else {
+            recordIssueProcessed('error')
+            this.syncRuntimeMetrics()
 
-        try {
-          await transitionIssueState(
-            issueNumber,
-            ISSUE_LABELS.FAILED,
-            null,
-            {
-              event: 'failed',
-              machine: this.config.machineId,
-              ts: new Date().toISOString(),
-              reason: String(err),
-            },
-            this.config,
-          )
-        } catch {
-          // ignore
-        }
-        if (leaseHandle) {
-          await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
-        }
-      }
-
-      this.activeWorktrees.delete(issueNumber)
-      this.syncRuntimeMetrics()
-      recordIssueProcessingDuration(Date.now() - processingStartTime)
+            try {
+              await transitionIssueState(
+                issueNumber,
+                ISSUE_LABELS.FAILED,
+                null,
+                {
+                  event: 'failed',
+                  machine: this.config.machineId,
+                  ts: new Date().toISOString(),
+                  reason: String(err),
+                },
+                this.config,
+              )
+            } catch {
+              // ignore
+            }
+            if (leaseHandle) {
+              await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+            }
+          }
+        },
+        () => {
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+        },
+      )
     }
   }
 
@@ -3205,6 +3215,17 @@ export function getEffectiveActiveTaskCount(input: {
   const prTaskCount = Math.max(input.activePrReviewCount, input.inFlightPrReviewCount)
 
   return issueTaskCount + prTaskCount
+}
+
+export async function runIssueCleanupWithGuaranteedRelease(
+  cleanup: () => Promise<void>,
+  release: () => void,
+): Promise<void> {
+  try {
+    await cleanup()
+  } finally {
+    release()
+  }
 }
 
 export function buildDaemonRuntimeStatus(input: {
