@@ -131,6 +131,41 @@ export interface RecoveryConfig {
   leaseNoProgressTimeoutMs: number
 }
 
+export interface AgentLoopUpgradeConfig {
+  enabled: boolean
+  repo: string | null
+  channel: string | null
+  checkIntervalMs: number
+  reminderIntervalMs: number
+}
+
+export interface AgentLoopBuildMetadata {
+  repo: string | null
+  version: string
+  revision: string | null
+}
+
+export type AgentLoopUpgradeStatusKind =
+  | 'disabled'
+  | 'unknown'
+  | 'up-to-date'
+  | 'upgrade-available'
+  | 'ahead-of-channel'
+  | 'error'
+
+export interface AgentLoopUpgradeMetadata {
+  enabled: boolean
+  repo: string | null
+  channel: string | null
+  checkedAt: string | null
+  status: AgentLoopUpgradeStatusKind
+  latestVersion: string | null
+  latestRevision: string | null
+  latestCommitAt: string | null
+  safeToUpgradeNow: boolean
+  message: string | null
+}
+
 export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'
 export type ManagedLeaseStatus = 'active' | 'completed' | 'recoverable' | 'released'
 export type ManagedLeaseProgressKind = 'stdout' | 'stderr' | 'git-state' | 'phase'
@@ -255,6 +290,7 @@ export interface AgentConfig {
     authorName: string
     authorEmail: string
   }
+  upgrade?: AgentLoopUpgradeConfig
 }
 
 // ─── Worktree ────────────────────────────────────────────────────────────────
@@ -314,6 +350,8 @@ export interface DaemonStatus {
     primary: AgentConfig['agent']['primary']
     fallback: AgentConfig['agent']['fallback']
   }
+  agentLoop?: AgentLoopBuildMetadata
+  upgrade?: AgentLoopUpgradeMetadata
   endpoints: {
     health: {
       host: string

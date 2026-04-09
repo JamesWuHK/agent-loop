@@ -48,6 +48,23 @@ const baseHealth: DaemonStatus & {
     primary: 'codex',
     fallback: 'claude',
   },
+  agentLoop: {
+    repo: 'JamesWuHK/agent-loop',
+    version: '0.1.0',
+    revision: 'd51749d9e5583c77efc70b7aec5d6858b4b959a3',
+  },
+  upgrade: {
+    enabled: true,
+    repo: 'JamesWuHK/agent-loop',
+    channel: 'master',
+    checkedAt: '2026-04-05T08:09:45.000Z',
+    status: 'upgrade-available',
+    latestVersion: '0.1.1',
+    latestRevision: '2222222222222222222222222222222222222222',
+    latestCommitAt: '2026-04-05T08:09:40.000Z',
+    safeToUpgradeNow: false,
+    message: 'channel master is newer: local v0.1.0, latest v0.1.1',
+  },
   endpoints: {
     health: {
       host: '127.0.0.1',
@@ -368,6 +385,7 @@ describe('status helpers', () => {
     })
 
     expect(report).toContain('repo: JamesWuHK/digital-employee')
+    expect(report).toContain('agent-loop: repo JamesWuHK/agent-loop | revision d51749d | upgrade upgrade-available | latest v0.1.1@2222222 | checked 2026-04-05T08:09:45.000Z | safe now no')
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('process: launchd | pid 12345 | cwd /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
@@ -464,6 +482,7 @@ describe('status helpers', () => {
     expect(report).toContain('blocked-issue-resumes: 1')
     expect(report).toContain('blocked-issue-resume-age-seconds: 45')
     expect(report).toContain('oldest blocked issue resume age: 45s')
+    expect(report).toContain('- agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work')
     expect(report).toContain('- open PR review blockers: pr#239')
     expect(report).toContain('- review auto-fix push failures observed: 1')
   })

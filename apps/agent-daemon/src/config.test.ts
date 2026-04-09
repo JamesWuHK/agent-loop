@@ -132,6 +132,13 @@ describe('buildConfig', () => {
     expect(config.concurrency).toBe(1)
     expect(config.recovery.leaseTtlMs).toBe(60_000)
     expect(config.recovery.leaseNoProgressTimeoutMs).toBe(360_000)
+    expect(config.upgrade).toEqual({
+      enabled: true,
+      repo: null,
+      channel: null,
+      checkIntervalMs: 900_000,
+      reminderIntervalMs: 3_600_000,
+    })
   })
 
   test('allows repo-local config to disable agent fallback explicitly', () => {

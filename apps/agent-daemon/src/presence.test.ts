@@ -67,6 +67,13 @@ function buildPresence(overrides: Partial<ManagedDaemonPresence> = {}): ManagedD
     activeLeaseCount: 0,
     activeWorktreeCount: 0,
     effectiveActiveTasks: 0,
+    agentLoopVersion: '0.1.0',
+    agentLoopRevision: 'abcdef1234567890',
+    upgradeStatus: 'up-to-date',
+    safeToUpgradeNow: true,
+    latestVersion: '0.1.0',
+    latestRevision: 'abcdef1234567890',
+    upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
     ...overrides,
   }
 }
@@ -195,10 +202,26 @@ describe('managed daemon presence helpers', () => {
 describe('managed daemon presence publisher', () => {
   test('publishes idle, busy, and stopped presence updates through the injected API', async () => {
     const { api, comments } = createFakePresenceApi()
-    const runtime = {
+    const runtime: ManagedDaemonPresence = {
+      repo: TEST_CONFIG.repo,
+      machineId: TEST_CONFIG.machineId,
+      daemonInstanceId: 'daemon-a',
+      status: 'idle',
+      startedAt: '2026-04-05T08:00:00.000Z',
+      lastHeartbeatAt: '2026-04-05T08:00:00.000Z',
+      expiresAt: '2026-04-05T08:02:00.000Z',
+      healthPort: 9312,
+      metricsPort: 9092,
       activeLeaseCount: 0,
       activeWorktreeCount: 0,
       effectiveActiveTasks: 0,
+      agentLoopVersion: '0.1.0',
+      agentLoopRevision: 'abcdef1234567890',
+      upgradeStatus: 'up-to-date',
+      safeToUpgradeNow: true,
+      latestVersion: '0.1.0',
+      latestRevision: 'abcdef1234567890',
+      upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
     }
 
     const publisher = new ManagedDaemonPresencePublisher({
@@ -217,11 +240,17 @@ describe('managed daemon presence publisher', () => {
     runtime.activeLeaseCount = 1
     runtime.activeWorktreeCount = 1
     runtime.effectiveActiveTasks = 1
+    runtime.upgradeStatus = 'upgrade-available'
+    runtime.safeToUpgradeNow = false
+    runtime.latestVersion = '0.1.1'
+    runtime.latestRevision = 'fedcba9876543210'
 
     await publisher.flushHeartbeat()
     expect(comments).toHaveLength(1)
     expect(comments[0]?.body).toContain('"status":"busy"')
     expect(comments[0]?.body).toContain('"activeLeaseCount":1')
+    expect(comments[0]?.body).toContain('"upgradeStatus":"upgrade-available"')
+    expect(comments[0]?.body).toContain('"safeToUpgradeNow":false')
 
     await publisher.stop()
     expect(comments[0]?.body).toContain('"status":"stopped"')
