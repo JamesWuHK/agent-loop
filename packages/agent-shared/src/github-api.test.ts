@@ -2,11 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import {
   applyDependencyClaimability,
   buildListOpenIssuesQuery,
+  buildDirectGitHubApiRequest,
   buildManagedLeaseComment,
   buildGhEnv,
   canDaemonAdoptManagedLease,
   derivePullRequestStateFromRaw,
   deriveIssueStateFromRaw,
+  extractNextPageUrl,
   extractRestOpenIssueListPage,
   extractRestPullRequestListPage,
   extractOpenIssueConnectionPage,
@@ -16,6 +18,7 @@ import {
   isGraphQlRateLimitErrorMessage,
   isManagedLeaseExpired,
   isManagedLeaseProgressStale,
+  mergePaginatedRestBodies,
   parseManagedLeaseComments,
   parseGhApiErrorMessage,
   parseMergePrResponse,
@@ -73,6 +76,59 @@ describe('qualifyGhApiArgs', () => {
       ['repos/JamesWuHK/digital-employee/issues/334/comments'],
       { repo: 'JamesWuHK/digital-employee' },
     )).toEqual(['repos/JamesWuHK/digital-employee/issues/334/comments'])
+  })
+})
+
+describe('buildDirectGitHubApiRequest', () => {
+  test('converts graphql raw fields into a direct GraphQL payload', () => {
+    const request = buildDirectGitHubApiRequest(
+      [
+        'graphql',
+        '--raw-field',
+        'query=query($cursor: String) { viewer { login } }',
+        '--raw-field',
+        'cursor=cursor-2',
+      ],
+      { repo: 'JamesWuHK/digital-employee' },
+    )
+
+    expect(request).toMatchObject({
+      kind: 'graphql',
+      method: 'POST',
+      url: 'https://api.github.com/graphql',
+      paginate: false,
+    })
+    expect(JSON.parse(request.body ?? '{}')).toEqual({
+      query: 'query($cursor: String) { viewer { login } }',
+      variables: {
+        cursor: 'cursor-2',
+      },
+    })
+  })
+
+  test('converts repeated REST form fields into a JSON array payload', () => {
+    const request = buildDirectGitHubApiRequest(
+      [
+        'repos/JamesWuHK/digital-employee/issues/334/labels',
+        '-X',
+        'POST',
+        '-f',
+        'labels[]=agent:ready',
+        '-f',
+        'labels[]=agent:claimed',
+      ],
+      { repo: 'JamesWuHK/digital-employee' },
+    )
+
+    expect(request).toMatchObject({
+      kind: 'rest',
+      method: 'POST',
+      url: 'https://api.github.com/repos/JamesWuHK/digital-employee/issues/334/labels',
+      paginate: false,
+    })
+    expect(JSON.parse(request.body ?? '{}')).toEqual({
+      labels: ['agent:ready', 'agent:claimed'],
+    })
   })
 })
 
@@ -237,6 +293,20 @@ describe('REST pagination helpers', () => {
     ])
 
     expect(extractRestPullRequestListPage(null)).toEqual([])
+  })
+
+  test('extracts the next REST pagination link', () => {
+    expect(extractNextPageUrl(
+      '<https://api.github.com/resource?page=2>; rel="next", <https://api.github.com/resource?page=4>; rel="last"',
+    )).toBe('https://api.github.com/resource?page=2')
+    expect(extractNextPageUrl(null)).toBeNull()
+  })
+
+  test('merges paginated REST array bodies into one JSON array', () => {
+    expect(mergePaginatedRestBodies([
+      '[{"id":1}]',
+      '[{"id":2},{"id":3}]',
+    ])).toBe('[{"id":1},{"id":2},{"id":3}]')
   })
 })
 

@@ -1,4 +1,4 @@
-import { writeFileSync, rmSync } from 'node:fs'
+import { writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type {
@@ -162,7 +162,343 @@ async function ghApiRaw(
   args: string[],
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return runBoundedGhCommand(['api', ...qualifyGhApiArgs(args, config)], config)
+  const qualifiedArgs = qualifyGhApiArgs(args, config)
+  if (config.pat) {
+    return runDirectGitHubApi(qualifiedArgs, config)
+  }
+  return runBoundedGhCommand(['api', ...qualifiedArgs], config)
+}
+
+interface DirectGitHubApiRequest {
+  kind: 'graphql' | 'rest'
+  url: string
+  method: 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT'
+  body?: string
+  paginate: boolean
+}
+
+function normalizeDirectGitHubMethod(
+  method: string | undefined,
+): DirectGitHubApiRequest['method'] {
+  switch ((method ?? '').toUpperCase()) {
+    case 'DELETE':
+      return 'DELETE'
+    case 'PATCH':
+      return 'PATCH'
+    case 'POST':
+      return 'POST'
+    case 'PUT':
+      return 'PUT'
+    default:
+      return 'GET'
+  }
+}
+
+function parseDirectGitHubApiFields(
+  fields: string[],
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {}
+
+  for (const field of fields) {
+    const separatorIndex = field.indexOf('=')
+    const rawKey = separatorIndex >= 0 ? field.slice(0, separatorIndex) : field
+    const value = separatorIndex >= 0 ? field.slice(separatorIndex + 1) : ''
+
+    if (rawKey.endsWith('[]')) {
+      const key = rawKey.slice(0, -2)
+      const existing = payload[key]
+      if (Array.isArray(existing)) {
+        existing.push(value)
+      } else if (existing === undefined) {
+        payload[key] = [value]
+      } else {
+        payload[key] = [existing, value]
+      }
+      continue
+    }
+
+    payload[rawKey] = value
+  }
+
+  return payload
+}
+
+function appendDirectGitHubQueryParams(
+  url: string,
+  params: Record<string, unknown>,
+): string {
+  const search = new URLSearchParams()
+
+  for (const [key, value] of Object.entries(params)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        search.append(`${key}[]`, String(item))
+      }
+      continue
+    }
+
+    search.append(key, String(value))
+  }
+
+  const query = search.toString()
+  if (!query) return url
+  return `${url}${url.includes('?') ? '&' : '?'}${query}`
+}
+
+export function buildDirectGitHubApiRequest(
+  args: string[],
+  config: Pick<AgentConfig, 'repo'>,
+): DirectGitHubApiRequest {
+  const qualifiedArgs = qualifyGhApiArgs(args, config)
+  const [endpoint, ...rest] = qualifiedArgs
+  const fieldArgs: string[] = []
+  let inputPath: string | null = null
+  let method: DirectGitHubApiRequest['method'] = 'GET'
+  let paginate = false
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index]
+    if ((token === '-X' || token === '--method') && typeof rest[index + 1] === 'string') {
+      method = normalizeDirectGitHubMethod(rest[index + 1])
+      index += 1
+      continue
+    }
+
+    if ((token === '-f' || token === '--field' || token === '--raw-field') && typeof rest[index + 1] === 'string') {
+      fieldArgs.push(rest[index + 1]!)
+      index += 1
+      continue
+    }
+
+    if (token === '--input' && typeof rest[index + 1] === 'string') {
+      inputPath = rest[index + 1]!
+      index += 1
+      continue
+    }
+
+    if (token === '--paginate') {
+      paginate = true
+    }
+  }
+
+  if (endpoint === 'graphql') {
+    const payload = parseDirectGitHubApiFields(fieldArgs)
+    const query = typeof payload.query === 'string' ? payload.query : ''
+    delete payload.query
+
+    return {
+      kind: 'graphql',
+      url: 'https://api.github.com/graphql',
+      method: 'POST',
+      body: JSON.stringify({
+        query,
+        variables: payload,
+      }),
+      paginate: false,
+    }
+  }
+
+  let url = `https://api.github.com/${endpoint.replace(/^\/+/, '')}`
+  let body: string | undefined
+
+  if (inputPath) {
+    body = readFileSync(inputPath, 'utf-8')
+  } else if (fieldArgs.length > 0) {
+    const payload = parseDirectGitHubApiFields(fieldArgs)
+    if (method === 'GET') {
+      url = appendDirectGitHubQueryParams(url, payload)
+    } else {
+      body = JSON.stringify(payload)
+    }
+  }
+
+  return {
+    kind: 'rest',
+    url,
+    method,
+    body,
+    paginate,
+  }
+}
+
+function parseDirectGitHubApiErrorMessage(body: string): string {
+  const trimmed = body.trim()
+  if (!trimmed) return 'GitHub API request failed'
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      message?: unknown
+      errors?: Array<{ message?: unknown }>
+    }
+    if (typeof parsed.message === 'string' && parsed.message.trim().length > 0) {
+      return parsed.message.trim()
+    }
+    if (Array.isArray(parsed.errors)) {
+      for (const error of parsed.errors) {
+        if (typeof error?.message === 'string' && error.message.trim().length > 0) {
+          return error.message.trim()
+        }
+      }
+    }
+  } catch {
+    // fall through to raw body
+  }
+
+  return trimmed
+}
+
+function parseDirectGraphQlErrorMessage(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as {
+      errors?: Array<{ message?: unknown }>
+    }
+    if (!Array.isArray(parsed.errors)) return null
+
+    for (const error of parsed.errors) {
+      if (typeof error?.message === 'string' && error.message.trim().length > 0) {
+        return error.message.trim()
+      }
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+export function extractNextPageUrl(linkHeader: string | null): string | null {
+  if (!linkHeader) return null
+
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="([^"]+)"/)
+    if (match?.[2] === 'next') {
+      return match[1] ?? null
+    }
+  }
+
+  return null
+}
+
+export function mergePaginatedRestBodies(pages: string[]): string {
+  if (pages.length === 0) return '[]'
+  if (pages.length === 1) return pages[0]!
+
+  try {
+    const parsedPages = pages.map((page) => JSON.parse(page))
+    if (parsedPages.every(Array.isArray)) {
+      return JSON.stringify(parsedPages.flat())
+    }
+  } catch {
+    // fall back to raw concatenation below
+  }
+
+  return pages.join('\n')
+}
+
+async function runDirectGitHubApi(
+  args: string[],
+  config: Pick<AgentConfig, 'pat' | 'repo'>,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  let request: DirectGitHubApiRequest
+  try {
+    request = buildDirectGitHubApiRequest(args, config)
+  } catch (error) {
+    return {
+      stdout: '',
+      stderr: error instanceof Error ? error.message : String(error),
+      exitCode: 1,
+    }
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `token ${config.pat}`,
+    Accept: request.kind === 'graphql'
+      ? 'application/json'
+      : 'application/vnd.github+json',
+  }
+
+  if (request.body) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const issueRequest = async (
+    url: string,
+    includeBody: boolean,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; nextPageUrl: string | null }> => {
+    const response = await fetch(url, {
+      method: request.method,
+      headers,
+      body: includeBody ? request.body : undefined,
+    })
+    const stdout = await response.text()
+    if (!response.ok) {
+      return {
+        stdout,
+        stderr: parseDirectGitHubApiErrorMessage(stdout),
+        exitCode: 1,
+        nextPageUrl: null,
+      }
+    }
+
+    if (request.kind === 'graphql') {
+      const graphQlError = parseDirectGraphQlErrorMessage(stdout)
+      if (graphQlError) {
+        return {
+          stdout,
+          stderr: `GraphQL: ${graphQlError}`,
+          exitCode: 1,
+          nextPageUrl: null,
+        }
+      }
+    }
+
+    return {
+      stdout,
+      stderr: '',
+      exitCode: 0,
+      nextPageUrl: request.paginate ? extractNextPageUrl(response.headers.get('link')) : null,
+    }
+  }
+
+  try {
+    if (!request.paginate) {
+      const response = await issueRequest(request.url, true)
+      return {
+        stdout: response.stdout,
+        stderr: response.stderr,
+        exitCode: response.exitCode,
+      }
+    }
+
+    const pages: string[] = []
+    let nextPageUrl: string | null = request.url
+    let includeBody = true
+    while (nextPageUrl) {
+      const response = await issueRequest(nextPageUrl, includeBody)
+      if (response.exitCode !== 0) {
+        return {
+          stdout: response.stdout,
+          stderr: response.stderr,
+          exitCode: response.exitCode,
+        }
+      }
+      pages.push(response.stdout)
+      nextPageUrl = response.nextPageUrl
+      includeBody = false
+    }
+
+    return {
+      stdout: mergePaginatedRestBodies(pages),
+      stderr: '',
+      exitCode: 0,
+    }
+  } catch (error) {
+    return {
+      stdout: '',
+      stderr: error instanceof Error ? error.message : String(error),
+      exitCode: 1,
+    }
+  }
 }
 
 export function qualifyGhApiArgs(
