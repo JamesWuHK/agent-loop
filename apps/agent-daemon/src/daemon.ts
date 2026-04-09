@@ -526,7 +526,12 @@ export class AgentDaemon {
   private isRecoverableAgentFailureKind(
     failureKind: string | undefined,
   ): boolean {
-    return failureKind === 'idle_timeout'
+    return (
+      failureKind === 'idle_timeout'
+      || failureKind === 'process_timeout'
+      || failureKind === 'execution_error'
+      || failureKind === 'nonzero_exit'
+    )
   }
 
   private async markIssueRecoverable(issueNumber: number, reason: string): Promise<void> {

@@ -604,10 +604,28 @@ export function canResumeHumanNeededPrReview(
   issueBody: string | null | undefined,
 ): boolean {
   return (
-    canResumeAutomatedPrReview(comments, maxAttempt)
+    didLatestAutomatedPrReviewExecutionFail(comments)
+    || canResumeAutomatedPrReview(comments, maxAttempt)
     || shouldRestartAutomatedPrReviewOnNewHead(comments, currentHeadRefOid)
     || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueBody)
   )
+}
+
+export function didLatestAutomatedPrReviewExecutionFail(
+  comments: AutomatedPrReviewCommentLike[],
+): boolean {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = comments[index]?.body ?? ''
+    const metadata = extractAutomatedPrReviewMetadata(body)
+    if (!metadata) continue
+    if (metadata.approved || metadata.canMerge) return false
+    if (extractStructuredReviewFeedback(body) !== null) return false
+
+    const reason = extractLegacyAutomatedPrReviewReason(body)
+    return reason?.startsWith('Review failed:') ?? false
+  }
+
+  return false
 }
 
 export function getReusableAutomatedPrReviewFeedback(
