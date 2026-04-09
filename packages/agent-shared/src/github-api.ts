@@ -51,10 +51,91 @@ export function buildGhEnv(config: Pick<AgentConfig, 'pat'>): Record<string, str
     delete env[key]
   }
 
-  env.GH_TOKEN = config.pat
-  env.GITHUB_TOKEN = config.pat
+  if (config.pat) {
+    env.GH_TOKEN = config.pat
+    env.GITHUB_TOKEN = config.pat
+  } else {
+    delete env.GH_TOKEN
+    delete env.GITHUB_TOKEN
+  }
 
   return env
+}
+
+const DEFAULT_GH_COMMAND_TIMEOUT_MS = 30_000
+
+export interface GhCommandResult {
+  stdout: string
+  stderr: string
+  exitCode: number
+  timedOut: boolean
+}
+
+export async function runBoundedGhCommand(
+  args: string[],
+  config: Pick<AgentConfig, 'pat'>,
+  options: {
+    timeoutMs?: number
+  } = {},
+): Promise<GhCommandResult> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_GH_COMMAND_TIMEOUT_MS)
+  const proc = Bun.spawn(['gh', ...args], {
+    detached: true,
+    env: buildGhEnv(config),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const stdoutPromise = proc.stdout
+    ? new Response(proc.stdout).text().catch(() => '')
+    : Promise.resolve('')
+  const stderrPromise = proc.stderr
+    ? new Response(proc.stderr).text().catch(() => '')
+    : Promise.resolve('')
+
+  const exitOutcome = await Promise.race([
+    proc.exited.then((exitCode) => ({
+      kind: 'exited' as const,
+      exitCode,
+    })),
+    Bun.sleep(timeoutMs).then(() => ({
+      kind: 'timed-out' as const,
+    })),
+  ])
+
+  let timedOut = false
+  let exitCode: number
+  if (exitOutcome.kind === 'exited') {
+    exitCode = exitOutcome.exitCode
+  } else {
+    timedOut = true
+    await terminateProcessTree(proc.pid).catch(() => {
+      // best-effort cleanup only
+    })
+    void proc.stdout?.cancel().catch(() => {
+      // stream may already be closed
+    })
+    void proc.stderr?.cancel().catch(() => {
+      // stream may already be closed
+    })
+    exitCode = await settleWithin(proc.exited, 124, 250)
+    if (exitCode === 0) {
+      exitCode = 124
+    }
+  }
+
+  const [stdout, stderr] = timedOut
+    ? await Promise.all([
+        settleWithin(stdoutPromise, '', 250),
+        settleWithin(stderrPromise, '', 250),
+      ])
+    : await Promise.all([stdoutPromise, stderrPromise])
+
+  return {
+    stdout,
+    stderr: timedOut ? appendGhTimeoutMessage(stderr, args, timeoutMs) : stderr,
+    exitCode,
+    timedOut,
+  }
 }
 
 async function ghRaw(
@@ -81,19 +162,80 @@ async function ghApiRaw(
   args: string[],
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(['gh', 'api', ...args], {
-    env: buildGhEnv(config),
+  return runBoundedGhCommand(['api', ...qualifyGhApiArgs(args, config)], config)
+}
+
+export function qualifyGhApiArgs(
+  args: string[],
+  config: Pick<AgentConfig, 'repo'>,
+): string[] {
+  if (args.length === 0) return args
+
+  const [endpoint, ...rest] = args
+  if (!shouldQualifyGhApiEndpoint(endpoint)) {
+    return args
+  }
+
+  const normalizedEndpoint = endpoint.replace(/^\/+/, '')
+  return [`repos/${config.repo}/${normalizedEndpoint}`, ...rest]
+}
+
+function shouldQualifyGhApiEndpoint(endpoint: string): boolean {
+  const normalized = endpoint.trim()
+  if (normalized.length === 0) return false
+  if (normalized === 'graphql') return false
+  if (normalized.startsWith('repos/')) return false
+  if (normalized.startsWith('/repos/')) return false
+  if (normalized.startsWith('https://')) return false
+  if (normalized.startsWith('http://')) return false
+  return true
+}
+
+function appendGhTimeoutMessage(stderr: string, args: string[], timeoutMs: number): string {
+  const base = stderr.trimEnd()
+  const message = `gh ${args.join(' ')} timed out after ${timeoutMs}ms`
+  return base.length > 0 ? `${base}\n${message}` : message
+}
+
+async function terminateProcessTree(rootPid: number): Promise<void> {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) {
+    return
+  }
+
+  try {
+    process.kill(-rootPid, 'SIGKILL')
+    return
+  } catch {
+    // fall back to best-effort child + parent cleanup
+  }
+
+  await killDirectChildProcesses(rootPid)
+
+  try {
+    process.kill(rootPid, 'SIGKILL')
+  } catch {
+    // process may already be gone
+  }
+}
+
+async function killDirectChildProcesses(parentPid: number): Promise<void> {
+  const proc = Bun.spawn(['pkill', '-KILL', '-P', String(parentPid)], {
     stdout: 'pipe',
     stderr: 'pipe',
   })
 
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-  const exitCode = await proc.exited
+  await settleWithin(proc.exited, 0, 250)
+}
 
-  return { stdout, stderr, exitCode }
+async function settleWithin<T>(
+  promise: Promise<T>,
+  fallback: T,
+  timeoutMs: number,
+): Promise<T> {
+  return Promise.race([
+    promise,
+    Bun.sleep(timeoutMs).then(() => fallback),
+  ])
 }
 
 export class GhError extends Error {

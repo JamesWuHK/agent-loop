@@ -690,18 +690,26 @@ async function runValidationCommand(
   command: string,
   config: AgentConfig,
 ): Promise<IssueBranchValidationCommandResult> {
+  const env: Record<string, string> = {
+    ...process.env,
+    PWD: worktreePath,
+    GIT_AUTHOR_NAME: config.git.authorName,
+    GIT_COMMITTER_NAME: config.git.authorName,
+    GIT_AUTHOR_EMAIL: config.git.authorEmail,
+    GIT_COMMITTER_EMAIL: config.git.authorEmail,
+  }
+
+  if (config.pat) {
+    env.GH_TOKEN = config.pat
+    env.GITHUB_TOKEN = config.pat
+  } else {
+    delete env.GH_TOKEN
+    delete env.GITHUB_TOKEN
+  }
+
   const proc = Bun.spawn(['/bin/sh', '-c', command], {
     cwd: worktreePath,
-    env: {
-      ...process.env,
-      PWD: worktreePath,
-      GIT_AUTHOR_NAME: config.git.authorName,
-      GIT_COMMITTER_NAME: config.git.authorName,
-      GIT_AUTHOR_EMAIL: config.git.authorEmail,
-      GIT_COMMITTER_EMAIL: config.git.authorEmail,
-      GH_TOKEN: config.pat,
-      GITHUB_TOKEN: config.pat,
-    },
+    env,
     stdout: 'pipe',
     stderr: 'pipe',
   })

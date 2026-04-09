@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  buildGhEnv,
   commentOnIssue,
   listIssueComments,
+  runBoundedGhCommand,
   type AgentConfig,
   type IssueComment,
 } from '@agent/shared'
@@ -87,18 +87,7 @@ async function runGhCommand(
   args: string[],
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(['gh', ...args], {
-    env: buildGhEnv(config),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-  const exitCode = await proc.exited
-
+  const { stdout, stderr, exitCode } = await runBoundedGhCommand(args, config)
   return { stdout, stderr, exitCode }
 }
 
