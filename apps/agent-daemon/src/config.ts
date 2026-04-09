@@ -147,8 +147,9 @@ export function buildConfig(
     filePat: fileConfig.pat,
     ghAuthToken: options.ghAuthToken,
   })
+  const hasGhCliSession = pat.length === 0 && canUseGhCliSession(homeDir)
 
-  if (!pat) {
+  if (!pat && !hasGhCliSession) {
     throw new ConfigError(
       'No GitHub PAT found. Set GITHUB_TOKEN/GH_TOKEN, configure pat in ~/.agent-loop/config.json, or log in with gh auth login',
     )
@@ -293,16 +294,12 @@ function resolveGitHubToken(input: {
   filePat?: string
   ghAuthToken?: string | null
 }): string {
-  const explicitGhAuthToken = input.ghAuthToken === undefined
-    ? readGhAuthToken()
-    : input.ghAuthToken
-
   const candidates = [
     input.cliPat,
     input.env.GITHUB_TOKEN,
     input.env.GH_TOKEN,
     input.filePat,
-    explicitGhAuthToken,
+    input.ghAuthToken,
   ]
 
   for (const candidate of candidates) {
@@ -313,15 +310,17 @@ function resolveGitHubToken(input: {
   return ''
 }
 
-function readGhAuthToken(): string | null {
+function canUseGhCliSession(homeDir = homedir()): boolean {
+  const hostsPath = resolve(homeDir, '.config', 'gh', 'hosts.yml')
+  if (!existsSync(hostsPath)) {
+    return false
+  }
+
   try {
-    const token = execFileSync('gh', ['auth', 'token'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-    return normalizeNonEmptyString(token)
+    const hostsFile = readFileSync(hostsPath, 'utf-8')
+    return hostsFile.includes('github.com:')
   } catch {
-    return null
+    return false
   }
 }
 

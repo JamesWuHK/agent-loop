@@ -19,6 +19,7 @@ import {
   parseManagedLeaseComments,
   parseGhApiErrorMessage,
   parseMergePrResponse,
+  qualifyGhApiArgs,
   shouldClearIssueAssigneesForStateLabel,
 } from './github-api'
 import { ISSUE_LABELS } from './types'
@@ -36,6 +37,42 @@ describe('buildGhEnv', () => {
     expect(env.NO_PROXY).toBe('127.0.0.1,localhost')
     expect(env.GH_TOKEN).toBe('ghp_test')
     expect(env.GITHUB_TOKEN).toBe('ghp_test')
+  })
+
+  test('leaves GitHub auth env unset when no PAT is configured', () => {
+    process.env.GH_TOKEN = 'stale-token'
+    process.env.GITHUB_TOKEN = 'stale-token'
+
+    const env = buildGhEnv({ pat: '' })
+
+    expect(env.GH_TOKEN).toBeUndefined()
+    expect(env.GITHUB_TOKEN).toBeUndefined()
+  })
+})
+
+describe('qualifyGhApiArgs', () => {
+  test('prefixes repo-relative REST endpoints with repos/<owner>/<repo>/', () => {
+    expect(qualifyGhApiArgs(
+      ['issues/334/comments'],
+      { repo: 'JamesWuHK/digital-employee' },
+    )).toEqual(['repos/JamesWuHK/digital-employee/issues/334/comments'])
+
+    expect(qualifyGhApiArgs(
+      ['pulls?state=open&page=1'],
+      { repo: 'JamesWuHK/digital-employee' },
+    )).toEqual(['repos/JamesWuHK/digital-employee/pulls?state=open&page=1'])
+  })
+
+  test('leaves graphql and fully-qualified endpoints unchanged', () => {
+    expect(qualifyGhApiArgs(
+      ['graphql', '--raw-field', 'query=query { viewer { login } }'],
+      { repo: 'JamesWuHK/digital-employee' },
+    )).toEqual(['graphql', '--raw-field', 'query=query { viewer { login } }'])
+
+    expect(qualifyGhApiArgs(
+      ['repos/JamesWuHK/digital-employee/issues/334/comments'],
+      { repo: 'JamesWuHK/digital-employee' },
+    )).toEqual(['repos/JamesWuHK/digital-employee/issues/334/comments'])
   })
 })
 

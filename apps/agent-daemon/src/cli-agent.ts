@@ -587,8 +587,13 @@ function buildCleanEnv(config: AgentConfig): Record<string, string> {
   cleanEnv.GIT_COMMITTER_NAME = config.git.authorName
   cleanEnv.GIT_AUTHOR_EMAIL = config.git.authorEmail
   cleanEnv.GIT_COMMITTER_EMAIL = config.git.authorEmail
-  cleanEnv.GH_TOKEN = config.pat
-  cleanEnv.GITHUB_TOKEN = config.pat
+  if (config.pat) {
+    cleanEnv.GH_TOKEN = config.pat
+    cleanEnv.GITHUB_TOKEN = config.pat
+  } else {
+    delete cleanEnv.GH_TOKEN
+    delete cleanEnv.GITHUB_TOKEN
+  }
 
   if (!cleanEnv.OPENAI_API_KEY && cleanEnv.SUB2API_KEY) {
     cleanEnv.OPENAI_API_KEY = cleanEnv.SUB2API_KEY

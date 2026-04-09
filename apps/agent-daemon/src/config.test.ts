@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import type { AgentConfig } from '@agent/shared'
 import { buildConfig, ConfigError, resolveLocalDaemonIdentity } from './config'
@@ -297,6 +300,35 @@ describe('buildConfig', () => {
     )
 
     expect(config.pat).toBe('gho-from-gh-cli')
+  })
+
+  test('accepts a logged-in gh CLI session when no PAT is configured elsewhere', () => {
+    const homeDir = mkdtempSync(resolve(tmpdir(), 'agent-loop-gh-session-'))
+    const ghConfigDir = resolve(homeDir, '.config', 'gh')
+    mkdirSync(ghConfigDir, { recursive: true })
+    writeFileSync(resolve(ghConfigDir, 'hosts.yml'), [
+      'github.com:',
+      '    users:',
+      '        JamesWuHK:',
+      '    user: JamesWuHK',
+      '',
+    ].join('\n'))
+
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          pat: undefined,
+        },
+        repoConfig: {},
+        env: {},
+        homeDir,
+        ghAuthToken: null,
+      },
+    )
+
+    expect(config.pat).toBe('')
   })
 
   test('raises a config error when no PAT or gh auth token is available', () => {
