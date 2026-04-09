@@ -417,6 +417,37 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     expect(getNextAutomatedPrReviewAttempt(comments)).toBe(3)
   })
 
+  test('resumes standalone review when the latest human-needed comment is an execution failure', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+## Automated review still failing — human intervention required
+
+- Attempt: 2
+- Merge ready: no
+- Reason: Review failed: ReviewAgentExecutionError: Agent exited with code 1: unexpected status 502 Bad Gateway`,
+      },
+    ]
+
+    expect(canResumeAutomatedPrReview(comments, 3)).toBe(false)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', null)).toBe(true)
+  })
+
+  test('does not resume standalone review when the latest human-needed comment is invalid output', () => {
+    const comments = [
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+## Automated review still failing — human intervention required
+
+- Attempt: 2
+- Merge ready: no
+- Reason: Review output failed validation: missing mustFix`,
+      },
+    ]
+
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', null)).toBe(false)
+  })
+
   test('restarts standalone review when a terminal human-needed PR has a new head commit', () => {
     const comments = [
       {
