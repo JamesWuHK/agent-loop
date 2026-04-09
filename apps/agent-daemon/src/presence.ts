@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   runBoundedGhCommand,
   type AgentConfig,
+  type AgentLoopUpgradeStatusKind,
   type IssueComment,
 } from '@agent/shared'
 
@@ -26,6 +27,13 @@ export interface ManagedDaemonPresence {
   activeLeaseCount: number
   activeWorktreeCount: number
   effectiveActiveTasks: number
+  agentLoopVersion: string
+  agentLoopRevision: string | null
+  upgradeStatus: AgentLoopUpgradeStatusKind
+  safeToUpgradeNow: boolean
+  latestVersion: string | null
+  latestRevision: string | null
+  upgradeCheckedAt: string | null
 }
 
 export interface ManagedDaemonPresenceComment extends IssueComment {
@@ -36,6 +44,13 @@ export interface ManagedDaemonPresenceRuntimeState {
   activeLeaseCount: number
   activeWorktreeCount: number
   effectiveActiveTasks: number
+  agentLoopVersion: string
+  agentLoopRevision: string | null
+  upgradeStatus: AgentLoopUpgradeStatusKind
+  safeToUpgradeNow: boolean
+  latestVersion: string | null
+  latestRevision: string | null
+  upgradeCheckedAt: string | null
 }
 
 export interface PresenceApiAdapter {
@@ -209,7 +224,12 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Metrics port: ${presence.metricsPort}
 - Worktrees: ${presence.activeWorktreeCount}
 - Leases: ${presence.activeLeaseCount}
-- Effective tasks: ${presence.effectiveActiveTasks}`
+- Effective tasks: ${presence.effectiveActiveTasks}
+- Agent Loop: v${presence.agentLoopVersion} (${presence.agentLoopRevision ?? 'unknown'})
+- Upgrade status: ${presence.upgradeStatus}
+- Safe to upgrade now: ${presence.safeToUpgradeNow ? 'yes' : 'no'}
+- Latest known version: ${presence.latestVersion ?? 'unknown'}
+- Latest known revision: ${presence.latestRevision ?? 'unknown'}`
 }
 
 export function extractManagedDaemonPresenceComment(body: string): ManagedDaemonPresence | null {
@@ -231,6 +251,30 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
     const activeLeaseCount = parsed.activeLeaseCount as number
     const activeWorktreeCount = parsed.activeWorktreeCount as number
     const effectiveActiveTasks = parsed.effectiveActiveTasks as number
+    const agentLoopVersion = typeof parsed.agentLoopVersion === 'string' && parsed.agentLoopVersion.trim().length > 0
+      ? parsed.agentLoopVersion
+      : 'unknown'
+    const agentLoopRevision = typeof parsed.agentLoopRevision === 'string' && parsed.agentLoopRevision.trim().length > 0
+      ? parsed.agentLoopRevision
+      : null
+    const upgradeStatus = parsed.upgradeStatus === 'disabled'
+      || parsed.upgradeStatus === 'unknown'
+      || parsed.upgradeStatus === 'up-to-date'
+      || parsed.upgradeStatus === 'upgrade-available'
+      || parsed.upgradeStatus === 'ahead-of-channel'
+      || parsed.upgradeStatus === 'error'
+      ? parsed.upgradeStatus
+      : 'unknown'
+    const safeToUpgradeNow = parsed.safeToUpgradeNow === true
+    const latestVersion = typeof parsed.latestVersion === 'string' && parsed.latestVersion.trim().length > 0
+      ? parsed.latestVersion
+      : null
+    const latestRevision = typeof parsed.latestRevision === 'string' && parsed.latestRevision.trim().length > 0
+      ? parsed.latestRevision
+      : null
+    const upgradeCheckedAt = typeof parsed.upgradeCheckedAt === 'string' && parsed.upgradeCheckedAt.trim().length > 0
+      ? parsed.upgradeCheckedAt
+      : null
 
     return {
       repo: parsed.repo,
@@ -245,6 +289,13 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       activeLeaseCount,
       activeWorktreeCount,
       effectiveActiveTasks,
+      agentLoopVersion,
+      agentLoopRevision,
+      upgradeStatus,
+      safeToUpgradeNow,
+      latestVersion,
+      latestRevision,
+      upgradeCheckedAt,
     }
   } catch {
     return null
@@ -536,6 +587,13 @@ export class ManagedDaemonPresencePublisher {
       activeLeaseCount: runtime.activeLeaseCount,
       activeWorktreeCount: runtime.activeWorktreeCount,
       effectiveActiveTasks: runtime.effectiveActiveTasks,
+      agentLoopVersion: runtime.agentLoopVersion,
+      agentLoopRevision: runtime.agentLoopRevision,
+      upgradeStatus: runtime.upgradeStatus,
+      safeToUpgradeNow: runtime.safeToUpgradeNow,
+      latestVersion: runtime.latestVersion,
+      latestRevision: runtime.latestRevision,
+      upgradeCheckedAt: runtime.upgradeCheckedAt,
     }
   }
 

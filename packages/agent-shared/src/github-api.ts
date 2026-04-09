@@ -251,6 +251,9 @@ export function buildDirectGitHubApiRequest(
 ): DirectGitHubApiRequest {
   const qualifiedArgs = qualifyGhApiArgs(args, config)
   const [endpoint, ...rest] = qualifiedArgs
+  if (!endpoint) {
+    throw new Error('missing GitHub API endpoint')
+  }
   const fieldArgs: string[] = []
   let inputPath: string | null = null
   let method: DirectGitHubApiRequest['method'] = 'GET'
@@ -505,9 +508,8 @@ export function qualifyGhApiArgs(
   args: string[],
   config: Pick<AgentConfig, 'repo'>,
 ): string[] {
-  if (args.length === 0) return args
-
   const [endpoint, ...rest] = args
+  if (!endpoint) return args
   if (!shouldQualifyGhApiEndpoint(endpoint)) {
     return args
   }

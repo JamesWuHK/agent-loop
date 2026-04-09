@@ -92,6 +92,13 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
     activeLeaseCount: 0,
     activeWorktreeCount: 0,
     effectiveActiveTasks: 0,
+    agentLoopVersion: '0.1.0',
+    agentLoopRevision: 'abcdef1234567890',
+    upgradeStatus: 'up-to-date',
+    safeToUpgradeNow: true,
+    latestVersion: '0.1.0',
+    latestRevision: 'abcdef1234567890',
+    upgradeCheckedAt: '2026-04-05T09:10:00.000Z',
     source: 'github',
     ...overrides,
   }

@@ -4,6 +4,8 @@ import { resolve } from 'node:path'
 import type {
   ActiveLeaseRuntimeDetail,
   AgentConfig,
+  AgentLoopBuildMetadata,
+  AgentLoopUpgradeMetadata,
   AgentIssue,
   BlockedIssueResumeRuntimeDetail,
   ClaimEvent,
@@ -67,6 +69,13 @@ import {
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresenceRuntimeState,
 } from './presence'
+import {
+  abbreviateRevision,
+  checkForAgentLoopUpgrade,
+  createInitialAgentLoopUpgradeMetadata,
+  resolveAgentLoopBuildMetadata,
+  resolveAgentLoopUpgradePolicy,
+} from './version'
 
 export interface HealthServerConfig {
   host: string
@@ -230,6 +239,10 @@ export class AgentDaemon {
   private failedIssueResumeAttempts = new Map<number, number>()
   private failedIssueResumeCooldownUntil = new Map<number, number>()
   private startupRecoveryPending = true
+  private readonly agentLoopBuild: AgentLoopBuildMetadata
+  private agentLoopUpgrade: AgentLoopUpgradeMetadata
+  private upgradeCheckPromise: Promise<void> | null = null
+  private lastUpgradeReminderAt: number | null = null
 
   constructor(
     private config: AgentConfig,
@@ -241,6 +254,12 @@ export class AgentDaemon {
       this.healthServerConfig = { ...this.healthServerConfig, ...healthServerConfig }
     }
     this.metricsPort = metricsPort ?? 9090
+    this.agentLoopBuild = resolveAgentLoopBuildMetadata()
+    this.agentLoopUpgrade = createInitialAgentLoopUpgradeMetadata(
+      this.config,
+      this.agentLoopBuild,
+      this.isSafeToUpgradeNow(),
+    )
   }
 
   private buildLeaseKey(scope: ManagedLeaseScope, targetNumber: number): string {
@@ -521,7 +540,7 @@ export class AgentDaemon {
   }
 
   async start(): Promise<void> {
-    this.logger.log(`[daemon] starting agent-loop v0.1.0`)
+    this.logger.log(`[daemon] starting agent-loop v${this.agentLoopBuild.version} (${abbreviateRevision(this.agentLoopBuild.revision)})`)
     this.logger.log(`[daemon] machineId: ${this.config.machineId}`)
     this.logger.log(`[daemon] repo: ${this.config.repo}`)
     this.logger.log(
@@ -567,6 +586,8 @@ export class AgentDaemon {
     } catch (error) {
       this.logger.warn(`[daemon] failed to start GitHub presence heartbeat: ${formatDaemonError(error)}`)
     }
+
+    void this.maybeRefreshAgentLoopUpgradeStatus(true)
 
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
@@ -645,7 +666,7 @@ export class AgentDaemon {
           return Response.json({
             status: this.running ? 'running' : 'stopped',
             mode: 'agent-loop-daemon',
-            version: '0.1.0',
+            version: this.agentLoopBuild.version,
             ...this.getStatus(),
           })
         }
@@ -738,6 +759,10 @@ export class AgentDaemon {
         primary: this.config.agent.primary,
         fallback: this.config.agent.fallback,
       },
+      agentLoop: {
+        ...this.agentLoopBuild,
+      },
+      upgrade: this.buildUpgradeStatus(),
       endpoints: {
         health: {
           host: this.healthServerConfig.host,
@@ -804,6 +829,7 @@ export class AgentDaemon {
 
   private async runPollCycleSafely(): Promise<void> {
     const startedAt = Date.now()
+    void this.maybeRefreshAgentLoopUpgradeStatus()
 
     try {
       const startupResult = await this.runStartupMaintenanceIfNeeded()
@@ -2793,11 +2819,93 @@ export class AgentDaemon {
 
   private readPresenceRuntimeState(): ManagedDaemonPresenceRuntimeState {
     const runtime = this.buildRuntimeStatus()
+    const upgrade = this.buildUpgradeStatus()
     return {
       activeLeaseCount: runtime.activeLeaseCount,
       activeWorktreeCount: this.activeWorktrees.size,
       effectiveActiveTasks: runtime.effectiveActiveTasks,
+      agentLoopVersion: this.agentLoopBuild.version,
+      agentLoopRevision: this.agentLoopBuild.revision,
+      upgradeStatus: upgrade.status,
+      safeToUpgradeNow: upgrade.safeToUpgradeNow,
+      latestVersion: upgrade.latestVersion,
+      latestRevision: upgrade.latestRevision,
+      upgradeCheckedAt: upgrade.checkedAt,
     }
+  }
+
+  private buildUpgradeStatus(): AgentLoopUpgradeMetadata {
+    return {
+      ...this.agentLoopUpgrade,
+      safeToUpgradeNow: this.isSafeToUpgradeNow(),
+    }
+  }
+
+  private isSafeToUpgradeNow(): boolean {
+    return (
+      !this.startupRecoveryPending
+      && this.activeWorktrees.size === 0
+      && this.activeLeaseReaders.size === 0
+      && this.activeIssueProcesses.size === 0
+      && this.inFlightIssueProcesses.size === 0
+      && this.activePrReviews.size === 0
+      && this.inFlightPrTasks.size === 0
+    )
+  }
+
+  private async maybeRefreshAgentLoopUpgradeStatus(force = false): Promise<void> {
+    const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const lastCheckedAt = this.agentLoopUpgrade.checkedAt
+      ? Date.parse(this.agentLoopUpgrade.checkedAt)
+      : Number.NaN
+
+    if (
+      !force
+      && Number.isFinite(lastCheckedAt)
+      && lastCheckedAt + policy.checkIntervalMs > Date.now()
+    ) {
+      return
+    }
+
+    if (this.upgradeCheckPromise) {
+      return this.upgradeCheckPromise
+    }
+
+    this.upgradeCheckPromise = (async () => {
+      const next = await checkForAgentLoopUpgrade(
+        this.config,
+        this.agentLoopBuild,
+        this.isSafeToUpgradeNow(),
+      )
+      this.agentLoopUpgrade = next
+      this.maybeLogAgentLoopUpgradeNotice(next)
+    })().finally(() => {
+      this.upgradeCheckPromise = null
+    })
+
+    return this.upgradeCheckPromise
+  }
+
+  private maybeLogAgentLoopUpgradeNotice(upgrade: AgentLoopUpgradeMetadata): void {
+    if (upgrade.status !== 'upgrade-available') {
+      return
+    }
+
+    const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const now = Date.now()
+    if (
+      this.lastUpgradeReminderAt !== null
+      && this.lastUpgradeReminderAt + policy.reminderIntervalMs > now
+    ) {
+      return
+    }
+
+    this.lastUpgradeReminderAt = now
+    const local = `v${this.agentLoopBuild.version}@${abbreviateRevision(this.agentLoopBuild.revision)}`
+    const latest = `v${upgrade.latestVersion ?? 'unknown'}@${abbreviateRevision(upgrade.latestRevision)}`
+    this.logger.warn(
+      `[daemon] agent-loop upgrade available on ${upgrade.channel ?? 'default'}: ${local} -> ${latest}; ${upgrade.safeToUpgradeNow ? 'safe to upgrade now' : 'defer upgrade until this daemon is idle'}`,
+    )
   }
 
   private syncRuntimeMetrics(): void {

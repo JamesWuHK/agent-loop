@@ -383,6 +383,8 @@ function inspectLocalLaunchdRuntime(runtime: LocalRuntimeDiagnostic): LocalLaunc
 }
 
 export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): string {
+  const warnings = snapshot.health ? buildDoctorWarnings(snapshot) : snapshot.warnings
+
   if (!snapshot.ok || !snapshot.health) {
     return [
       'daemon: unreachable',
@@ -409,6 +411,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   const startupRecoveryDeferredCount = health.runtime.startupRecoveryDeferredCount ?? 0
   const lines = [
     `daemon: ${health.status} v${health.version} (${health.mode})`,
+    `agent-loop: repo ${health.agentLoop?.repo ?? 'unknown'} | revision ${formatRevision(health.agentLoop?.revision ?? null)} | upgrade ${formatUpgradeSummary(health.upgrade)}`,
     `repo: ${health.repo}`,
     `project: ${health.project.profile} | agents: ${health.agent.primary} -> ${health.agent.fallback ?? 'none'}`,
     `daemon: ${health.machineId} / ${health.daemonInstanceId}`,
@@ -456,14 +459,16 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     lines.push(`pr blockers: ${formatGitHubPrBlockersInlineSummary(snapshot.githubAudit.prBlockers)}`)
   }
 
-  if (snapshot.warnings.length > 0) {
-    lines.push(`warnings: ${snapshot.warnings.join(' | ')}`)
+  if (warnings.length > 0) {
+    lines.push(`warnings: ${warnings.join(' | ')}`)
   }
 
   return lines.join('\n')
 }
 
 export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): string {
+  const warnings = snapshot.health ? buildDoctorWarnings(snapshot) : snapshot.warnings
+
   if (!snapshot.ok || !snapshot.health) {
     const gitHubAuditLines = snapshot.githubAudit === null
       ? ['not available']
@@ -506,7 +511,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
       ...gitHubAuditLines,
       '',
       'Warnings',
-      ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
+      ...(warnings.length > 0 ? warnings.map((warning) => `- ${warning}`) : ['none']),
       '',
       'Next checks',
       ...buildOfflineDoctorNextChecks(snapshot),
@@ -641,7 +646,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     ...gitHubAuditLines,
     '',
     'Warnings',
-    ...(snapshot.warnings.length > 0 ? snapshot.warnings.map((warning) => `- ${warning}`) : ['none']),
+    ...(warnings.length > 0 ? warnings.map((warning) => `- ${warning}`) : ['none']),
   ].join('\n')
 }
 
@@ -924,6 +929,16 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if ((snapshot.health.runtime.startupRecoveryDeferredCount ?? 0) > 0) {
     warnings.push(`startup recovery has been deferred ${snapshot.health.runtime.startupRecoveryDeferredCount} time(s) by transient GitHub/network errors`)
+  }
+  if (snapshot.health.upgrade?.status === 'upgrade-available') {
+    warnings.push(
+      snapshot.health.upgrade.safeToUpgradeNow
+        ? 'agent-loop upgrade available and this daemon is currently idle enough to restart safely'
+        : 'agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work',
+    )
+  }
+  if (snapshot.health.upgrade?.status === 'error' && snapshot.health.upgrade.message) {
+    warnings.push(`agent-loop upgrade check failed: ${snapshot.health.upgrade.message}`)
   }
   if (snapshot.health.runtime.supervisor === 'direct') {
     warnings.push('daemon is running in direct mode; closing the current terminal/session will stop it')
@@ -1329,6 +1344,18 @@ function formatBlockedIssueResumeIdentity(
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function formatRevision(revision: string | null): string {
+  return revision ? revision.slice(0, 7) : 'unknown'
+}
+
+function formatUpgradeSummary(upgrade: DaemonHealthPayload['upgrade'] | undefined): string {
+  if (!upgrade) {
+    return 'unavailable'
+  }
+
+  return `${upgrade.status} | latest v${upgrade.latestVersion ?? 'unknown'}@${formatRevision(upgrade.latestRevision)} | checked ${upgrade.checkedAt ?? 'never'} | safe now ${formatBoolean(upgrade.safeToUpgradeNow)}`
 }
 
 function inferIssueStateFromLabels(labels: string[]): string {

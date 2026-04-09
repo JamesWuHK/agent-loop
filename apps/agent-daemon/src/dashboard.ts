@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  type AgentLoopUpgradeStatusKind,
   PR_REVIEW_LABELS,
   getActiveManagedLease,
   listIssueComments,
@@ -115,6 +116,13 @@ export interface DashboardPresenceView {
   activeLeaseCount: number
   activeWorktreeCount: number
   effectiveActiveTasks: number
+  agentLoopVersion: string
+  agentLoopRevision: string | null
+  upgradeStatus: AgentLoopUpgradeStatusKind
+  safeToUpgradeNow: boolean
+  latestVersion: string | null
+  latestRevision: string | null
+  upgradeCheckedAt: string | null
   source: 'github'
 }
 
@@ -821,6 +829,13 @@ function mergeDashboardLease(machine: DashboardMachineCard, lease: DashboardLeas
 function mergeDashboardPresence(machine: DashboardMachineCard, presence: DashboardPresenceView): void {
   if (!machine.presence) {
     machine.presence = presence
+    if (presence.upgradeStatus === 'upgrade-available') {
+      mergeDashboardWarnings(machine, [
+        presence.safeToUpgradeNow
+          ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
+          : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
+      ])
+    }
     return
   }
 
@@ -962,6 +977,13 @@ function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): Dash
     activeLeaseCount: comment.presence.activeLeaseCount,
     activeWorktreeCount: comment.presence.activeWorktreeCount,
     effectiveActiveTasks: comment.presence.effectiveActiveTasks,
+    agentLoopVersion: comment.presence.agentLoopVersion,
+    agentLoopRevision: comment.presence.agentLoopRevision,
+    upgradeStatus: comment.presence.upgradeStatus,
+    safeToUpgradeNow: comment.presence.safeToUpgradeNow,
+    latestVersion: comment.presence.latestVersion,
+    latestRevision: comment.presence.latestRevision,
+    upgradeCheckedAt: comment.presence.upgradeCheckedAt,
     source: 'github',
   }
 }
@@ -1826,6 +1848,9 @@ function renderPresenceItem(presence) {
     presence.heartbeatAgeSeconds === null ? null : '心跳 ' + presence.heartbeatAgeSeconds + ' 秒',
     presence.expiresInSeconds === null ? null : 'TTL ' + presence.expiresInSeconds + ' 秒',
   ].filter(Boolean).join(' | ');
+  const upgradeHint = presence.upgradeStatus === 'upgrade-available'
+    ? (presence.safeToUpgradeNow ? '可安全升级' : '待空闲后升级')
+    : null;
 
   return [
     '<div class="lease-item">',
@@ -1833,10 +1858,14 @@ function renderPresenceItem(presence) {
     '<div class="chip-row" style="margin-top:8px">',
     renderChip(localizePresenceStatus(presence.status), presence.status === 'busy' ? 'accent' : 'gold'),
     renderChip(shortDaemonId(presence.daemonInstanceId), ''),
+    renderChip('v' + presence.agentLoopVersion, ''),
+    renderChip(presence.upgradeStatus, presence.upgradeStatus === 'upgrade-available' ? 'danger' : ''),
     renderChip('工作树 ' + presence.activeWorktreeCount, ''),
     renderChip('租约 ' + presence.activeLeaseCount, ''),
     '</div>',
     '<div class="muted" style="margin-top:8px">启动于 ' + escapeHtml(formatTimestamp(presence.startedAt)) + '</div>',
+    '<div class="muted" style="margin-top:6px">revision ' + escapeHtml(shortDaemonId(presence.agentLoopRevision || 'unknown')) + (presence.latestVersion ? ' | latest v' + escapeHtml(String(presence.latestVersion)) : '') + '</div>',
+    upgradeHint ? '<div class="muted" style="margin-top:6px">' + escapeHtml(upgradeHint) + '</div>' : '',
     timing ? '<div class="muted" style="margin-top:6px">' + escapeHtml(timing) + '</div>' : '',
     '</div>',
   ].join('');

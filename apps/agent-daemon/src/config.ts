@@ -8,6 +8,10 @@ import type {
   ProjectPromptContext,
   ProjectPromptGuidanceOverrides,
 } from '@agent/shared'
+import {
+  DEFAULT_AGENT_LOOP_UPGRADE_CHECK_INTERVAL_MS,
+  DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
+} from './version'
 
 const CONFIG_DIR = resolve(homedir(), '.agent-loop')
 const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
@@ -213,6 +217,19 @@ export function buildConfig(
       defaultBranch: repoConfig.git?.defaultBranch ?? fileConfig.git?.defaultBranch ?? 'main',
       authorName: fileConfig.git?.authorName ?? 'agent-loop',
       authorEmail: fileConfig.git?.authorEmail ?? 'agent-loop@local',
+    },
+    upgrade: {
+      enabled: fileConfig.upgrade?.enabled !== false,
+      repo: normalizeNonEmptyString(fileConfig.upgrade?.repo),
+      channel: normalizeNonEmptyString(fileConfig.upgrade?.channel),
+      checkIntervalMs: normalizePositiveInteger(
+        fileConfig.upgrade?.checkIntervalMs,
+        DEFAULT_AGENT_LOOP_UPGRADE_CHECK_INTERVAL_MS,
+      ),
+      reminderIntervalMs: normalizePositiveInteger(
+        fileConfig.upgrade?.reminderIntervalMs,
+        DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
+      ),
     },
   }
 

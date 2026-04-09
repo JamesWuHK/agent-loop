@@ -369,6 +369,54 @@ agent-loop --doctor
 - `agent-loop --runtimes` 可以让新打开的 Codex/终端会话快速找回当前机器上正在运行的 daemon 实例
 - `launchd` service 会把 plist 写到 `~/Library/LaunchAgents/`，并沿用同一套 runtime record/log 路径，方便和 detached 模式统一排障
 
+## Agent Loop Upgrade Channel
+
+agent-loop 现在内置了一套“非打断式升级提醒”机制，目标是让参与开发的多台机器尽量在空闲窗口升级，而不是在执行 issue 过程中被打断。
+
+默认行为：
+
+- daemon 会后台检查 `agent-loop` 自身仓库的目标 channel 最新版本与 commit
+- `--status` / `--doctor` / `/health` 会显示本机 `agent-loop` 的本地版本、revision、upgrade 状态
+- GitHub presence 心跳也会上报这些字段，所以 dashboard 和远端机器视图能直接看出谁落后、谁现在空闲可升
+- 只有在 daemon 当前没有 startup recovery、active worktree、active lease、in-flight issue/review task 时，才会把 `safeToUpgradeNow` 标记为 `true`
+
+默认策略可以在 `~/.agent-loop/config.json` 里配置：
+
+```json
+{
+  "upgrade": {
+    "enabled": true,
+    "repo": "JamesWuHK/agent-loop",
+    "channel": "master",
+    "checkIntervalMs": 900000,
+    "reminderIntervalMs": 3600000
+  }
+}
+```
+
+字段说明：
+
+- `enabled`：是否启用升级检查
+- `repo`：用于比较版本的 agent-loop 仓库 slug；不填时默认取当前 agent-loop 仓库 origin
+- `channel`：跟踪的分支；不填时默认取目标仓库 default branch
+- `checkIntervalMs`：后台检查最新版本的最小间隔
+- `reminderIntervalMs`：升级提醒日志的冷却时间，避免刷屏
+
+版本发布时，统一用下面的命令 bump 根版本号，避免手改：
+
+```bash
+bun run agent:version:bump patch
+bun run agent:version:bump minor
+bun run agent:version:bump major
+bun run agent:version:bump set 0.2.0
+```
+
+建议的升级执行原则：
+
+- 当 `upgrade.status=upgrade-available` 且 `safeToUpgradeNow=true` 时，再重启 daemon 升级
+- 如果 daemon 仍在处理 worktree / lease / review，先继续消费，等它回到 idle 再升
+- 多机部署时，以 dashboard / presence 里显示的升级状态为准，不要求所有机器同时强制重启
+
 ## Key Design Decisions
 
 - **GitHub = coordination layer**: no shared DB; labels + assignee + comments are the state machine
