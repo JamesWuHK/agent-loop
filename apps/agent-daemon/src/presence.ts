@@ -2,8 +2,6 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  commentOnIssue,
-  listIssueComments,
   runBoundedGhCommand,
   type AgentConfig,
   type IssueComment,
@@ -58,6 +56,13 @@ interface RawIssueRecord {
   number?: unknown
 }
 
+interface RawIssueCommentRecord {
+  id?: unknown
+  body?: unknown
+  created_at?: unknown
+  updated_at?: unknown
+}
+
 function buildManagedDaemonPresenceRegistryBody(repo: string): string {
   return `${MANAGED_DAEMON_PRESENCE_ISSUE_MARKER}
 ## Agent Loop Presence Registry
@@ -89,6 +94,92 @@ async function runGhCommand(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { stdout, stderr, exitCode } = await runBoundedGhCommand(args, config)
   return { stdout, stderr, exitCode }
+}
+
+async function runGitHubRestRequest(
+  path: string,
+  config: AgentConfig,
+  options: {
+    method?: 'GET' | 'POST' | 'PATCH'
+    body?: Record<string, unknown>
+  } = {},
+): Promise<string> {
+  const normalizedPath = path.replace(/^\/+/, '')
+  const method = options.method ?? 'GET'
+
+  if (!config.pat) {
+    const args = ['api', normalizedPath]
+    if (method !== 'GET') {
+      args.push('-X', method)
+    }
+    if (options.body) {
+      return withTempJsonFile(
+        'agent-loop-presence-rest-fallback',
+        options.body,
+        async (payloadPath) => {
+          const response = await runGhCommand([...args, '--input', payloadPath], config)
+          if (response.exitCode !== 0) {
+            throw new Error(`gh api ${normalizedPath} failed (exit ${response.exitCode}): ${response.stderr}`)
+          }
+          return response.stdout
+        },
+      )
+    }
+
+    const response = await runGhCommand(args, config)
+    if (response.exitCode !== 0) {
+      throw new Error(`gh api ${normalizedPath} failed (exit ${response.exitCode}): ${response.stderr}`)
+    }
+    return response.stdout
+  }
+
+  const response = await fetch(`https://api.github.com/${normalizedPath}`, {
+    method,
+    headers: {
+      Authorization: `token ${config.pat}`,
+      Accept: 'application/vnd.github+json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  })
+  const text = await response.text()
+  if (!response.ok) {
+    throw new Error(`GitHub REST ${method} ${normalizedPath} failed (HTTP ${response.status}): ${parseGitHubRestErrorMessage(text)}`)
+  }
+  return text
+}
+
+function parseGitHubRestErrorMessage(body: string): string {
+  const trimmed = body.trim()
+  if (!trimmed) {
+    return 'empty response body'
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { message?: unknown }
+    if (typeof parsed.message === 'string' && parsed.message.trim().length > 0) {
+      return parsed.message
+    }
+  } catch {
+    // fall back to raw response text
+  }
+
+  return trimmed
+}
+
+function mapIssueCommentRecord(
+  comment: RawIssueCommentRecord,
+  fallback: {
+    commentId?: number
+    body?: string
+  } = {},
+): IssueComment {
+  return {
+    commentId: typeof comment.id === 'number' ? comment.id : (fallback.commentId ?? 0),
+    body: typeof comment.body === 'string' ? comment.body : (fallback.body ?? ''),
+    createdAt: typeof comment.created_at === 'string' ? comment.created_at : '',
+    updatedAt: typeof comment.updated_at === 'string' ? comment.updated_at : '',
+  }
 }
 
 function isPresenceRegistryIssue(issue: RawIssueListItem): boolean {
@@ -227,16 +318,11 @@ export async function findManagedDaemonPresenceIssue(
   config: AgentConfig,
 ): Promise<number | null> {
   for (let page = 1; ; page += 1) {
-    const response = await runGhCommand([
-      'api',
+    const stdout = await runGitHubRestRequest(
       `repos/${config.repo}/issues?state=open&per_page=100&page=${page}`,
-    ], config)
-
-    if (response.exitCode !== 0) {
-      throw new Error(`gh api repos/${config.repo}/issues failed (exit ${response.exitCode}): ${response.stderr}`)
-    }
-
-    const issues = JSON.parse(response.stdout) as RawIssueListItem[]
+      config,
+    )
+    const issues = JSON.parse(stdout) as RawIssueListItem[]
     const match = extractManagedDaemonPresenceIssueNumber(issues)
     if (match !== null) return match
 
@@ -249,27 +335,18 @@ export async function findManagedDaemonPresenceIssue(
 async function createManagedDaemonPresenceIssue(
   config: AgentConfig,
 ): Promise<number> {
-  const response = await withTempJsonFile(
-    'agent-loop-presence-issue',
+  const stdout = await runGitHubRestRequest(
+    `repos/${config.repo}/issues`,
+    config,
     {
+      method: 'POST',
+      body: {
       title: MANAGED_DAEMON_PRESENCE_ISSUE_TITLE,
       body: buildManagedDaemonPresenceRegistryBody(config.repo),
     },
-    async (path) => runGhCommand([
-      'api',
-      `repos/${config.repo}/issues`,
-      '-X',
-      'POST',
-      '--input',
-      path,
-    ], config),
+    },
   )
-
-  if (response.exitCode !== 0) {
-    throw new Error(`gh api repos/${config.repo}/issues failed (exit ${response.exitCode}): ${response.stderr}`)
-  }
-
-  const issue = JSON.parse(response.stdout) as RawIssueRecord
+  const issue = JSON.parse(stdout) as RawIssueRecord
   if (typeof issue.number !== 'number') {
     throw new Error('Presence issue create response did not include an issue number')
   }
@@ -290,36 +367,65 @@ export async function updateIssueComment(
   body: string,
   config: AgentConfig,
 ): Promise<IssueComment> {
-  const response = await withTempJsonFile(
-    'agent-loop-issue-comment-update',
-    { body },
-    async (path) => runGhCommand([
-      'api',
-      `repos/${config.repo}/issues/comments/${commentId}`,
-      '-X',
-      'PATCH',
-      '--input',
-      path,
-    ], config),
+  const stdout = await runGitHubRestRequest(
+    `repos/${config.repo}/issues/comments/${commentId}`,
+    config,
+    {
+      method: 'PATCH',
+      body: { body },
+    },
   )
 
-  if (response.exitCode !== 0) {
-    throw new Error(`gh api issues/comments/${commentId} failed (exit ${response.exitCode}): ${response.stderr}`)
+  const comment = JSON.parse(stdout) as RawIssueCommentRecord
+  return mapIssueCommentRecord(comment, { commentId, body })
+}
+
+export async function listIssueComments(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<IssueComment[]> {
+  if (!config.pat) {
+    const response = await runGhCommand([
+      'api',
+      `repos/${config.repo}/issues/${issueNumber}/comments`,
+      '--paginate',
+    ], config)
+    if (response.exitCode !== 0) {
+      throw new Error(`gh api repos/${config.repo}/issues/${issueNumber}/comments failed (exit ${response.exitCode}): ${response.stderr}`)
+    }
+    const comments = JSON.parse(response.stdout) as RawIssueCommentRecord[]
+    return comments.map((comment) => mapIssueCommentRecord(comment))
   }
 
-  const comment = JSON.parse(response.stdout) as {
-    id?: unknown
-    body?: unknown
-    created_at?: unknown
-    updated_at?: unknown
+  const comments: IssueComment[] = []
+  for (let page = 1; ; page += 1) {
+    const stdout = await runGitHubRestRequest(
+      `repos/${config.repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+      config,
+    )
+    const batch = JSON.parse(stdout) as RawIssueCommentRecord[]
+    comments.push(...batch.map((comment) => mapIssueCommentRecord(comment)))
+    if (batch.length < 100) {
+      return comments
+    }
   }
+}
 
-  return {
-    commentId: typeof comment.id === 'number' ? comment.id : commentId,
-    body: typeof comment.body === 'string' ? comment.body : body,
-    createdAt: typeof comment.created_at === 'string' ? comment.created_at : '',
-    updatedAt: typeof comment.updated_at === 'string' ? comment.updated_at : '',
-  }
+export async function commentOnIssue(
+  issueNumber: number,
+  body: string,
+  config: AgentConfig,
+): Promise<IssueComment> {
+  const stdout = await runGitHubRestRequest(
+    `repos/${config.repo}/issues/${issueNumber}/comments`,
+    config,
+    {
+      method: 'POST',
+      body: { body },
+    },
+  )
+  const comment = JSON.parse(stdout) as RawIssueCommentRecord
+  return mapIssueCommentRecord(comment, { body })
 }
 
 const defaultPresenceApi: PresenceApiAdapter = {
