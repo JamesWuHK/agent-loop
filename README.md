@@ -427,7 +427,7 @@ agent-loop 现在内置了一套“多机感知 + 空闲自升级”机制，目
     "channel": "master",
     "checkIntervalMs": 900000,
     "reminderIntervalMs": 3600000,
-    "autoApply": true
+    "autoApply": false
   }
 }
 ```
@@ -439,7 +439,7 @@ agent-loop 现在内置了一套“多机感知 + 空闲自升级”机制，目
 - `channel`：跟踪的分支；不填时默认取目标仓库 default branch
 - `checkIntervalMs`：后台检查最新版本的最小间隔
 - `reminderIntervalMs`：升级提醒日志的冷却时间，避免刷屏
-- `autoApply`：当本机 daemon 已空闲且本轮 poll 最终没有领到新活时，是否自动执行升级并重启托管 runtime
+- `autoApply`：默认关闭；当本机 daemon 已空闲且本轮 poll 最终没有领到新活时，是否自动执行升级并重启托管 runtime
 
 版本发布时，统一用下面的命令 bump 根版本号，避免手改：
 

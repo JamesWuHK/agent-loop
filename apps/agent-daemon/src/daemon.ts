@@ -95,6 +95,11 @@ export interface HealthServerConfig {
   port: number
 }
 
+export interface StopDaemonOptions {
+  preserveActiveIssueStates?: boolean
+  reason?: string
+}
+
 export const HEALTH_PATH = '/health'
 export const WAKE_PATH = '/wake'
 export const DEFAULT_HEALTH_SERVER_PORT = 9310
@@ -822,8 +827,10 @@ export class AgentDaemon {
     this.logger.log(`[daemon] health server listening on http://${host}:${port} (pid: ${process.pid})`)
   }
 
-  async stop(): Promise<void> {
-    this.logger.log(`[daemon] shutting down...`)
+  async stop(options: StopDaemonOptions = {}): Promise<void> {
+    const shutdownReason = options.reason?.trim() ?? ''
+    const shutdownContext = shutdownReason.length > 0 ? ` (${shutdownReason})` : ''
+    this.logger.log(`[daemon] shutting down${shutdownContext}...`)
     this.shutdownRequested = true
 
     if (this.pollTimeoutId !== null) {
@@ -867,24 +874,32 @@ export class AgentDaemon {
       }
     }
 
-    // Mark all active worktrees as stale
-    for (const [issueNumber] of this.activeWorktrees) {
-      try {
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.STALE,
-          ISSUE_LABELS.WORKING,
-          {
-            event: 'stale',
-            machine: this.config.machineId,
-            ts: new Date().toISOString(),
-            reason: 'daemon-shutdown',
-          },
-          this.config,
+    if (options.preserveActiveIssueStates) {
+      if (this.activeWorktrees.size > 0) {
+        this.logger.log(
+          `[daemon] preserving ${this.activeWorktrees.size} active issue state(s) across intentional restart${shutdownContext}`,
         )
-        this.logger.log(`[daemon] marked issue #${issueNumber} as stale`)
-      } catch (err) {
-        this.logger.error(`[daemon] failed to mark #${issueNumber} as stale:`, err)
+      }
+    } else {
+      // Mark all active worktrees as stale
+      for (const [issueNumber] of this.activeWorktrees) {
+        try {
+          await transitionIssueState(
+            issueNumber,
+            ISSUE_LABELS.STALE,
+            ISSUE_LABELS.WORKING,
+            {
+              event: 'stale',
+              machine: this.config.machineId,
+              ts: new Date().toISOString(),
+              reason: 'daemon-shutdown',
+            },
+            this.config,
+          )
+          this.logger.log(`[daemon] marked issue #${issueNumber} as stale`)
+        } catch (err) {
+          this.logger.error(`[daemon] failed to mark #${issueNumber} as stale:`, err)
+        }
       }
     }
 
@@ -3273,14 +3288,16 @@ export class AgentDaemon {
       this.logger.log('[daemon] agent-loop auto-upgrade found no local revision change after pull; keeping current daemon process')
       return false
     }
-
     const fromRevision = abbreviateRevision(result.previousRevision)
     const toRevision = abbreviateRevision(result.nextRevision)
     this.logger.log(
       `[daemon] upgraded local agent-loop checkout on ${result.currentBranch}: v${this.agentLoopBuild.version}@${fromRevision} -> v${upgrade.latestVersion ?? this.agentLoopBuild.version}@${toRevision}`,
     )
 
-    await this.stop()
+    await this.stop({
+      preserveActiveIssueStates: true,
+      reason: 'agent-loop-auto-upgrade',
+    })
 
     if (supervisor === 'detached') {
       const pid = this.spawnDetachedUpgradeSuccessor()

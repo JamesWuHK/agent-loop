@@ -293,6 +293,29 @@ describe('agent-loop upgrade coordination', () => {
     expect(immediateReason as string | null).toBe('agent-loop-upgrade')
   })
 
+  test('preserves active issue state markers across intentional upgrade restarts', async () => {
+    const daemon = createTestDaemon()
+
+    ;(daemon as any).running = true
+    ;(daemon as any).activeWorktrees.set(321, {
+      path: '/tmp/worktrees/issue-321-codex-dev',
+      issueNumber: 321,
+      machineId: 'codex-dev',
+      branch: 'agent/321/codex-dev',
+      state: 'active',
+      createdAt: '2026-04-11T11:30:00.000Z',
+    })
+
+    await daemon.stop({
+      preserveActiveIssueStates: true,
+      reason: 'agent-loop-auto-upgrade',
+    })
+
+    expect((daemon as any).running).toBe(false)
+    expect((daemon as any).shutdownRequested).toBe(true)
+    expect((daemon as any).activeWorktrees.has(321)).toBe(true)
+  })
+
   test('attempts automatic self-upgrade after an idle no-issues poll when enabled', async () => {
     const daemon = createTestDaemon({
       upgrade: {
