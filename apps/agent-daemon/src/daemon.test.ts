@@ -246,6 +246,57 @@ describe('wake queue integration', () => {
   })
 })
 
+describe('agent-loop auto upgrade', () => {
+  test('attempts automatic self-upgrade after an idle no-issues poll when enabled', async () => {
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: true,
+      },
+    })
+
+    let scheduledPolls = 0
+    let autoUpgradeAttempts = 0
+
+    ;(daemon as any).running = true
+    ;(daemon as any).startupRecoveryPending = false
+    ;(daemon as any).maybeStartResumableIssue = async () => false
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => false
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeRefreshAgentLoopUpgradeStatus = async () => {}
+    ;(daemon as any).performAutomaticAgentLoopUpgrade = async () => {
+      autoUpgradeAttempts += 1
+      return true
+    }
+    ;(daemon as any).scheduleNextPoll = () => {
+      scheduledPolls += 1
+    }
+    ;(daemon as any).agentLoopUpgrade = {
+      enabled: true,
+      repo: 'JamesWuHK/agent-loop',
+      channel: 'master',
+      checkedAt: '2026-04-11T11:00:00.000Z',
+      status: 'upgrade-available',
+      latestVersion: '0.1.1',
+      latestRevision: '2222222222222222222222222222222222222222',
+      latestCommitAt: '2026-04-11T10:59:30.000Z',
+      safeToUpgradeNow: true,
+      message: 'channel master is newer: local v0.1.0, latest v0.1.1',
+    }
+
+    await (daemon as any).pollCycle()
+
+    expect(autoUpgradeAttempts).toBe(1)
+    expect(scheduledPolls).toBe(0)
+  })
+})
+
 describe('daemon merge recovery helpers', () => {
   test('skips duplicate claimed comments when a freshly claimed issue enters working', () => {
     expect(buildIssueWorkingTransitionEvent('fresh-claim', 'codex-dev')).toBeNull()

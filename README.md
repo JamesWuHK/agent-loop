@@ -425,7 +425,8 @@ agent-loop 现在内置了一套“非打断式升级提醒”机制，目标是
     "repo": "JamesWuHK/agent-loop",
     "channel": "master",
     "checkIntervalMs": 900000,
-    "reminderIntervalMs": 3600000
+    "reminderIntervalMs": 3600000,
+    "autoApply": true
   }
 }
 ```
@@ -437,6 +438,7 @@ agent-loop 现在内置了一套“非打断式升级提醒”机制，目标是
 - `channel`：跟踪的分支；不填时默认取目标仓库 default branch
 - `checkIntervalMs`：后台检查最新版本的最小间隔
 - `reminderIntervalMs`：升级提醒日志的冷却时间，避免刷屏
+- `autoApply`：当本机 daemon 空闲且当前 poll 轮次也没有领到新活时，是否自动执行升级并重启托管 runtime
 
 版本发布时，统一用下面的命令 bump 根版本号，避免手改：
 
@@ -452,6 +454,19 @@ bun run agent:version:bump set 0.2.0
 - 当 `upgrade.status=upgrade-available` 且 `safeToUpgradeNow=true` 时，再重启 daemon 升级
 - 如果 daemon 仍在处理 worktree / lease / review，先继续消费，等它回到 idle 再升
 - 多机部署时，以 dashboard / presence 里显示的升级状态为准，不要求所有机器同时强制重启
+
+如果把 `upgrade.autoApply=true` 打开，daemon 会在满足 `safeToUpgradeNow=true` 且本轮 poll 最终没有启动任何新任务时，自动执行下面的本地升级流程：
+
+- 在本地 `agent-loop` checkout 上执行 `git pull --ff-only origin <channel>`
+- 执行 `bun install --frozen-lockfile`
+- `detached` runtime 会自举拉起新版后台进程，再退出旧进程
+- `launchd` runtime 会优雅退出，让 launchd 自动拉起新版
+
+保守限制：
+
+- 只对托管 runtime 生效；`direct` 模式仍保持提醒，不会擅自接管你当前终端
+- 本地 `agent-loop` checkout 有未提交改动时不会自动升级
+- 当前 checkout 分支必须和配置的 `channel` 一致，避免开发分支被自动切回稳定分支
 
 ## Key Design Decisions
 

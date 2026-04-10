@@ -13,6 +13,7 @@ export const DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS = 60 * 60 * 1000
 
 const AGENT_LOOP_REPO_ROOT = resolve(import.meta.dir, '../../..')
 const AGENT_LOOP_PACKAGE_JSON_PATH = resolve(AGENT_LOOP_REPO_ROOT, 'package.json')
+const AUTO_UPGRADE_IGNORED_LOCAL_PATH_PREFIXES = ['.runtime/'] as const
 
 interface GitHubRepoRecord {
   default_branch?: unknown
@@ -42,6 +43,25 @@ interface VersionFileRecord {
 interface ResolvedUpgradeTarget {
   repo: string
   channel: string
+}
+
+export interface AgentLoopLocalCommandResult {
+  stdout: string
+  stderr: string
+}
+
+export interface AgentLoopLocalUpgradeDependencies {
+  runCommand: (
+    command: string,
+    args: string[],
+    options?: {
+      cwd?: string
+    },
+  ) => AgentLoopLocalCommandResult
+}
+
+const DEFAULT_AGENT_LOOP_LOCAL_UPGRADE_DEPENDENCIES: AgentLoopLocalUpgradeDependencies = {
+  runCommand: runLocalCommand,
 }
 
 export function resolveAgentLoopBuildMetadata(): AgentLoopBuildMetadata {
@@ -132,6 +152,7 @@ export function resolveAgentLoopUpgradePolicy(
   channel: string | null
   checkIntervalMs: number
   reminderIntervalMs: number
+  autoApply: boolean
 } {
   return {
     enabled: config.upgrade?.enabled !== false,
@@ -145,6 +166,92 @@ export function resolveAgentLoopUpgradePolicy(
       config.upgrade?.reminderIntervalMs,
       DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
     ),
+    autoApply: config.upgrade?.autoApply === true,
+  }
+}
+
+export function listLocalAgentLoopUpgradeDirtyPaths(
+  porcelainStatusOutput: string,
+): string[] {
+  return porcelainStatusOutput
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length >= 4)
+    .flatMap((line) => {
+      const pathSpec = line.slice(3).trim()
+      return pathSpec.includes(' -> ')
+        ? pathSpec.split(' -> ').map((part) => part.trim()).filter(Boolean)
+        : [pathSpec]
+    })
+    .filter((path) => !isIgnoredAutoUpgradeDirtyPath(path))
+}
+
+export function applyAgentLoopUpgradeToLocalCheckout(
+  input: {
+    build: AgentLoopBuildMetadata
+    upgrade: Pick<AgentLoopUpgradeMetadata, 'channel' | 'repo'>
+  },
+  deps: AgentLoopLocalUpgradeDependencies = DEFAULT_AGENT_LOOP_LOCAL_UPGRADE_DEPENDENCIES,
+): {
+  currentBranch: string
+  previousRevision: string | null
+  nextRevision: string | null
+  changed: boolean
+} {
+  if (!input.build.repo || !input.upgrade.repo || input.build.repo !== input.upgrade.repo) {
+    throw new Error(
+      `local agent-loop origin ${input.build.repo ?? 'unknown'} does not match upgrade repo ${input.upgrade.repo ?? 'unknown'}`,
+    )
+  }
+
+  const channel = normalizeOptionalString(input.upgrade.channel)
+  if (!channel) {
+    throw new Error('agent-loop auto-upgrade requires a resolved channel name')
+  }
+
+  const dirtyPaths = listLocalAgentLoopUpgradeDirtyPaths(
+    deps.runCommand('git', ['status', '--porcelain', '--untracked-files=all'], {
+      cwd: AGENT_LOOP_REPO_ROOT,
+    }).stdout,
+  )
+  if (dirtyPaths.length > 0) {
+    throw new Error(`agent-loop checkout has local changes: ${dirtyPaths.join(', ')}`)
+  }
+
+  const currentBranch = deps.runCommand('git', ['branch', '--show-current'], {
+    cwd: AGENT_LOOP_REPO_ROOT,
+  }).stdout.trim()
+  if (!currentBranch) {
+    throw new Error('agent-loop auto-upgrade requires a checked-out local branch')
+  }
+  if (currentBranch !== channel) {
+    throw new Error(`agent-loop auto-upgrade requires current branch ${channel}, found ${currentBranch}`)
+  }
+
+  const previousRevision = normalizeOptionalString(
+    deps.runCommand('git', ['rev-parse', 'HEAD'], {
+      cwd: AGENT_LOOP_REPO_ROOT,
+    }).stdout,
+  )
+
+  deps.runCommand('git', ['pull', '--ff-only', 'origin', channel], {
+    cwd: AGENT_LOOP_REPO_ROOT,
+  })
+  deps.runCommand(process.execPath, ['install', '--frozen-lockfile'], {
+    cwd: AGENT_LOOP_REPO_ROOT,
+  })
+
+  const nextRevision = normalizeOptionalString(
+    deps.runCommand('git', ['rev-parse', 'HEAD'], {
+      cwd: AGENT_LOOP_REPO_ROOT,
+    }).stdout,
+  )
+
+  return {
+    currentBranch,
+    previousRevision,
+    nextRevision,
+    changed: previousRevision !== nextRevision,
   }
 }
 
@@ -349,6 +456,40 @@ function parseGitHubErrorMessage(body: string): string {
   }
 
   return trimmed
+}
+
+function isIgnoredAutoUpgradeDirtyPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^"\.\//, '').replace(/^\.\//, '')
+  return AUTO_UPGRADE_IGNORED_LOCAL_PATH_PREFIXES.some((prefix) => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix))
+}
+
+function runLocalCommand(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string
+  } = {},
+): AgentLoopLocalCommandResult {
+  try {
+    return {
+      stdout: execFileSync(command, args, {
+        cwd: options.cwd,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+      stderr: '',
+    }
+  } catch (error) {
+    const stdout = error instanceof Error && 'stdout' in error && typeof error.stdout === 'string'
+      ? error.stdout
+      : ''
+    const stderr = error instanceof Error && 'stderr' in error && typeof error.stderr === 'string'
+      ? error.stderr
+      : error instanceof Error
+        ? error.message
+        : String(error)
+    throw new Error(`${command} ${args.join(' ')} failed: ${(stderr || stdout).trim() || 'unknown command failure'}`)
+  }
 }
 
 function parseVersionParts(version: string): number[] {
