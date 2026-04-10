@@ -458,40 +458,6 @@ function parseGitHubErrorMessage(body: string): string {
   return trimmed
 }
 
-function isIgnoredAutoUpgradeDirtyPath(path: string): boolean {
-  const normalized = path.replace(/\\/g, '/').replace(/^"\.\//, '').replace(/^\.\//, '')
-  return AUTO_UPGRADE_IGNORED_LOCAL_PATH_PREFIXES.some((prefix) => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix))
-}
-
-function runLocalCommand(
-  command: string,
-  args: string[],
-  options: {
-    cwd?: string
-  } = {},
-): AgentLoopLocalCommandResult {
-  try {
-    return {
-      stdout: execFileSync(command, args, {
-        cwd: options.cwd,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }),
-      stderr: '',
-    }
-  } catch (error) {
-    const stdout = error instanceof Error && 'stdout' in error && typeof error.stdout === 'string'
-      ? error.stdout
-      : ''
-    const stderr = error instanceof Error && 'stderr' in error && typeof error.stderr === 'string'
-      ? error.stderr
-      : error instanceof Error
-        ? error.message
-        : String(error)
-    throw new Error(`${command} ${args.join(' ')} failed: ${(stderr || stdout).trim() || 'unknown command failure'}`)
-  }
-}
-
 function parseVersionParts(version: string): number[] {
   const [core] = version.trim().split('-')
   return (core ?? version)
