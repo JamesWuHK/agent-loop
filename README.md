@@ -83,6 +83,18 @@ agent-loop --wake-pr 456
 ~/.agent-loop/wake-queue/{owner-repo}/{machineId}.jsonl
 ```
 
+如果你已经在目标开发机上装了 GitHub self-hosted runner，现在仓库里的 [`agent-daemon-wake.yml`](.github/workflows/agent-daemon-wake.yml) 和 [`agent-ready-gate.yml`](.github/workflows/agent-ready-gate.yml) 会把 issue / PR / manual dispatch 事件翻译成这类本地 wake request：
+
+- `agent:ready` 的 issue 会先过 ready-gate，再 wake 本机 daemon，避免校验和认领抢跑
+- PR 的 `opened / reopened / ready_for_review / synchronize / review label changes` 会直接 wake
+- `workflow_dispatch` 支持手工发 `now / issue / pr` 三类 wake
+
+接线方式很简单：
+
+1. 在目标机器上把这个仓库注册成 GitHub self-hosted runner，并带上 `agent-loop` label
+2. 确保这台机器已经通过 `agent-loop --join-project` 或 `--start` 跑着本地 daemon
+3. workflow 会在 runner 上执行 `bun apps/agent-daemon/src/index.ts --wake-from-github-event --repo <owner/repo>`，把 GitHub 事件落成 durable wake queue，再 best-effort 通知本地 daemon
+
 - 离线回放评估：daemon 行为变更可以用 fixture 目录做 replay/eval，而不是只靠手工盯日志。
 
 ```bash

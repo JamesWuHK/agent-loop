@@ -8,6 +8,7 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeWakeCommand,
+  executeWakeRequest,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveWakeCommand,
@@ -125,6 +126,51 @@ describe('index helpers', () => {
     expect(readFileSync(queuePath, 'utf-8')).toBe(
       '{"kind":"pr","prNumber":381,"reason":"cli:wake-pr","sourceEvent":"cli","dedupeKey":"cli:wake-pr:381","requestedAt":"2026-04-11T09:40:00.000Z"}\n',
     )
+  })
+
+  test('persists prebuilt github-event wake requests through the shared wake execution path', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-wake-request-test-'))
+
+    const result = await executeWakeRequest({
+      request: {
+        kind: 'issue',
+        issueNumber: 374,
+        reason: 'issues.labeled:agent:ready',
+        sourceEvent: 'issues.labeled',
+        dedupeKey: 'issues:labeled:374:agent:ready',
+        requestedAt: '2026-04-11T09:41:00.000Z',
+      },
+      healthPort: 9311,
+    }, {
+      resolveLocalDaemonIdentity: () => ({
+        repo: 'JamesWuHK/agent-loop',
+        machineId: 'macbook-pro-b',
+      }),
+      buildWakeQueuePath: (input) => buildWakeQueuePath({
+        ...input,
+        homeDir,
+      }),
+      appendWakeRequest,
+      notifyLocalWake: async () => undefined,
+      now: () => new Date('2026-04-11T09:41:00.000Z'),
+    })
+
+    expect(result).toEqual({
+      queuePath: buildWakeQueuePath({
+        repo: 'JamesWuHK/agent-loop',
+        machineId: 'macbook-pro-b',
+        homeDir,
+      }),
+      request: {
+        kind: 'issue',
+        issueNumber: 374,
+        reason: 'issues.labeled:agent:ready',
+        sourceEvent: 'issues.labeled',
+        dedupeKey: 'issues:labeled:374:agent:ready',
+        requestedAt: '2026-04-11T09:41:00.000Z',
+      },
+      notified: true,
+    })
   })
 
   test('preserves existing managed runtime launch args and replaces explicit overrides', () => {

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   appendWakeRequest,
   buildWakeQueuePath,
+  coalesceWakeRequests,
   drainWakeQueue,
   hasPendingWakeRequests,
   resolveWakeQueueHomeDirFromWorktreesBase,
@@ -125,6 +126,50 @@ describe('wake queue helpers', () => {
     expect(result.invalidEntries[0]?.lineNumber).toBe(2)
     expect(result.invalidEntries[1]?.lineNumber).toBe(3)
     expect(existsSync(queuePath)).toBe(false)
+  })
+
+  test('coalesces duplicate wake requests by dedupe key while preserving the latest payload', () => {
+    expect(coalesceWakeRequests([
+      {
+        kind: 'issue',
+        issueNumber: 42,
+        reason: 'issues.edited',
+        sourceEvent: 'issues.edited',
+        dedupeKey: 'issues:edited:42',
+        requestedAt: '2026-04-11T10:00:00.000Z',
+      },
+      {
+        kind: 'now',
+        reason: 'workflow_dispatch',
+        sourceEvent: 'workflow_dispatch',
+        dedupeKey: 'workflow_dispatch:now',
+        requestedAt: '2026-04-11T10:01:00.000Z',
+      },
+      {
+        kind: 'issue',
+        issueNumber: 42,
+        reason: 'issues.edited',
+        sourceEvent: 'issues.edited',
+        dedupeKey: 'issues:edited:42',
+        requestedAt: '2026-04-11T10:02:00.000Z',
+      },
+    ])).toEqual([
+      {
+        kind: 'now',
+        reason: 'workflow_dispatch',
+        sourceEvent: 'workflow_dispatch',
+        dedupeKey: 'workflow_dispatch:now',
+        requestedAt: '2026-04-11T10:01:00.000Z',
+      },
+      {
+        kind: 'issue',
+        issueNumber: 42,
+        reason: 'issues.edited',
+        sourceEvent: 'issues.edited',
+        dedupeKey: 'issues:edited:42',
+        requestedAt: '2026-04-11T10:02:00.000Z',
+      },
+    ])
   })
 
   test('derives the wake queue home dir from supported worktree layouts', () => {

@@ -106,10 +106,27 @@ export function drainWakeQueue(queuePath: string): DrainWakeQueueResult {
   }
 
   try {
-    return parseWakeQueueContent(content)
+    const parsed = parseWakeQueueContent(content)
+    return {
+      ...parsed,
+      requests: coalesceWakeRequests(parsed.requests),
+    }
   } finally {
     unlinkSync(drainingPath)
   }
+}
+
+export function coalesceWakeRequests(requests: WakeRequest[]): WakeRequest[] {
+  const deduped = new Map<string, WakeRequest>()
+
+  for (const request of requests) {
+    if (deduped.has(request.dedupeKey)) {
+      deduped.delete(request.dedupeKey)
+    }
+    deduped.set(request.dedupeKey, request)
+  }
+
+  return Array.from(deduped.values())
 }
 
 function beginWakeQueueDrain(queuePath: string): string | null {
