@@ -46,6 +46,7 @@ import {
   shouldResumeManagedIssue,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
+import { buildManagedDaemonUpgradeAnnouncementComment } from './presence'
 import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
 
 function createTestDaemon(
@@ -246,7 +247,52 @@ describe('wake queue integration', () => {
   })
 })
 
-describe('agent-loop auto upgrade', () => {
+describe('agent-loop upgrade coordination', () => {
+  test('refreshes upgrade status and wakes the scheduler when a newer remote upgrade announcement appears', async () => {
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: false,
+      },
+    })
+
+    let refreshes = 0
+    let immediateReason: string | null = null
+
+    ;(daemon as any).ensurePresenceIssueNumber = async () => 500
+    ;(daemon as any).listPresenceRegistryComments = async () => [{
+      commentId: 11,
+      body: buildManagedDaemonUpgradeAnnouncementComment({
+        repo: 'JamesWuHK/digital-employee',
+        channel: 'master',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T09:10:00.000Z',
+        announcedAt: '2026-04-11T09:10:10.000Z',
+        announcedByMachineId: 'machine-b',
+        announcedByDaemonInstanceId: 'daemon-b',
+      }),
+      createdAt: '2026-04-11T09:10:10.000Z',
+      updatedAt: '2026-04-11T09:10:10.000Z',
+    }]
+    ;(daemon as any).maybeRefreshAgentLoopUpgradeStatus = async (force: boolean) => {
+      refreshes += force ? 1 : 0
+    }
+    ;(daemon as any).requestImmediateReconcile = (reason: string) => {
+      immediateReason = reason
+    }
+
+    await (daemon as any).maybeProcessRemoteUpgradeAnnouncement()
+    await (daemon as any).maybeProcessRemoteUpgradeAnnouncement()
+
+    expect(refreshes).toBe(1)
+    expect(immediateReason as string | null).toBe('agent-loop-upgrade')
+  })
+
   test('attempts automatic self-upgrade after an idle no-issues poll when enabled', async () => {
     const daemon = createTestDaemon({
       upgrade: {
@@ -283,11 +329,11 @@ describe('agent-loop auto upgrade', () => {
       channel: 'master',
       checkedAt: '2026-04-11T11:00:00.000Z',
       status: 'upgrade-available',
-      latestVersion: '0.1.1',
+      latestVersion: '0.1.2',
       latestRevision: '2222222222222222222222222222222222222222',
       latestCommitAt: '2026-04-11T10:59:30.000Z',
       safeToUpgradeNow: true,
-      message: 'channel master is newer: local v0.1.0, latest v0.1.1',
+      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
     }
 
     await (daemon as any).pollCycle()
