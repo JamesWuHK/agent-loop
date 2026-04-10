@@ -42,6 +42,8 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
   'retry_merge_failed',
 ] as const
 const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
+const WAKE_KIND_ORDER = ['now', 'issue', 'pr'] as const
+const WAKE_OUTCOME_ORDER = ['queued', 'started_work', 'no_match', 'allow_fallback'] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
 const RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS = 5 * 60
 export interface DaemonHealthPayload extends DaemonStatus {
@@ -52,6 +54,7 @@ export interface DaemonHealthPayload extends DaemonStatus {
 
 export interface DaemonMetricSummary {
   polls: Record<string, number>
+  wakeRequests: Record<string, Record<string, number>>
   prReviews: Record<string, Record<string, number>>
   autoFixes: Record<string, number>
   mergeRecovery: Record<string, number>
@@ -60,6 +63,7 @@ export interface DaemonMetricSummary {
   workerIdleTimeouts: Record<string, number>
   lastTransientLoopErrorAgeSeconds: number | null
   nextPollDelaySeconds: number | null
+  pendingWakeRequests: number | null
   activeLeases: number | null
   leaseHeartbeatAgeSeconds: number | null
   stalledWorkers: number | null
@@ -447,7 +451,10 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   if (snapshot.metrics) {
     const reviewTotals = summarizeReviewOutcomes(snapshot.metrics.prReviews)
     lines.push(
-      `outcomes: polls ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)} | reviews ${formatOrderedMap(reviewTotals, REVIEW_OUTCOME_ORDER)} | auto-fix ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)} | merge ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
+      `outcomes: polls ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)} | wake ${formatOrderedMap(summarizeWakeOutcomes(snapshot.metrics.wakeRequests), WAKE_OUTCOME_ORDER)} | reviews ${formatOrderedMap(reviewTotals, REVIEW_OUTCOME_ORDER)} | auto-fix ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)} | merge ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
+    )
+    lines.push(
+      `wake: pending ${snapshot.metrics.pendingWakeRequests ?? 0} | ${formatWakeRequestSummary(snapshot.metrics.wakeRequests)}`,
     )
   } else if (snapshot.metricsError) {
     lines.push(`metrics: unavailable (${snapshot.metricsError})`)
@@ -558,6 +565,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         `transient-loop-errors: ${formatInlineKeyValue(snapshot.metrics.transientLoopErrors) || 'none'}`,
         `last-transient-loop-error-age-seconds: ${snapshot.metrics.lastTransientLoopErrorAgeSeconds ?? 0}`,
         `next-poll-delay-seconds: ${snapshot.metrics.nextPollDelaySeconds ?? 0}`,
+        `pending-wake-requests: ${snapshot.metrics.pendingWakeRequests ?? 0}`,
+        `wake-requests: ${formatWakeRequestSummary(snapshot.metrics.wakeRequests)}`,
         `lease-conflicts: ${snapshot.metrics.leaseConflicts}`,
         `worker-idle-timeouts: ${formatInlineKeyValue(snapshot.metrics.workerIdleTimeouts) || 'none'}`,
         `blocked-issue-resumes: ${snapshot.metrics.blockedIssueResumes ?? 0}`,
@@ -774,6 +783,7 @@ function parsePortFromUrl(url: string): number | null {
 export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary {
   const summary: DaemonMetricSummary = {
     polls: {},
+    wakeRequests: {},
     prReviews: {},
     autoFixes: {},
     mergeRecovery: {},
@@ -782,6 +792,7 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     workerIdleTimeouts: {},
     lastTransientLoopErrorAgeSeconds: null,
     nextPollDelaySeconds: null,
+    pendingWakeRequests: null,
     activeLeases: null,
     leaseHeartbeatAgeSeconds: null,
     stalledWorkers: null,
@@ -797,6 +808,11 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     switch (sample.name) {
       case 'agent_loop_polls_total':
         if (sample.labels.result) summary.polls[sample.labels.result] = sample.value
+        break
+      case 'agent_loop_wake_requests_total':
+        if (!sample.labels.kind || !sample.labels.outcome) break
+        summary.wakeRequests[sample.labels.kind] ??= {}
+        summary.wakeRequests[sample.labels.kind]![sample.labels.outcome] = sample.value
         break
       case 'agent_loop_pr_reviews_total':
         if (!sample.labels.stage || !sample.labels.outcome) break
@@ -825,6 +841,9 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_next_poll_delay_seconds':
         summary.nextPollDelaySeconds = sample.value
+        break
+      case 'agent_loop_pending_wake_requests':
+        summary.pendingWakeRequests = sample.value
         break
       case 'agent_loop_active_leases':
         summary.activeLeases = sample.value
@@ -1116,6 +1135,20 @@ function summarizeReviewOutcomes(
   return totals
 }
 
+function summarizeWakeOutcomes(
+  wakeRequests: Record<string, Record<string, number>>,
+): Record<string, number> {
+  const totals: Record<string, number> = {}
+
+  for (const outcomeMap of Object.values(wakeRequests)) {
+    for (const [outcome, value] of Object.entries(outcomeMap)) {
+      totals[outcome] = (totals[outcome] ?? 0) + value
+    }
+  }
+
+  return totals
+}
+
 function buildEndpointUrl(host: string, port: number, path: string): string {
   return `http://${host}:${port}${path}`
 }
@@ -1189,6 +1222,14 @@ function formatRecoveryActionSummary(values: Record<string, Record<string, numbe
   const parts = Object.entries(values).flatMap(([kind, outcomes]) => {
     return Object.entries(outcomes).map(([outcome, count]) => `${kind}/${outcome}=${count}`)
   })
+
+  return parts.join(', ') || 'none'
+}
+
+function formatWakeRequestSummary(values: Record<string, Record<string, number>>): string {
+  const parts = WAKE_KIND_ORDER
+    .filter((kind) => values[kind] !== undefined)
+    .map((kind) => `${kind}[${formatOrderedMap(values[kind] ?? {}, WAKE_OUTCOME_ORDER)}]`)
 
   return parts.join(', ') || 'none'
 }

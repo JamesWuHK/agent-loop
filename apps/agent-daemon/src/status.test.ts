@@ -213,6 +213,10 @@ agent_loop_polls_total{result="success"} 12
 agent_loop_polls_total{result="skipped_concurrency"} 3
 agent_loop_polls_total{result="no_issues"} 4
 agent_loop_polls_total{result="error"} 1
+agent_loop_wake_requests_total{kind="issue",outcome="queued"} 2
+agent_loop_wake_requests_total{kind="issue",outcome="started_work"} 1
+agent_loop_wake_requests_total{kind="pr",outcome="no_match"} 1
+agent_loop_wake_requests_total{kind="now",outcome="allow_fallback"} 1
 agent_loop_pr_reviews_total{stage="initial",outcome="approved"} 2
 agent_loop_pr_reviews_total{stage="post_fix",outcome="rejected"} 1
 agent_loop_pr_reviews_total{stage="merge_refresh",outcome="execution_failed"} 1
@@ -225,6 +229,7 @@ agent_loop_transient_loop_errors_total{kind="startup-recovery"} 1
 agent_loop_transient_loop_errors_total{kind="poll-cycle"} 1
 agent_loop_last_transient_loop_error_age_seconds 15
 agent_loop_next_poll_delay_seconds 5
+agent_loop_pending_wake_requests 2
 agent_loop_worker_idle_timeouts_total{scope="issue-process"} 2
 agent_loop_active_leases 2
 agent_loop_lease_heartbeat_age_seconds 75
@@ -308,6 +313,18 @@ describe('status helpers', () => {
         no_issues: 4,
         error: 1,
       },
+      wakeRequests: {
+        issue: {
+          queued: 2,
+          started_work: 1,
+        },
+        pr: {
+          no_match: 1,
+        },
+        now: {
+          allow_fallback: 1,
+        },
+      },
       prReviews: {
         initial: {
           approved: 2,
@@ -341,6 +358,7 @@ describe('status helpers', () => {
       },
       lastTransientLoopErrorAgeSeconds: 15,
       nextPollDelaySeconds: 5,
+      pendingWakeRequests: 2,
       activeLeases: 2,
       leaseHeartbeatAgeSeconds: 75,
       stalledWorkers: 1,
@@ -402,7 +420,8 @@ describe('status helpers', () => {
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
     expect(report).toContain('launchd: loaded yes | state running | runs 2 | last signal Terminated: 15')
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
-    expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1')
+    expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1 | wake queued=2, started_work=1, no_match=1, allow_fallback=1')
+    expect(report).toContain('wake: pending 2 | now[queued=0, started_work=0, no_match=0, allow_fallback=1], issue[queued=2, started_work=1, no_match=0, allow_fallback=0], pr[queued=0, started_work=0, no_match=1, allow_fallback=0]')
     expect(report).toContain('pr blockers: pr#239<-issue#105 attempt 5 @ 2026-04-06T01:23:45.000Z: The PR breaks the existing approval-bar flow')
     expect(report).toContain('warnings: startup recovery is still pending')
   })
@@ -482,6 +501,8 @@ describe('status helpers', () => {
     expect(report).toContain('GitHub Audit')
     expect(report).toContain('issue-process#77 | state=open | labels=agent:stale | warning=issue-process#77 has an active lease but issue state is stale (expected working)')
     expect(report).toContain('merge-recovery: merged_initial=1')
+    expect(report).toContain('pending-wake-requests: 2')
+    expect(report).toContain('wake-requests: now[queued=0, started_work=0, no_match=0, allow_fallback=1], issue[queued=2, started_work=1, no_match=0, allow_fallback=0], pr[queued=0, started_work=0, no_match=1, allow_fallback=0]')
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('blocked-issue-resumes: 1')
     expect(report).toContain('blocked-issue-resume-age-seconds: 45')
