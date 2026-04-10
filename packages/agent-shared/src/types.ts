@@ -143,6 +143,7 @@ export interface AgentLoopUpgradeConfig {
   channel: string | null
   checkIntervalMs: number
   reminderIntervalMs: number
+  autoApply: boolean
 }
 
 export interface AgentLoopBuildMetadata {

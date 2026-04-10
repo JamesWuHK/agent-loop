@@ -1,5 +1,6 @@
 import { $ } from 'bun'
-import { existsSync, mkdirSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, openSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type {
   ActiveLeaseRuntimeDetail,
@@ -64,7 +65,7 @@ import {
   METRICS_PATH,
   type MetricsServer,
 } from './metrics'
-import { resolveCurrentRuntimeSupervisor } from './background'
+import { resolveCurrentRuntimeSupervisor, sanitizeDaemonBackgroundArgs } from './background'
 import {
   buildWakeQueuePath,
   drainWakeQueue,
@@ -73,10 +74,16 @@ import {
 } from './wake-queue'
 import {
   ManagedDaemonPresencePublisher,
+  buildManagedDaemonUpgradeAnnouncementComment,
+  commentOnIssue as commentOnPresenceIssue,
+  ensureManagedDaemonPresenceIssue,
+  getLatestManagedDaemonUpgradeAnnouncement,
+  listIssueComments as listPresenceIssueComments,
   type ManagedDaemonPresenceRuntimeState,
 } from './presence'
 import {
   abbreviateRevision,
+  applyAgentLoopUpgradeToLocalCheckout,
   checkForAgentLoopUpgrade,
   createInitialAgentLoopUpgradeMetadata,
   resolveAgentLoopBuildMetadata,
@@ -253,6 +260,8 @@ export class AgentDaemon {
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
   private presencePublisher: ManagedDaemonPresencePublisher | null = null
+  private presenceIssueNumber: number | null = null
+  private upgradeAnnouncementCheckIntervalId: ReturnType<typeof setInterval> | null = null
   private inFlightIssueProcesses = new Set<Promise<void>>()
   private inFlightPrTasks = new Set<Promise<void>>()
   private activePrReviews = new Set<number>()
@@ -266,6 +275,12 @@ export class AgentDaemon {
   private agentLoopUpgrade: AgentLoopUpgradeMetadata
   private upgradeCheckPromise: Promise<void> | null = null
   private lastUpgradeReminderAt: number | null = null
+  private autoUpgradePromise: Promise<boolean> | null = null
+  private lastAutoUpgradeAttemptAt: number | null = null
+  private lastAutoUpgradeAttemptTarget: string | null = null
+  private lastPublishedUpgradeAnnouncementKey: string | null = null
+  private lastObservedUpgradeAnnouncementKey: string | null = null
+  private upgradeAnnouncementCheckPromise: Promise<void> | null = null
 
   constructor(
     private config: AgentConfig,
@@ -621,6 +636,26 @@ export class AgentDaemon {
     }, WAKE_QUEUE_CHECK_INTERVAL_MS)
   }
 
+  private startUpgradeAnnouncementMonitor(): void {
+    if (this.upgradeAnnouncementCheckIntervalId !== null) {
+      clearInterval(this.upgradeAnnouncementCheckIntervalId)
+    }
+
+    const intervalMs = Math.max(
+      this.config.recovery.heartbeatIntervalMs,
+      15_000,
+    )
+    this.upgradeAnnouncementCheckIntervalId = setInterval(() => {
+      if (!this.running || this.shutdownRequested) {
+        return
+      }
+
+      void this.maybeProcessRemoteUpgradeAnnouncement().catch((error) => {
+        this.logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
+      })
+    }, intervalMs)
+  }
+
   private requestImmediateReconcile(reason: string): void {
     if (this.shutdownRequested) {
       return
@@ -674,6 +709,7 @@ export class AgentDaemon {
     this.running = true
     this.syncRuntimeMetrics()
     this.startWakeQueueMonitor()
+    this.startUpgradeAnnouncementMonitor()
 
     this.presencePublisher = new ManagedDaemonPresencePublisher({
       config: this.config,
@@ -690,6 +726,7 @@ export class AgentDaemon {
     }
 
     void this.maybeRefreshAgentLoopUpgradeStatus(true)
+    void this.maybeProcessRemoteUpgradeAnnouncement()
 
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
@@ -801,6 +838,11 @@ export class AgentDaemon {
     if (this.wakeQueueCheckIntervalId !== null) {
       clearInterval(this.wakeQueueCheckIntervalId)
       this.wakeQueueCheckIntervalId = null
+    }
+
+    if (this.upgradeAnnouncementCheckIntervalId !== null) {
+      clearInterval(this.upgradeAnnouncementCheckIntervalId)
+      this.upgradeAnnouncementCheckIntervalId = null
     }
 
     // Stop health server
@@ -1103,6 +1145,9 @@ export class AgentDaemon {
 
       recordPoll(startedWork ? 'success' : 'no_issues')
       recordPollDuration(Date.now() - pollStartTime)
+      if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
+        return
+      }
       this.scheduleNextPoll()
       return
     }
@@ -3050,12 +3095,268 @@ export class AgentDaemon {
         this.isSafeToUpgradeNow(),
       )
       this.agentLoopUpgrade = next
+      await this.maybeBroadcastAgentLoopUpgradeAnnouncement(next)
       this.maybeLogAgentLoopUpgradeNotice(next)
     })().finally(() => {
       this.upgradeCheckPromise = null
     })
 
     return this.upgradeCheckPromise
+  }
+
+  private async maybeProcessRemoteUpgradeAnnouncement(): Promise<void> {
+    if (this.upgradeAnnouncementCheckPromise) {
+      return this.upgradeAnnouncementCheckPromise
+    }
+
+    this.upgradeAnnouncementCheckPromise = (async () => {
+      const issueNumber = await this.ensurePresenceIssueNumber()
+      const comments = await this.listPresenceRegistryComments(issueNumber)
+      const latest = getLatestManagedDaemonUpgradeAnnouncement(comments, this.config.repo)
+      if (!latest) {
+        return
+      }
+
+      const key = this.getUpgradeAnnouncementKey({
+        channel: latest.announcement.channel,
+        latestVersion: latest.announcement.latestVersion,
+        latestRevision: latest.announcement.latestRevision,
+      })
+      if (!key || key === this.lastObservedUpgradeAnnouncementKey) {
+        return
+      }
+      if (!this.shouldRefreshFromUpgradeAnnouncement(latest.announcement.announcedAt, key)) {
+        this.lastObservedUpgradeAnnouncementKey = key
+        return
+      }
+
+      this.logger.log(
+        `[daemon] observed remote agent-loop upgrade announcement for ${latest.announcement.channel ?? 'default'} -> v${latest.announcement.latestVersion ?? 'unknown'}@${abbreviateRevision(latest.announcement.latestRevision)}`,
+      )
+      await this.maybeRefreshAgentLoopUpgradeStatus(true)
+      this.lastObservedUpgradeAnnouncementKey = key
+      this.requestImmediateReconcile('agent-loop-upgrade')
+    })().finally(() => {
+      this.upgradeAnnouncementCheckPromise = null
+    })
+
+    return this.upgradeAnnouncementCheckPromise
+  }
+
+  private async maybeBroadcastAgentLoopUpgradeAnnouncement(
+    upgrade: AgentLoopUpgradeMetadata,
+  ): Promise<void> {
+    if (upgrade.status !== 'upgrade-available') {
+      return
+    }
+
+    const key = this.getUpgradeAnnouncementKey(upgrade)
+    if (!key || key === this.lastPublishedUpgradeAnnouncementKey) {
+      return
+    }
+
+    const issueNumber = await this.ensurePresenceIssueNumber()
+    const comments = await this.listPresenceRegistryComments(issueNumber)
+    const latest = getLatestManagedDaemonUpgradeAnnouncement(comments, this.config.repo)
+    const latestKey = latest
+      ? this.getUpgradeAnnouncementKey({
+          channel: latest.announcement.channel,
+          latestVersion: latest.announcement.latestVersion,
+          latestRevision: latest.announcement.latestRevision,
+        })
+      : null
+    if (latestKey === key) {
+      this.lastPublishedUpgradeAnnouncementKey = key
+      return
+    }
+
+    await this.commentOnPresenceRegistryIssue(
+      issueNumber,
+      buildManagedDaemonUpgradeAnnouncementComment({
+        repo: this.config.repo,
+        channel: upgrade.channel,
+        latestVersion: upgrade.latestVersion,
+        latestRevision: upgrade.latestRevision,
+        latestCommitAt: upgrade.latestCommitAt,
+        announcedAt: new Date().toISOString(),
+        announcedByMachineId: this.config.machineId,
+        announcedByDaemonInstanceId: this.daemonInstanceId,
+      }),
+    )
+    this.lastPublishedUpgradeAnnouncementKey = key
+    this.logger.log(
+      `[daemon] broadcasted agent-loop upgrade announcement for ${upgrade.channel ?? 'default'} -> v${upgrade.latestVersion ?? 'unknown'}@${abbreviateRevision(upgrade.latestRevision)}`,
+    )
+  }
+
+  private shouldRefreshFromUpgradeAnnouncement(
+    announcedAt: string,
+    key: string,
+  ): boolean {
+    const currentKey = this.getUpgradeAnnouncementKey(this.agentLoopUpgrade)
+    const currentCheckedAt = this.agentLoopUpgrade.checkedAt
+      ? Date.parse(this.agentLoopUpgrade.checkedAt)
+      : Number.NaN
+    const announcedAtMs = Date.parse(announcedAt)
+
+    if (currentKey !== key) {
+      return true
+    }
+
+    if (!Number.isFinite(currentCheckedAt) || !Number.isFinite(announcedAtMs)) {
+      return true
+    }
+
+    return announcedAtMs > currentCheckedAt
+  }
+
+  private async maybeAutoApplyAgentLoopUpgrade(): Promise<boolean> {
+    const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    if (!policy.enabled || !policy.autoApply) {
+      return false
+    }
+    if (this.shutdownRequested || !this.running || !this.isSafeToUpgradeNow()) {
+      return false
+    }
+
+    await this.maybeRefreshAgentLoopUpgradeStatus()
+    const upgrade = this.buildUpgradeStatus()
+    if (upgrade.status !== 'upgrade-available' || !upgrade.safeToUpgradeNow) {
+      return false
+    }
+
+    const attemptTarget = this.getUpgradeAnnouncementKey(upgrade)
+    if (
+      attemptTarget
+      && this.lastAutoUpgradeAttemptTarget === attemptTarget
+      && this.lastAutoUpgradeAttemptAt !== null
+      && this.lastAutoUpgradeAttemptAt + policy.checkIntervalMs > Date.now()
+    ) {
+      return false
+    }
+
+    if (this.autoUpgradePromise) {
+      return this.autoUpgradePromise
+    }
+
+    this.lastAutoUpgradeAttemptTarget = attemptTarget
+    this.lastAutoUpgradeAttemptAt = Date.now()
+    this.autoUpgradePromise = this.performAutomaticAgentLoopUpgrade(upgrade)
+      .catch((error) => {
+        this.logger.warn(`[daemon] automatic agent-loop upgrade failed: ${formatDaemonError(error)}`)
+        return false
+      })
+      .finally(() => {
+        this.autoUpgradePromise = null
+      })
+
+    return this.autoUpgradePromise
+  }
+
+  private async performAutomaticAgentLoopUpgrade(
+    upgrade: AgentLoopUpgradeMetadata,
+  ): Promise<boolean> {
+    const supervisor = resolveCurrentRuntimeSupervisor()
+    if (supervisor === 'direct') {
+      this.logger.warn('[daemon] automatic agent-loop upgrade requires a managed detached or launchd runtime; direct mode will keep reminder-only behavior')
+      return false
+    }
+    if (supervisor === 'detached') {
+      this.assertDetachedUpgradeRestartReady()
+    }
+
+    const result = applyAgentLoopUpgradeToLocalCheckout({
+      build: this.agentLoopBuild,
+      upgrade,
+    })
+    if (!result.changed) {
+      this.logger.log('[daemon] agent-loop auto-upgrade found no local revision change after pull; keeping current daemon process')
+      return false
+    }
+    const fromRevision = abbreviateRevision(result.previousRevision)
+    const toRevision = abbreviateRevision(result.nextRevision)
+    this.logger.log(
+      `[daemon] upgraded local agent-loop checkout on ${result.currentBranch}: v${this.agentLoopBuild.version}@${fromRevision} -> v${upgrade.latestVersion ?? this.agentLoopBuild.version}@${toRevision}`,
+    )
+
+    await this.stop()
+
+    if (supervisor === 'detached') {
+      const pid = this.spawnDetachedUpgradeSuccessor()
+      this.logger.log(`[daemon] started upgraded detached daemon successor pid ${pid}`)
+    } else {
+      this.logger.log('[daemon] exiting so launchd can restart the upgraded daemon')
+    }
+
+    this.exitProcess(0)
+  }
+
+  private async ensurePresenceIssueNumber(): Promise<number> {
+    if (this.presenceIssueNumber !== null) {
+      return this.presenceIssueNumber
+    }
+
+    this.presenceIssueNumber = await ensureManagedDaemonPresenceIssue(this.config)
+    return this.presenceIssueNumber
+  }
+
+  private async listPresenceRegistryComments(issueNumber: number): Promise<IssueComment[]> {
+    return listPresenceIssueComments(issueNumber, this.config)
+  }
+
+  private async commentOnPresenceRegistryIssue(issueNumber: number, body: string): Promise<void> {
+    await commentOnPresenceIssue(issueNumber, body, this.config)
+  }
+
+  private getUpgradeAnnouncementKey(input: {
+    channel: string | null
+    latestVersion: string | null
+    latestRevision: string | null
+  }): string | null {
+    if (!input.latestVersion && !input.latestRevision) {
+      return null
+    }
+
+    return `${input.channel ?? 'default'}:${input.latestVersion ?? 'unknown'}:${input.latestRevision ?? 'unknown'}`
+  }
+
+  private assertDetachedUpgradeRestartReady(): void {
+    if (!process.env.AGENT_LOOP_RUNTIME_FILE || !process.env.AGENT_LOOP_LOG_FILE || !process.argv[1]) {
+      throw new Error('managed detached auto-upgrade restart requires runtime file, log path, and script path')
+    }
+  }
+
+  private spawnDetachedUpgradeSuccessor(): number {
+    this.assertDetachedUpgradeRestartReady()
+    const runtimeFile = process.env.AGENT_LOOP_RUNTIME_FILE!
+    const logPath = process.env.AGENT_LOOP_LOG_FILE!
+    const scriptPath = process.argv[1]!
+    const logFd = openSync(logPath, 'a')
+    const child = spawn(process.execPath, [
+      scriptPath,
+      ...sanitizeDaemonBackgroundArgs(process.argv.slice(2)),
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        AGENT_LOOP_RUNTIME_FILE: runtimeFile,
+        AGENT_LOOP_LOG_FILE: logPath,
+        AGENT_LOOP_RUNTIME_MANAGER: 'detached',
+      },
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+    })
+    child.unref()
+
+    if (!child.pid) {
+      throw new Error('failed to spawn upgraded detached daemon successor')
+    }
+
+    return child.pid
+  }
+
+  private exitProcess(code: number): never {
+    process.exit(code)
   }
 
   private maybeLogAgentLoopUpgradeNotice(upgrade: AgentLoopUpgradeMetadata): void {
