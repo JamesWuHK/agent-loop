@@ -11,6 +11,8 @@ import {
   recordRecoveryAction,
   recordTransientLoopError,
   recordWorkerIdleTimeout,
+  recordQueuedWakeRequest,
+  recordHandledWakeRequest,
   recordPrCreated,
   setActiveWorktrees,
   setActivePrReviews,
@@ -21,6 +23,7 @@ import {
   setBlockedIssueResumeEscalationAgeSeconds,
   setLastTransientLoopErrorAgeSeconds,
   setNextPollDelaySeconds,
+  setPendingWakeRequests,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -182,6 +185,21 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_worker_idle_timeouts_total')
       expect(metrics).toContain('scope="pr-review"')
     })
+
+    test('tracks wake queue and handling outcomes', async () => {
+      recordQueuedWakeRequest('issue')
+      recordHandledWakeRequest('issue', 'started_work', '2026-04-11T09:10:00.000Z', Date.parse('2026-04-11T09:10:05.000Z'))
+      recordHandledWakeRequest('now', 'allow_fallback', '2026-04-11T09:11:00.000Z', Date.parse('2026-04-11T09:11:01.000Z'))
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_wake_requests_total')
+      expect(metrics).toContain('kind="issue"')
+      expect(metrics).toContain('kind="now"')
+      expect(metrics).toContain('outcome="queued"')
+      expect(metrics).toContain('outcome="started_work"')
+      expect(metrics).toContain('outcome="allow_fallback"')
+      expect(metrics).toContain('agent_loop_wake_request_age_seconds')
+    })
   })
 
   describe('recordPrCreated', () => {
@@ -212,6 +230,7 @@ describe('metrics', () => {
       setBlockedIssueResumeEscalationAgeSeconds(15)
       setLastTransientLoopErrorAgeSeconds(12)
       setNextPollDelaySeconds(5)
+      setPendingWakeRequests(2)
       setInFlightIssueProcesses(true)
       setInFlightPrReviews(false)
       setStartupRecoveryPending(true)
@@ -228,6 +247,7 @@ describe('metrics', () => {
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalation_age_seconds')
       expect(metrics).toContain('agent_loop_last_transient_loop_error_age_seconds')
       expect(metrics).toContain('agent_loop_next_poll_delay_seconds')
+      expect(metrics).toContain('agent_loop_pending_wake_requests')
       expect(metrics).toContain('agent_loop_inflight_issue_processes')
       expect(metrics).toContain('agent_loop_inflight_pr_reviews')
       expect(metrics).toContain('agent_loop_startup_recovery_pending')

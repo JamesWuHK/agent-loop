@@ -53,12 +53,15 @@ import {
   recordRecoveryAction,
   recordTransientLoopError,
   recordWorkerIdleTimeout,
+  recordQueuedWakeRequest,
+  recordHandledWakeRequest,
   setStalledWorkers,
   setBlockedIssueResumes,
   setBlockedIssueResumeAgeSeconds,
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
   setLastTransientLoopErrorAgeSeconds,
+  setPendingWakeRequests,
   setStartupRecoveryPending,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
@@ -599,6 +602,10 @@ export class AgentDaemon {
       return
     }
 
+    for (const request of requests) {
+      recordQueuedWakeRequest(request.kind)
+    }
+
     const deduped = new Map<string, WakeRequest>()
     for (const request of [...this.pendingWakeRequests, ...requests]) {
       if (deduped.has(request.dedupeKey)) {
@@ -608,6 +615,7 @@ export class AgentDaemon {
     }
 
     this.pendingWakeRequests = Array.from(deduped.values())
+    this.syncRuntimeMetrics()
   }
 
   private maybeRequestQueuedWakeReconcile(): void {
@@ -642,7 +650,10 @@ export class AgentDaemon {
       }
     }
 
+    this.syncRuntimeMetrics()
+
     if (request.kind === 'now') {
+      recordHandledWakeRequest(request.kind, 'allow_fallback', request.requestedAt)
       return {
         handled: true,
         startedWork: false,
@@ -651,16 +662,20 @@ export class AgentDaemon {
     }
 
     if (request.kind === 'issue') {
+      const startedWork = await this.maybeStartTargetedIssueWake(request.issueNumber)
+      recordHandledWakeRequest(request.kind, startedWork ? 'started_work' : 'no_match', request.requestedAt)
       return {
         handled: true,
-        startedWork: await this.maybeStartTargetedIssueWake(request.issueNumber),
+        startedWork,
         allowUntargetedFallback: false,
       }
     }
 
+    const startedWork = await this.maybeStartTargetedPrWake(request.prNumber)
+    recordHandledWakeRequest(request.kind, startedWork ? 'started_work' : 'no_match', request.requestedAt)
     return {
       handled: true,
-      startedWork: await this.maybeStartTargetedPrWake(request.prNumber),
+      startedWork,
       allowUntargetedFallback: false,
     }
   }
@@ -3802,6 +3817,7 @@ export class AgentDaemon {
     setBlockedIssueResumeAgeSeconds(runtime.oldestBlockedIssueResumeAgeSeconds)
     setBlockedIssueResumeEscalations(runtime.blockedIssueResumeEscalationCount)
     setBlockedIssueResumeEscalationAgeSeconds(runtime.oldestBlockedIssueResumeEscalationAgeSeconds)
+    setPendingWakeRequests(this.pendingWakeRequests.length)
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {

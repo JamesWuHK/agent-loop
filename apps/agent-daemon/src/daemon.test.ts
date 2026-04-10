@@ -47,6 +47,7 @@ import {
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 import { buildManagedDaemonUpgradeAnnouncementComment } from './presence'
+import { getMetrics, registry } from './metrics'
 import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
 
 function createTestDaemon(
@@ -322,6 +323,52 @@ describe('wake queue integration', () => {
 
     expect(untargetedResumeAttempts).toBe(1)
     expect(scheduleCount).toBe(1)
+  })
+
+  test('publishes wake queue metrics when requests are queued and consumed', async () => {
+    registry.resetMetrics()
+
+    try {
+      const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-daemon-wake-metrics-'))
+      const queuePath = buildWakeQueuePath({
+        homeDir,
+        repo: 'JamesWuHK/agent-loop',
+        machineId: 'codex-dev',
+      })
+
+      appendWakeRequest(queuePath, {
+        kind: 'issue',
+        issueNumber: 374,
+        reason: 'issues.labeled:agent:ready',
+        sourceEvent: 'issues.labeled',
+        dedupeKey: 'issues:labeled:374:agent:ready',
+        requestedAt: '2026-04-11T09:12:00.000Z',
+      })
+
+      const daemon = createTestDaemon({
+        repo: 'JamesWuHK/agent-loop',
+        machineId: 'codex-dev',
+        worktreesBase: join(homeDir, 'worktrees'),
+      })
+
+      await daemon.drainWakeQueueOnce({
+        scheduleImmediate: false,
+      })
+
+      let metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_wake_requests_total{kind="issue",outcome="queued"} 1')
+      expect(metrics).toContain('agent_loop_pending_wake_requests 1')
+
+      ;(daemon as any).maybeStartTargetedIssueWake = async () => true
+      await (daemon as any).maybeStartQueuedWakeRequest()
+
+      metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_wake_requests_total{kind="issue",outcome="started_work"} 1')
+      expect(metrics).toContain('agent_loop_pending_wake_requests 0')
+      expect(metrics).toContain('agent_loop_wake_request_age_seconds_count{kind="issue",outcome="started_work"} 1')
+    } finally {
+      registry.resetMetrics()
+    }
   })
 })
 
