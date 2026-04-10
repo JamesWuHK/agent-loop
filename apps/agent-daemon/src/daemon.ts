@@ -237,6 +237,7 @@ export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
   private shutdownRequested = false
+  private wakeBackstopPollingEnabled = false
   private readonly daemonInstanceId = `${process.pid}-${crypto.randomUUID()}`
   private activeWorktrees = new Map<number, WorktreeInfo>()
   private activeIssueProcesses = new Set<number>()
@@ -602,6 +603,7 @@ export class AgentDaemon {
       return
     }
 
+    this.wakeBackstopPollingEnabled = true
     for (const request of requests) {
       recordQueuedWakeRequest(request.kind)
     }
@@ -633,7 +635,12 @@ export class AgentDaemon {
     if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
       return
     }
-    this.scheduleNextPoll()
+
+    const useIdleBackstopPoll = !startedWork && this.shouldUseIdleBackstopPolling()
+    this.scheduleNextPoll({
+      delayMs: useIdleBackstopPoll ? this.getIdlePollIntervalMs() : this.config.pollIntervalMs,
+      reason: useIdleBackstopPoll ? 'idle-backstop' : 'normal',
+    })
   }
 
   private async maybeStartQueuedWakeRequest(): Promise<{
@@ -755,6 +762,9 @@ export class AgentDaemon {
       return
     }
 
+    if (reason === 'wake-request') {
+      this.wakeBackstopPollingEnabled = true
+    }
     this.pendingWakeRequested = true
     this.nextPollAt = new Date().toISOString()
     this.nextPollReason = reason
@@ -776,7 +786,9 @@ export class AgentDaemon {
     this.logger.log(
       `[daemon] concurrency: effective=${this.config.concurrency} requested=${this.config.requestedConcurrency} repoCap=${this.config.concurrencyPolicy.repoCap ?? 'none'} profileCap=${this.config.concurrencyPolicy.profileCap ?? 'none'} projectCap=${this.config.concurrencyPolicy.projectCap ?? 'none'}`,
     )
-    this.logger.log(`[daemon] poll interval: ${this.config.pollIntervalMs}ms`)
+    this.logger.log(
+      `[daemon] poll interval: active=${this.config.pollIntervalMs}ms idle=${this.getIdlePollIntervalMs()}ms`,
+    )
 
     // Set initial metrics
     setConcurrencyLimit(this.config.concurrency)
@@ -1005,6 +1017,7 @@ export class AgentDaemon {
       daemonInstanceId: this.daemonInstanceId,
       repo: this.config.repo,
       pollIntervalMs: this.config.pollIntervalMs,
+      idlePollIntervalMs: this.getIdlePollIntervalMs(),
       concurrency: this.config.concurrency,
       requestedConcurrency: this.config.requestedConcurrency,
       concurrencyPolicy: this.config.concurrencyPolicy,
@@ -1143,6 +1156,14 @@ export class AgentDaemon {
     const nextPollAt = Date.parse(this.nextPollAt)
     if (!Number.isFinite(nextPollAt)) return null
     return Math.max(0, nextPollAt - now)
+  }
+
+  private getIdlePollIntervalMs(): number {
+    return Math.max(this.config.pollIntervalMs, this.config.idlePollIntervalMs ?? this.config.pollIntervalMs)
+  }
+
+  private shouldUseIdleBackstopPolling(): boolean {
+    return this.wakeBackstopPollingEnabled
   }
 
   private async runStartupMaintenanceIfNeeded(): Promise<'ready' | 'deferred-transient' | 'deferred-error'> {

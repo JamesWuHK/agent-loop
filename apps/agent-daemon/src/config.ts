@@ -43,6 +43,7 @@ export interface CliArgs {
   pat?: string
   concurrency?: number
   pollIntervalMs?: number
+  idlePollIntervalMs?: number
   machineId?: string
   dryRun?: boolean
   once?: boolean // run one iteration then exit
@@ -112,6 +113,11 @@ export function buildConfig(
   const env = options.env ?? process.env
   const homeDir = options.homeDir ?? homedir()
   const requestedConcurrency = args.concurrency ?? fileConfig.concurrency ?? 1
+  const pollIntervalMs = args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000
+  const configuredIdlePollIntervalMs = normalizePositiveInteger(
+    args.idlePollIntervalMs ?? fileConfig.idlePollIntervalMs,
+    5 * 60_000,
+  )
   const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
   const heartbeatIntervalMs = normalizePositiveInteger(
     fileConfig.recovery?.heartbeatIntervalMs,
@@ -176,7 +182,8 @@ export function buildConfig(
     machineId,
     repo,
     pat,
-    pollIntervalMs: args.pollIntervalMs ?? fileConfig.pollIntervalMs ?? 60_000,
+    pollIntervalMs,
+    idlePollIntervalMs: Math.max(pollIntervalMs, configuredIdlePollIntervalMs),
     concurrency: concurrencyPolicy.effective,
     requestedConcurrency,
     concurrencyPolicy,

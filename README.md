@@ -90,6 +90,8 @@ agent-loop --wake-pr 456
 
 现在 `agent-loop --status` / `agent-loop --doctor` 和 `/metrics` 也会把 wake 队列观测带出来，方便你判断“事件有没有进来、有没有被消费、是不是经常 miss target 后回退到全量扫描”。
 
+一旦这台机器已经收到过 wake 流量，daemon 在“空闲且没有发现任何 work”的周期里会自动切到更慢的 idle safety-net polling；但只要新的 wake request 到来，还是会立刻把下一轮 reconcile 拉到 0ms，不会因为慢轮询拖慢响应。
+
 如果你已经在目标开发机上装了 GitHub self-hosted runner，现在仓库里的 [`agent-daemon-wake.yml`](.github/workflows/agent-daemon-wake.yml) 和 [`agent-ready-gate.yml`](.github/workflows/agent-ready-gate.yml) 会把 issue / PR / manual dispatch 事件翻译成这类本地 wake request：
 
 - `agent:ready` 的 issue 会先过 ready-gate，再 wake 本机 daemon，避免校验和认领抢跑
@@ -186,6 +188,7 @@ agent-loop/
   "repo": "owner/repo",
   "pat": "ghp_xxx",
   "pollIntervalMs": 60000,
+  "idlePollIntervalMs": 300000,
   "concurrency": 1,
   "scheduling": {
     "concurrencyByRepo": {
@@ -209,6 +212,11 @@ agent-loop/
 ```
 
 如果这里没有配置 `pat`，daemon 也会尝试复用本机 `gh auth login` 的登录态，相当于回退到 `gh auth token`。
+
+这里的两个轮询参数建议这样理解：
+
+- `pollIntervalMs`：正常调度、恢复、错误重试回到常规节奏时使用的 active poll
+- `idlePollIntervalMs`：机器已经验证过 wake 通路后，在空闲无任务阶段使用的慢速 safety-net poll；默认是 `max(pollIntervalMs, 300000)`
 
 当前 git 仓库也可以提交一份项目级配置：`./.agent-loop/project.json`。它适合存放“这个产品本身应该如何被 agent-loop 理解”的默认值，例如项目 profile、仓库级 prompt guidance、默认分支和推荐 agent。机器相关或带密钥的信息仍然只放在 `~/.agent-loop/config.json`。
 
@@ -338,7 +346,8 @@ agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metric
 | `--repo` | GitHub repo (owner/repo) |
 | `--pat` | GitHub PAT；也可设置 `GITHUB_TOKEN` / `GH_TOKEN`，或复用 `gh auth login` |
 | `--concurrency N` | Max concurrent agent tasks |
-| `--poll-interval MS` | Poll interval (default: 60000ms) |
+| `--poll-interval MS` | Active poll interval (default: 60000ms) |
+| `--idle-poll-interval MS` | Idle backstop poll interval after wake traffic is observed |
 | `--machine-id` | Override machine ID |
 | `--health-host HOST` | Health check host (default: 127.0.0.1) |
 | `--join-project` | Persist machine config for the current repo and start a managed daemon on this machine |
@@ -391,6 +400,7 @@ agent-loop --doctor
 - 当前项目 profile 和默认分支
 - primary / fallback agent 选择
 - requested / effective concurrency，以及 repo/profile/project cap 来源
+- active / idle poll interval
 - active worktrees、active PR reviews、in-flight issue/review loops
 - startup recovery 是否仍在 pending（例如启动时 GitHub/网络暂时不可达）
 - effective active task count（daemon 并发控制实际使用的值）

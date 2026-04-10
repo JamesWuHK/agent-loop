@@ -186,6 +186,7 @@ describe('index helpers', () => {
         '--metrics-port', '9091',
         '--concurrency', '1',
         '--poll-interval', '45000',
+        '--idle-poll-interval', '300000',
       ],
       overrideArgs: ['--restart', '--concurrency', '2'],
     })).toEqual([
@@ -194,6 +195,7 @@ describe('index helpers', () => {
       '--health-port', '9311',
       '--metrics-port', '9091',
       '--poll-interval', '45000',
+      '--idle-poll-interval', '300000',
       '--concurrency', '2',
     ])
   })
@@ -416,6 +418,7 @@ describe('index helpers', () => {
           '--metrics-port', '9091',
           '--concurrency', '2',
           '--poll-interval', '45000',
+          '--idle-poll-interval', '300000',
         ],
       }, false),
       repo: 'JamesWuHK/digital-employee',
@@ -472,6 +475,7 @@ describe('index helpers', () => {
           '--metrics-port', '9091',
           '--concurrency', '2',
           '--poll-interval', '45000',
+          '--idle-poll-interval', '300000',
         ])
         return {
           ...buildRuntimeSnapshot().record,
