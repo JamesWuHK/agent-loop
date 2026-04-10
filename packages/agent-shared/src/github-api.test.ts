@@ -10,6 +10,7 @@ import {
   deriveIssueStateFromRaw,
   extractNextPageUrl,
   extractRestOpenIssueListPage,
+  extractRestPullRequest,
   extractRestPullRequestListPage,
   extractOpenIssueConnectionPage,
   extractManagedLeaseComment,
@@ -366,6 +367,28 @@ describe('REST pagination helpers', () => {
     ])
 
     expect(extractRestPullRequestListPage(null)).toEqual([])
+  })
+
+  test('extracts a single pull request object from REST responses', () => {
+    expect(extractRestPullRequest({
+      number: 247,
+      title: 'Fix #125',
+      html_url: 'https://github.com/example/repo/pull/247',
+      state: 'open',
+      draft: false,
+      head: { ref: 'agent/125/codex-20260403', sha: 'abc123' },
+      labels: [{ name: 'agent:review-approved' }],
+    })).toEqual({
+      number: 247,
+      title: 'Fix #125',
+      html_url: 'https://github.com/example/repo/pull/247',
+      state: 'open',
+      draft: false,
+      head: { ref: 'agent/125/codex-20260403', sha: 'abc123' },
+      labels: [{ name: 'agent:review-approved' }],
+    })
+
+    expect(extractRestPullRequest([])).toBeNull()
   })
 
   test('extracts the next REST pagination link', () => {
