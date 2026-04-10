@@ -62,6 +62,7 @@ function createTestDaemon(
     repo: 'JamesWuHK/digital-employee',
     pat: 'test-token',
     pollIntervalMs: 60_000,
+    idlePollIntervalMs: 300_000,
     concurrency: 1,
     requestedConcurrency: 1,
     concurrencyPolicy: {
@@ -323,6 +324,63 @@ describe('wake queue integration', () => {
 
     expect(untargetedResumeAttempts).toBe(1)
     expect(scheduleCount).toBe(1)
+  })
+
+  test('uses the slower idle backstop poll after wake traffic when no work is found', async () => {
+    const daemon = createTestDaemon({
+      pollIntervalMs: 60_000,
+      idlePollIntervalMs: 300_000,
+    })
+    let scheduledOptions: { delayMs?: number, reason?: string } | undefined
+
+    ;(daemon as any).running = true
+    ;(daemon as any).wakeBackstopPollingEnabled = true
+    ;(daemon as any).refreshObservability = () => undefined
+    ;(daemon as any).maybeStartResumableIssue = async () => false
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => false
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
+    ;(daemon as any).scheduleNextPoll = (options?: { delayMs?: number, reason?: string }) => {
+      scheduledOptions = options
+    }
+
+    await (daemon as any).pollCycle()
+
+    expect(scheduledOptions).toBeDefined()
+    expect(scheduledOptions).toEqual({
+      delayMs: 300_000,
+      reason: 'idle-backstop',
+    })
+  })
+
+  test('keeps the active poll interval before any wake traffic has been observed', async () => {
+    const daemon = createTestDaemon({
+      pollIntervalMs: 60_000,
+      idlePollIntervalMs: 300_000,
+    })
+    let scheduledOptions: { delayMs?: number, reason?: string } | undefined
+
+    ;(daemon as any).running = true
+    ;(daemon as any).refreshObservability = () => undefined
+    ;(daemon as any).maybeStartResumableIssue = async () => false
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => false
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
+    ;(daemon as any).scheduleNextPoll = (options?: { delayMs?: number, reason?: string }) => {
+      scheduledOptions = options
+    }
+
+    await (daemon as any).pollCycle()
+
+    expect(scheduledOptions).toBeDefined()
+    expect(scheduledOptions).toEqual({
+      delayMs: 60_000,
+      reason: 'normal',
+    })
   })
 
   test('publishes wake queue metrics when requests are queued and consumed', async () => {
@@ -673,6 +731,7 @@ describe('daemon merge recovery helpers', () => {
       repo: 'JamesWuHK/digital-employee',
       pat: 'test-token',
       pollIntervalMs: 60_000,
+      idlePollIntervalMs: 300_000,
       concurrency: 2,
       requestedConcurrency: 5,
       concurrencyPolicy: {
@@ -725,6 +784,7 @@ describe('daemon merge recovery helpers', () => {
 
     expect(daemon.getStatus()).toMatchObject({
       repo: 'JamesWuHK/digital-employee',
+      idlePollIntervalMs: 300_000,
       concurrency: 2,
       requestedConcurrency: 5,
       concurrencyPolicy: {

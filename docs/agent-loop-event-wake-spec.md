@@ -25,7 +25,6 @@ Phase 1 local wake delivery is now implemented in this repo:
 
 What is still pending from this spec:
 
-- slower idle safety-net polling after wake delivery proves stable
 - end-to-end wake-latency / missed-event measurement beyond local queue handling metrics
 
 ## Goals
@@ -157,7 +156,7 @@ Wake support should reduce, not eliminate, polling.
 Recommended behavior:
 
 - keep startup recovery unchanged
-- keep a slower full poll as a safety net
+- after wake traffic is observed on a machine, keep a slower full poll as a safety net
 - prefer targeted reconcile immediately after a wake
 - reserve full scans for recovery, drift correction, and missed events
 
@@ -172,7 +171,7 @@ In practice, this should help with rate limits, but it is not a full replacement
 1. Done: add CLI wake commands and a durable local wake queue.
 2. Done: add a loopback wake endpoint in the daemon.
 3. Done: add GitHub Actions workflows that route events to self-hosted runners.
-4. Pending: reduce idle poll frequency after wake delivery is stable.
+4. Done: reduce idle poll frequency after wake delivery is stable on a machine, while preserving immediate wake-triggered reconcile.
 5. Pending: add end-to-end wake latency, missed-event recovery, and GraphQL consumption measurement.
 
 ## Acceptance

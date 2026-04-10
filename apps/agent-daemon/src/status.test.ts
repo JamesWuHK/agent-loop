@@ -27,6 +27,7 @@ const baseHealth: DaemonStatus & {
   daemonInstanceId: 'daemon-codex-dev-1',
   repo: 'JamesWuHK/digital-employee',
   pollIntervalMs: 60_000,
+  idlePollIntervalMs: 300_000,
   concurrency: 2,
   requestedConcurrency: 5,
   concurrencyPolicy: {
@@ -411,6 +412,7 @@ describe('status helpers', () => {
     expect(report).toContain('daemon: codex-dev / daemon-codex-dev-1')
     expect(report).toContain('process: launchd | pid 12345 | cwd /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('concurrency: effective 2 (requested 5; repo cap 4; profile cap 2; project cap 3)')
+    expect(report).toContain('poll intervals: active 60000ms | idle 300000ms')
     expect(report).toContain('connectivity: transient 2 | startup deferred 1 | last transient startup-recovery 15s ago')
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
@@ -478,6 +480,7 @@ describe('status helpers', () => {
     expect(report).toContain('project max concurrency: 3')
     expect(report).toContain('daemon instance: daemon-codex-dev-1')
     expect(report).toContain('supervisor: launchd')
+    expect(report).toContain('poll interval: active 60000ms | idle 300000ms')
     expect(report).toContain('working directory: /Users/wujames/codeRepo/digital-employee-main')
     expect(report).toContain('runtime record: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json')
     expect(report).toContain('log file: /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
