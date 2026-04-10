@@ -6,7 +6,7 @@ import {
   type AgentConfig,
   type AgentIssue,
 } from '@agent/shared'
-import { pollAndClaim, type ClaimerDependencies } from './claimer'
+import { claimSpecificIssue, pollAndClaim, type ClaimerDependencies } from './claimer'
 
 function buildConfig(): AgentConfig {
   return {
@@ -128,5 +128,27 @@ describe('pollAndClaim', () => {
 
     expect(claimAttempts).toEqual([11, 12])
     expect(claimed?.number).toBe(12)
+  })
+
+  test('claimSpecificIssue short-circuits non-claimable issues', async () => {
+    const claimed = await claimSpecificIssue(
+      buildIssue({
+        number: 22,
+        isClaimable: false,
+      }),
+      buildConfig(),
+      {
+        log: () => {},
+        warn: () => {},
+        error: () => {},
+      } as typeof console,
+      buildDependencies([], async (issueNumber) => ({
+        success: true,
+        issueNumber,
+        reason: 'claimed',
+      })),
+    )
+
+    expect(claimed).toBeNull()
   })
 })

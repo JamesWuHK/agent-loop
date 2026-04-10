@@ -1309,6 +1309,12 @@ export function extractRestPullRequestListPage(data: unknown): RawRestPullReques
     : []
 }
 
+export function extractRestPullRequest(data: unknown): RawRestPullRequest | null {
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? data as RawRestPullRequest
+    : null
+}
+
 function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | null {
   if (typeof pr.number !== 'number') return null
   if (typeof pr.title !== 'string') return null
@@ -1387,6 +1393,33 @@ async function listOpenAgentPullRequestsRest(
   }
 
   return pullRequests
+}
+
+async function getManagedPullRequestByNumberRest(
+  prNumber: number,
+  config: AgentConfig,
+): Promise<ManagedPullRequest | null> {
+  const { stdout, exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/pulls/${prNumber}`,
+  ], config)
+
+  if (exitCode !== 0) {
+    const errorMessage = parseGhApiErrorMessage(stdout, stderr).toLowerCase()
+    if (errorMessage.includes('not found')) {
+      return null
+    }
+
+    throw new GhError(
+      `api pulls/${prNumber}`,
+      exitCode,
+      parseGhApiErrorMessage(stdout, stderr),
+    )
+  }
+
+  const mapped = mapRawRestPullRequest(extractRestPullRequest(JSON.parse(stdout)) ?? {})
+  if (!mapped) return null
+  if (!mapped.headRefName.startsWith('agent/')) return null
+  return mapped
 }
 
 export function buildManagedLeaseComment(lease: ManagedLease): string {
@@ -1561,6 +1594,13 @@ export async function listOpenAgentPullRequests(
   config: AgentConfig,
 ): Promise<ManagedPullRequest[]> {
   return listOpenAgentPullRequestsRest(config)
+}
+
+export async function getManagedPullRequestByNumber(
+  prNumber: number,
+  config: AgentConfig,
+): Promise<ManagedPullRequest | null> {
+  return getManagedPullRequestByNumberRest(prNumber, config)
 }
 
 export async function listIssueComments(

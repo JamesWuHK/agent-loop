@@ -83,6 +83,11 @@ agent-loop --wake-pr 456
 ~/.agent-loop/wake-queue/{owner-repo}/{machineId}.jsonl
 ```
 
+现在 wake 行为已经区分了两种调度模式：
+
+- `--wake-issue` / `--wake-pr`：优先只检查这个 issue / PR 对应的调度路径，不先做全仓库 discovery
+- `--wake-now`：显式允许这轮 wake 继续回退到普通全量扫描，适合手工兜底
+
 如果你已经在目标开发机上装了 GitHub self-hosted runner，现在仓库里的 [`agent-daemon-wake.yml`](.github/workflows/agent-daemon-wake.yml) 和 [`agent-ready-gate.yml`](.github/workflows/agent-ready-gate.yml) 会把 issue / PR / manual dispatch 事件翻译成这类本地 wake request：
 
 - `agent:ready` 的 issue 会先过 ready-gate，再 wake 本机 daemon，避免校验和认领抢跑

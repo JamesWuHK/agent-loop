@@ -20,8 +20,8 @@ import type {
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
 } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber } from '@agent/shared'
-import { pollAndClaim } from './claimer'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber } from '@agent/shared'
+import { claimSpecificIssue, pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
 import { createOrFindPr, pushBranch } from './pr-reporter'
@@ -71,6 +71,7 @@ import {
   drainWakeQueue,
   hasPendingWakeRequests,
   resolveWakeQueueHomeDirFromWorktreesBase,
+  type WakeRequest,
 } from './wake-queue'
 import {
   ManagedDaemonPresencePublisher,
@@ -256,6 +257,7 @@ export class AgentDaemon {
   private nextPollReason: string | null = null
   private nextPollDelayMs: number | null = null
   private pendingWakeRequested = false
+  private pendingWakeRequests: WakeRequest[] = []
   private healthServer: ReturnType<typeof Bun.serve> | null = null
   private healthServerConfig: HealthServerConfig = {
     host: DEFAULT_HEALTH_SERVER_HOST,
@@ -592,6 +594,77 @@ export class AgentDaemon {
     )
   }
 
+  private enqueueWakeRequests(requests: WakeRequest[]): void {
+    if (requests.length === 0) {
+      return
+    }
+
+    const deduped = new Map<string, WakeRequest>()
+    for (const request of [...this.pendingWakeRequests, ...requests]) {
+      if (deduped.has(request.dedupeKey)) {
+        deduped.delete(request.dedupeKey)
+      }
+      deduped.set(request.dedupeKey, request)
+    }
+
+    this.pendingWakeRequests = Array.from(deduped.values())
+  }
+
+  private maybeRequestQueuedWakeReconcile(): void {
+    if (this.pendingWakeRequests.length === 0) return
+    if (!this.running || this.shutdownRequested) return
+    this.requestImmediateReconcile('wake-request')
+  }
+
+  private async finalizePollCycle(
+    pollStartTime: number,
+    startedWork: boolean,
+  ): Promise<void> {
+    recordPoll(startedWork ? 'success' : 'no_issues')
+    recordPollDuration(Date.now() - pollStartTime)
+    if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
+      return
+    }
+    this.scheduleNextPoll()
+  }
+
+  private async maybeStartQueuedWakeRequest(): Promise<{
+    handled: boolean
+    startedWork: boolean
+    allowUntargetedFallback: boolean
+  }> {
+    const request = this.pendingWakeRequests.shift()
+    if (!request) {
+      return {
+        handled: false,
+        startedWork: false,
+        allowUntargetedFallback: false,
+      }
+    }
+
+    if (request.kind === 'now') {
+      return {
+        handled: true,
+        startedWork: false,
+        allowUntargetedFallback: true,
+      }
+    }
+
+    if (request.kind === 'issue') {
+      return {
+        handled: true,
+        startedWork: await this.maybeStartTargetedIssueWake(request.issueNumber),
+        allowUntargetedFallback: false,
+      }
+    }
+
+    return {
+      handled: true,
+      startedWork: await this.maybeStartTargetedPrWake(request.prNumber),
+      allowUntargetedFallback: false,
+    }
+  }
+
   async drainWakeQueueOnce(options: {
     scheduleImmediate?: boolean
   } = {}): Promise<void> {
@@ -617,6 +690,7 @@ export class AgentDaemon {
     this.logger.log(
       `[daemon] drained ${drained.requests.length} wake request(s) from ${this.wakeQueuePath}`,
     )
+    this.enqueueWakeRequests(drained.requests)
 
     if (options.scheduleImmediate !== false) {
       this.requestImmediateReconcile('wake-request')
@@ -1086,11 +1160,13 @@ export class AgentDaemon {
     if (this.shutdownRequested || !this.running) return
 
     const pollStartTime = Date.now()
+    const startedWithQueuedWakeRequests = this.pendingWakeRequests.length > 0
     this.lastPollAt = new Date().toISOString()
     this.refreshObservability()
     this.logger.log(`[daemon] poll cycle at ${this.lastPollAt}`)
 
     let startedWork = false
+    let allowUntargetedFallback = false
 
     while (!this.shutdownRequested && this.running) {
       const activeIssueTaskCount = Math.max(this.activeWorktrees.size, this.activeIssueProcesses.size)
@@ -1109,6 +1185,24 @@ export class AgentDaemon {
         }
         recordPollDuration(Date.now() - pollStartTime)
         this.scheduleNextPoll()
+        return
+      }
+
+      const wakeAttempt = await this.maybeStartQueuedWakeRequest()
+      if (wakeAttempt.handled) {
+        allowUntargetedFallback = allowUntargetedFallback || wakeAttempt.allowUntargetedFallback
+        if (wakeAttempt.startedWork) {
+          startedWork = true
+          continue
+        }
+      }
+
+      if (
+        startedWithQueuedWakeRequests
+        && this.pendingWakeRequests.length === 0
+        && !allowUntargetedFallback
+      ) {
+        await this.finalizePollCycle(pollStartTime, startedWork)
         return
       }
 
@@ -1158,20 +1252,12 @@ export class AgentDaemon {
         continue
       }
 
-      recordPoll(startedWork ? 'success' : 'no_issues')
-      recordPollDuration(Date.now() - pollStartTime)
-      if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
-        return
-      }
-      this.scheduleNextPoll()
+      await this.finalizePollCycle(pollStartTime, startedWork)
       return
     }
   }
 
-  private async maybeStartClaimedIssue(): Promise<boolean> {
-    const claimedIssue = await pollAndClaim(this.config, this.logger)
-    if (claimedIssue === null) return false
-
+  private startClaimedIssue(claimedIssue: AgentIssue): boolean {
     this.lastClaimedAt = new Date().toISOString()
     this.activeIssueProcesses.add(claimedIssue.number)
     const processPromise = this.processIssue(claimedIssue)
@@ -1182,6 +1268,7 @@ export class AgentDaemon {
         this.activeIssueProcesses.delete(claimedIssue.number)
         this.inFlightIssueProcesses.delete(processPromise)
         this.syncRuntimeMetrics()
+        this.maybeRequestQueuedWakeReconcile()
       })
 
     this.inFlightIssueProcesses.add(processPromise)
@@ -1189,10 +1276,14 @@ export class AgentDaemon {
     return true
   }
 
-  private async maybeStartStandalonePrReview(): Promise<boolean> {
-    const pendingPr = await this.findPendingStandalonePrReview()
-    if (!pendingPr) return false
+  private async maybeStartClaimedIssue(): Promise<boolean> {
+    const claimedIssue = await pollAndClaim(this.config, this.logger)
+    if (claimedIssue === null) return false
 
+    return this.startClaimedIssue(claimedIssue)
+  }
+
+  private startStandalonePrReview(pendingPr: ManagedPullRequest): boolean {
     this.activePrReviews.add(pendingPr.number)
     this.syncRuntimeMetrics()
     const reviewPromise = this.processStandalonePrReview(pendingPr)
@@ -1203,6 +1294,7 @@ export class AgentDaemon {
         this.activePrReviews.delete(pendingPr.number)
         this.inFlightPrTasks.delete(reviewPromise)
         this.syncRuntimeMetrics()
+        this.maybeRequestQueuedWakeReconcile()
       })
 
     this.inFlightPrTasks.add(reviewPromise)
@@ -1210,10 +1302,14 @@ export class AgentDaemon {
     return true
   }
 
-  private async maybeStartStandaloneApprovedPrMerge(): Promise<boolean> {
-    const pendingPr = await this.findPendingStandaloneApprovedPrMerge()
+  private async maybeStartStandalonePrReview(): Promise<boolean> {
+    const pendingPr = await this.findPendingStandalonePrReview()
     if (!pendingPr) return false
 
+    return this.startStandalonePrReview(pendingPr)
+  }
+
+  private startStandaloneApprovedPrMerge(pendingPr: ManagedPullRequest): boolean {
     this.activePrReviews.add(pendingPr.number)
     this.syncRuntimeMetrics()
     const mergePromise = this.processStandaloneApprovedPrMerge(pendingPr)
@@ -1224,9 +1320,35 @@ export class AgentDaemon {
         this.activePrReviews.delete(pendingPr.number)
         this.inFlightPrTasks.delete(mergePromise)
         this.syncRuntimeMetrics()
+        this.maybeRequestQueuedWakeReconcile()
       })
 
     this.inFlightPrTasks.add(mergePromise)
+    this.syncRuntimeMetrics()
+    return true
+  }
+
+  private async maybeStartStandaloneApprovedPrMerge(): Promise<boolean> {
+    const pendingPr = await this.findPendingStandaloneApprovedPrMerge()
+    if (!pendingPr) return false
+
+    return this.startStandaloneApprovedPrMerge(pendingPr)
+  }
+
+  private startResumableIssue(resumableIssue: ResumableIssueCandidate): boolean {
+    this.activeIssueProcesses.add(resumableIssue.issue.number)
+    const processPromise = this.processResumableIssue(resumableIssue)
+      .catch((err) => {
+        this.logger.error(`[daemon] processResumableIssue #${resumableIssue.issue.number} threw:`, err)
+      })
+      .finally(() => {
+        this.activeIssueProcesses.delete(resumableIssue.issue.number)
+        this.inFlightIssueProcesses.delete(processPromise)
+        this.syncRuntimeMetrics()
+        this.maybeRequestQueuedWakeReconcile()
+      })
+
+    this.inFlightIssueProcesses.add(processPromise)
     this.syncRuntimeMetrics()
     return true
   }
@@ -1240,20 +1362,60 @@ export class AgentDaemon {
     }
     if (!resumableIssue) return false
 
-    this.activeIssueProcesses.add(resumableIssue.issue.number)
-    const processPromise = this.processResumableIssue(resumableIssue)
-      .catch((err) => {
-        this.logger.error(`[daemon] processResumableIssue #${resumableIssue.issue.number} threw:`, err)
-      })
-      .finally(() => {
-        this.activeIssueProcesses.delete(resumableIssue.issue.number)
-        this.inFlightIssueProcesses.delete(processPromise)
-        this.syncRuntimeMetrics()
-      })
+    return this.startResumableIssue(resumableIssue)
+  }
 
-    this.inFlightIssueProcesses.add(processPromise)
-    this.syncRuntimeMetrics()
-    return true
+  private async maybeStartTargetedIssueWake(issueNumber: number): Promise<boolean> {
+    const resumableIssue = await this.findResumableIssueByNumber(issueNumber)
+    if (resumableIssue) {
+      if (await this.shouldPreferLinkedPrHandoff(resumableIssue)) {
+        const branch = resumableIssue.priorLease?.lease.branch ?? `agent/${resumableIssue.issue.number}/${this.config.machineId}`
+        const linkedPr = await this.findLinkedOpenPrForIssue(resumableIssue.issue.number, branch)
+        if (linkedPr && await this.maybeStartTargetedPrWake(linkedPr.number)) {
+          return true
+        }
+
+        return false
+      }
+
+      return this.startResumableIssue(resumableIssue)
+    }
+
+    const failedIssue = await this.findFailedIssueToRequeueByNumber(issueNumber)
+    if (failedIssue) {
+      await transitionIssueState(
+        failedIssue.number,
+        ISSUE_LABELS.READY,
+        ISSUE_LABELS.FAILED,
+        {
+          event: 'failed-requeue',
+          machine: this.config.machineId,
+          ts: new Date().toISOString(),
+          reason: 'wake-targeted-requeue-no-recovery-state',
+        },
+        this.config,
+      )
+
+      this.logger.log(`[daemon] targeted wake re-queued failed issue #${failedIssue.number} into ${ISSUE_LABELS.READY}`)
+      return true
+    }
+
+    const claimedIssue = await this.claimTargetedReadyIssue(issueNumber)
+    if (!claimedIssue) return false
+
+    return this.startClaimedIssue(claimedIssue)
+  }
+
+  private async maybeStartTargetedPrWake(prNumber: number): Promise<boolean> {
+    const mergeCandidate = await this.findPendingStandaloneApprovedPrMergeByNumber(prNumber)
+    if (mergeCandidate) {
+      return this.startStandaloneApprovedPrMerge(mergeCandidate)
+    }
+
+    const reviewCandidate = await this.findPendingStandalonePrReviewByNumber(prNumber)
+    if (!reviewCandidate) return false
+
+    return this.startStandalonePrReview(reviewCandidate)
   }
 
   private async shouldPreferLinkedPrHandoff(
@@ -1364,6 +1526,51 @@ export class AgentDaemon {
     }
 
     return null
+  }
+
+  private async findFailedIssueToRequeueByNumber(
+    issueNumber: number,
+  ): Promise<AgentIssue | null> {
+    const [issue, prs] = await Promise.all([
+      getAgentIssueByNumber(issueNumber, this.config),
+      listOpenAgentPullRequests(this.config),
+    ])
+    if (!issue) return null
+    if (this.activeIssueProcesses.has(issue.number)) return null
+
+    const openPrIssueNumbers = new Set(
+      prs
+        .map((pr) => extractIssueNumberFromPrTitle(pr.title))
+        .filter((number): number is number => number !== null),
+    )
+
+    const eligible = shouldRequeueFailedIssue(
+      issue,
+      hasWorktreeForIssue(issue.number, this.config),
+      openPrIssueNumbers.has(issue.number),
+      Date.now(),
+      AgentDaemon.FAILED_ISSUE_RESUME_COOLDOWN_MS,
+    )
+    if (!eligible) return null
+
+    const activeClaimMachine = await this.getActiveClaimMachine(issue.number)
+    if (activeClaimMachine && activeClaimMachine !== this.config.machineId) {
+      this.logger.log(`[daemon] skipping targeted failed requeue for #${issue.number}; active machine is ${activeClaimMachine}`)
+      return null
+    }
+
+    return issue
+  }
+
+  private async claimTargetedReadyIssue(
+    issueNumber: number,
+  ): Promise<AgentIssue | null> {
+    const issue = await getAgentIssueByNumber(issueNumber, this.config)
+    if (!issue) return null
+    if (issue.state !== 'ready') return null
+    if (this.activeIssueProcesses.has(issue.number)) return null
+
+    return claimSpecificIssue(issue, this.config, this.logger)
   }
 
   private async canStartManagedScope(
@@ -1481,6 +1688,98 @@ export class AgentDaemon {
     return candidate
   }
 
+  private async findResumableIssueByNumber(
+    issueNumber: number,
+  ): Promise<ResumableIssueCandidate | null> {
+    const [issue, prs] = await Promise.all([
+      getAgentIssueByNumber(issueNumber, this.config),
+      listOpenAgentPullRequests(this.config),
+    ])
+    const now = Date.now()
+    if (!issue) {
+      this.clearBlockedIssueResume(issueNumber)
+      return null
+    }
+    if (this.activeIssueProcesses.has(issue.number)) return null
+    if (this.activeWorktrees.has(issue.number)) return null
+
+    const attempts = this.failedIssueResumeAttempts.get(issue.number) ?? 0
+    const cooldownUntil = this.failedIssueResumeCooldownUntil.get(issue.number) ?? 0
+    const hasLocalWorktree = hasWorktreeForIssue(issue.number, this.config)
+    const comments = await listIssueComments(issue.number, this.config)
+    const activeLease = getActiveManagedLease(
+      comments,
+      'issue-process',
+      now,
+      this.config.recovery.leaseNoProgressTimeoutMs,
+    )
+    const latestLease = getLatestManagedLease(comments, 'issue-process')
+    const branch = latestLease?.lease.branch ?? `agent/${issue.number}/${this.config.machineId}`
+    const linkedPr = findLinkedManagedPr(prs, issue.number, branch)
+    const linkedPrComments = linkedPr && new Set(linkedPr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? await listIssueComments(linkedPr.number, this.config)
+      : []
+    const linkedPrCanResumeHumanNeededReview = linkedPr && new Set(linkedPr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      ? canResumeHumanNeededPrReview(
+          linkedPrComments,
+          AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+          linkedPr.headRefOid,
+          issue.body,
+        )
+      : false
+    const canAdoptLease = canDaemonAdoptManagedLease(
+      activeLease,
+      this.daemonInstanceId,
+      now,
+      this.config.recovery.leaseNoProgressTimeoutMs,
+    )
+    const canResumeFromLease = canResumeIssueFromLease(
+      latestLease,
+      activeLease,
+      canAdoptLease,
+    )
+    const resumable = shouldResumeManagedIssue(
+      issue,
+      hasLocalWorktree || canResumeFromLease,
+      attempts,
+      cooldownUntil,
+      now,
+      AgentDaemon.MAX_FAILED_ISSUE_RESUMES,
+    )
+    if (!resumable) {
+      this.clearBlockedIssueResume(issue.number)
+      return null
+    }
+
+    const blockedResume = issue.state === 'failed'
+      ? getFailedIssueResumeBlock(linkedPr, linkedPrCanResumeHumanNeededReview)
+      : null
+    if (blockedResume) {
+      if (
+        blockedResume.prNumber !== null
+        && canResumeBlockedIssueFromResolution(comments, issue.number, blockedResume.prNumber)
+      ) {
+        this.logger.log(
+          `[daemon] issue #${issue.number} received a matching resolution signal for linked PR #${blockedResume.prNumber}; retrying failed issue recovery`,
+        )
+        this.clearBlockedIssueResume(issue.number)
+      } else {
+        this.noteBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason)
+        await this.maybeEscalateBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason, comments)
+        return null
+      }
+    }
+
+    this.clearBlockedIssueResume(issue.number)
+    if (!canAdoptLease) return null
+
+    return {
+      issue,
+      priorLease: latestLease,
+      requiresRemoteAdoption: !hasLocalWorktree,
+    }
+  }
+
   private async getActiveClaimMachine(issueNumber: number): Promise<string | null> {
     const comments = await listIssueComments(issueNumber, this.config)
     return resolveActiveClaimMachine(comments)
@@ -1560,6 +1859,34 @@ export class AgentDaemon {
     return null
   }
 
+  private async findPendingStandaloneApprovedPrMergeByNumber(
+    prNumber: number,
+  ): Promise<ManagedPullRequest | null> {
+    const pr = await getManagedPullRequestByNumber(prNumber, this.config)
+    if (!pr) return null
+    if (pr.isDraft) return null
+    if (this.activePrReviews.has(pr.number)) return null
+    if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) return null
+
+    const linkedIssueNumber = extractIssueNumberFromPrTitle(pr.title)
+    if (
+      linkedIssueNumber !== null
+      && shouldDeferStandalonePrTaskForActiveIssueLease(
+        getActiveManagedLease(
+          await listIssueComments(linkedIssueNumber, this.config),
+          'issue-process',
+          Date.now(),
+          this.config.recovery.leaseNoProgressTimeoutMs,
+        ),
+      )
+    ) {
+      return null
+    }
+    if (!shouldMergeManagedPr(pr)) return null
+    if (!(await this.canStartManagedScope(pr.number, 'pr-merge'))) return null
+    return pr
+  }
+
   private async findLinkedOpenPrForIssue(
     issueNumber: number,
     branch: string,
@@ -1620,6 +1947,65 @@ export class AgentDaemon {
       ) {
         return pr
       }
+    }
+
+    return null
+  }
+
+  private async findPendingStandalonePrReviewByNumber(
+    prNumber: number,
+  ): Promise<ManagedPullRequest | null> {
+    const pr = await getManagedPullRequestByNumber(prNumber, this.config)
+    if (!pr) return null
+    if (pr.isDraft) return null
+    if (this.activePrReviews.has(pr.number)) return null
+    if (shouldDeferStandalonePrTaskForActiveIssueProcess(pr, this.activeIssueProcesses)) return null
+
+    const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+    if (
+      issueNumber !== null
+      && shouldDeferStandalonePrTaskForActiveIssueLease(
+        getActiveManagedLease(
+          await listIssueComments(issueNumber, this.config),
+          'issue-process',
+          Date.now(),
+          this.config.recovery.leaseNoProgressTimeoutMs,
+        ),
+      )
+    ) {
+      return null
+    }
+    if (!(await this.canStartManagedScope(pr.number, 'pr-review'))) return null
+
+    if (shouldReviewManagedPr(pr)) {
+      return pr
+    }
+
+    if (!new Set(pr.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)) return null
+
+    const comments = await listIssueComments(pr.number, this.config)
+    const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
+    if (canResumeHumanNeededPrReview(
+      comments,
+      AgentDaemon.MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
+      pr.headRefOid,
+      linkedIssue?.body ?? null,
+    )) {
+      return pr
+    }
+
+    const baseSyncState = await readRemoteBranchBaseSyncState(pr.headRefName, this.config.git.defaultBranch)
+    if (
+      baseSyncState
+      && shouldRefreshBlockedHumanNeededPr(
+        pr,
+        linkedIssue,
+        false,
+        baseSyncState.behindDefault,
+        canRetryPrReviewRefresh(comments, baseSyncState.headRefOid, baseSyncState.baseRefOid),
+      )
+    ) {
+      return pr
     }
 
     return null

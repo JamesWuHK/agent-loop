@@ -55,6 +55,30 @@ export async function pollAndClaim(
 
   logger.log(`[claimer] found ${issues.length} claimable issues`)
 
+  return claimFromCandidates(issues, config, logger, dependencies)
+}
+
+export async function claimSpecificIssue(
+  issue: AgentIssue,
+  config: AgentConfig,
+  logger = console,
+  dependencies: ClaimerDependencies = DEFAULT_CLAIMER_DEPENDENCIES,
+): Promise<AgentIssue | null> {
+  if (!issue.isClaimable) {
+    logger.log(`[claimer] targeted issue #${issue.number} is not claimable`)
+    return null
+  }
+
+  logger.log(`[claimer] attempting targeted claim for issue #${issue.number}`)
+  return claimFromCandidates([issue], config, logger, dependencies)
+}
+
+async function claimFromCandidates(
+  issues: AgentIssue[],
+  config: AgentConfig,
+  logger: typeof console,
+  dependencies: ClaimerDependencies,
+): Promise<AgentIssue | null> {
   const orderedIssues = dependencies.sortClaimableIssuesForScheduling(issues)
 
   // Try each issue in order with retry + jitter
