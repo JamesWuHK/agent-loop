@@ -20,6 +20,7 @@ import {
   getNextAutomatedPrReviewAttempt,
   getReusableAutomatedPrReviewFeedback,
   hydrateDetachedReviewWorktree,
+  materializeDetachedPrWorktree,
   normalizeWorktreePath,
   parsePrReviewResponse,
   reviewPrAgainstContext,
@@ -846,6 +847,43 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
       expect(excludeContent).toContain('/node_modules')
       expect(excludeContent).toContain('/.kilo/node_modules')
       expect(excludeContent).toContain('/apps/desktop/node_modules')
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('materializes detached review worktrees for slash-delimited branch names', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'pr-reviewer-materialize-'))
+    const remoteDir = join(tempDir, 'remote.git')
+    const repoDir = join(tempDir, 'repo')
+    const worktreePath = join(tempDir, 'review-worktree')
+
+    try {
+      mkdirSync(remoteDir, { recursive: true })
+      mkdirSync(repoDir, { recursive: true })
+
+      await Bun.$`git -C ${remoteDir} init --bare`.quiet()
+      await Bun.$`git -C ${repoDir} init -b main`.quiet()
+      await Bun.$`git -C ${repoDir} config user.name test`.quiet()
+      await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
+      await Bun.$`git -C ${repoDir} remote add origin ${remoteDir}`.quiet()
+
+      writeFileSync(join(repoDir, 'README.md'), 'base\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add README.md`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
+      await Bun.$`git -C ${repoDir} push -u origin main`.quiet()
+
+      await Bun.$`git -C ${repoDir} checkout -b agent/380/codex-20260409`.quiet()
+      writeFileSync(join(repoDir, 'feature.txt'), 'review me\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add feature.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "feature"`.quiet()
+      await Bun.$`git -C ${repoDir} push -u origin agent/380/codex-20260409`.quiet()
+
+      await materializeDetachedPrWorktree(repoDir, worktreePath, 'agent/380/codex-20260409', console)
+
+      expect(existsSync(join(worktreePath, 'feature.txt'))).toBe(true)
+      expect((await Bun.$`git -C ${worktreePath} rev-parse --abbrev-ref HEAD`.quiet().text()).trim()).toBe('HEAD')
+      expect((await Bun.$`cat ${join(worktreePath, 'feature.txt')}`.text()).trim()).toBe('review me')
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }

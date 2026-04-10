@@ -1100,6 +1100,45 @@ function resolveCommonGitDirForWorktree(worktreePath: string): string | null {
   return commonDir ? resolve(gitDir, commonDir) : gitDir
 }
 
+async function runGitCommand(
+  repoRoot: string,
+  args: string[],
+): Promise<string> {
+  const proc = Bun.spawn([
+    'git',
+    '-C',
+    repoRoot,
+    ...args,
+  ], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new Error(stderr || stdout || `git ${args.join(' ')} failed`)
+  }
+
+  return stdout
+}
+
+export async function materializeDetachedPrWorktree(
+  repoRoot: string,
+  worktreePath: string,
+  headRefName: string,
+  logger = console,
+): Promise<void> {
+  const remoteHeadRef = `origin/${headRefName}`
+  await runGitCommand(repoRoot, ['fetch', 'origin', headRefName])
+  await runGitCommand(repoRoot, ['worktree', 'add', '--detach', worktreePath, remoteHeadRef])
+  hydrateDetachedReviewWorktree(repoRoot, worktreePath, logger)
+  logger.log(`[pr-review] created detached review worktree ${worktreePath} for ${headRefName}`)
+}
+
 export async function createDetachedPrWorktree(
   prNumber: number,
   config: AgentConfig,
@@ -1115,17 +1154,14 @@ export async function createDetachedPrWorktree(
     mkdtempSync(join(tmpdir(), 'agent-loop-pr-review-')),
   )
 
-  await $`git -C ${repoRoot} fetch origin ${context.headRefName}`.quiet()
-  await $`git -C ${repoRoot} worktree add --detach ${worktreePath} origin/${context.headRefName}`.quiet()
-  hydrateDetachedReviewWorktree(repoRoot, worktreePath, logger)
-  logger.log(`[pr-review] created detached review worktree ${worktreePath} for ${context.headRefName}`)
+  await materializeDetachedPrWorktree(repoRoot, worktreePath, context.headRefName, logger)
 
   return {
     worktreePath,
     headRefName: context.headRefName,
     cleanup: async () => {
       try {
-        await $`git -C ${repoRoot} worktree remove --force ${worktreePath}`.quiet()
+        await runGitCommand(repoRoot, ['worktree', 'remove', '--force', worktreePath])
       } catch (error) {
         if (!isMissingGitWorktreeError(error)) {
           throw error
@@ -1153,5 +1189,5 @@ export function extractIssueNumberFromPrBody(body: string): number | null {
 }
 
 async function resolveRepoRoot(): Promise<string> {
-  return (await $`git rev-parse --show-toplevel`.quiet().text()).trim()
+  return (await runGitCommand(process.cwd(), ['rev-parse', '--show-toplevel'])).trim()
 }
