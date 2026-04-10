@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import type { AgentConfig, IssueComment } from '@agent/shared'
 import {
   buildManagedDaemonPresenceComment,
+  buildManagedDaemonUpgradeAnnouncementComment,
   extractManagedDaemonPresenceIssueNumber,
   extractManagedDaemonPresenceComment,
+  extractManagedDaemonUpgradeAnnouncementComment,
+  getLatestManagedDaemonUpgradeAnnouncement,
   listActiveManagedDaemonPresenceComments,
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresence,
@@ -137,6 +140,49 @@ describe('managed daemon presence helpers', () => {
     const body = buildManagedDaemonPresenceComment(presence)
 
     expect(extractManagedDaemonPresenceComment(body)).toEqual(presence)
+  })
+
+  test('round-trips managed daemon upgrade announcement comments and picks the newest one', () => {
+    const older = {
+      repo: TEST_CONFIG.repo,
+      channel: 'master',
+      latestVersion: '0.1.1',
+      latestRevision: '1111111111111111111111111111111111111111',
+      latestCommitAt: '2026-04-11T09:00:00.000Z',
+      announcedAt: '2026-04-11T09:00:10.000Z',
+      announcedByMachineId: 'machine-a',
+      announcedByDaemonInstanceId: 'daemon-a',
+    }
+    const newer = {
+      ...older,
+      latestVersion: '0.1.2',
+      latestRevision: '2222222222222222222222222222222222222222',
+      latestCommitAt: '2026-04-11T09:10:00.000Z',
+      announcedAt: '2026-04-11T09:10:10.000Z',
+      announcedByMachineId: 'machine-b',
+      announcedByDaemonInstanceId: 'daemon-b',
+    }
+
+    expect(extractManagedDaemonUpgradeAnnouncementComment(
+      buildManagedDaemonUpgradeAnnouncementComment(newer),
+    )).toEqual(newer)
+
+    const latest = getLatestManagedDaemonUpgradeAnnouncement([
+      {
+        commentId: 11,
+        body: buildManagedDaemonUpgradeAnnouncementComment(older),
+        createdAt: older.announcedAt,
+        updatedAt: older.announcedAt,
+      },
+      {
+        commentId: 12,
+        body: buildManagedDaemonUpgradeAnnouncementComment(newer),
+        createdAt: newer.announcedAt,
+        updatedAt: newer.announcedAt,
+      },
+    ], TEST_CONFIG.repo)
+
+    expect(latest?.announcement.latestRevision).toBe(newer.latestRevision)
   })
 
   test('filters active managed daemon presence comments by repo and expiry', () => {

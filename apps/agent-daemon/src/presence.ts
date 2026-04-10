@@ -11,6 +11,7 @@ import {
 const MANAGED_DAEMON_PRESENCE_ISSUE_TITLE = 'Agent Loop Presence'
 const MANAGED_DAEMON_PRESENCE_ISSUE_MARKER = '<!-- agent-loop:presence-registry -->'
 const MANAGED_DAEMON_PRESENCE_COMMENT_PREFIX = '<!-- agent-loop:presence '
+const MANAGED_DAEMON_UPGRADE_ANNOUNCEMENT_COMMENT_PREFIX = '<!-- agent-loop:upgrade-announcement '
 const GITHUB_REST_TIMEOUT_MS = 180_000
 
 export type ManagedDaemonPresenceStatus = 'idle' | 'busy' | 'stopped'
@@ -52,6 +53,21 @@ export interface ManagedDaemonPresenceRuntimeState {
   latestVersion: string | null
   latestRevision: string | null
   upgradeCheckedAt: string | null
+}
+
+export interface ManagedDaemonUpgradeAnnouncement {
+  repo: string
+  channel: string | null
+  latestVersion: string | null
+  latestRevision: string | null
+  latestCommitAt: string | null
+  announcedAt: string
+  announcedByMachineId: string
+  announcedByDaemonInstanceId: string
+}
+
+export interface ManagedDaemonUpgradeAnnouncementComment extends IssueComment {
+  announcement: ManagedDaemonUpgradeAnnouncement
 }
 
 export interface PresenceApiAdapter {
@@ -256,6 +272,23 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Latest known revision: ${presence.latestRevision ?? 'unknown'}`
 }
 
+export function buildManagedDaemonUpgradeAnnouncementComment(
+  announcement: ManagedDaemonUpgradeAnnouncement,
+): string {
+  return `${MANAGED_DAEMON_UPGRADE_ANNOUNCEMENT_COMMENT_PREFIX}${JSON.stringify(announcement)} -->
+## Agent Loop upgrade announcement
+
+A managed daemon detected a newer agent-loop build and is broadcasting it to other machines.
+
+- Repo: ${announcement.repo}
+- Channel: ${announcement.channel ?? 'default'}
+- Latest version: ${announcement.latestVersion ?? 'unknown'}
+- Latest revision: ${announcement.latestRevision ?? 'unknown'}
+- Latest commit at: ${announcement.latestCommitAt ?? 'unknown'}
+- Announced at: ${announcement.announcedAt}
+- Announced by: ${announcement.announcedByMachineId} (${announcement.announcedByDaemonInstanceId})`
+}
+
 export function extractManagedDaemonPresenceComment(body: string): ManagedDaemonPresence | null {
   const match = body.match(/<!-- agent-loop:presence (\{.*\}) -->/)
   if (!match?.[1]) return null
@@ -326,6 +359,33 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
   }
 }
 
+export function extractManagedDaemonUpgradeAnnouncementComment(
+  body: string,
+): ManagedDaemonUpgradeAnnouncement | null {
+  const match = body.match(/<!-- agent-loop:upgrade-announcement (\{.*\}) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<ManagedDaemonUpgradeAnnouncement>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (typeof parsed.repo !== 'string' || typeof parsed.announcedAt !== 'string') return null
+    if (typeof parsed.announcedByMachineId !== 'string' || typeof parsed.announcedByDaemonInstanceId !== 'string') return null
+
+    return {
+      repo: parsed.repo,
+      channel: typeof parsed.channel === 'string' && parsed.channel.trim().length > 0 ? parsed.channel : null,
+      latestVersion: typeof parsed.latestVersion === 'string' && parsed.latestVersion.trim().length > 0 ? parsed.latestVersion : null,
+      latestRevision: typeof parsed.latestRevision === 'string' && parsed.latestRevision.trim().length > 0 ? parsed.latestRevision : null,
+      latestCommitAt: typeof parsed.latestCommitAt === 'string' && parsed.latestCommitAt.trim().length > 0 ? parsed.latestCommitAt : null,
+      announcedAt: parsed.announcedAt,
+      announcedByMachineId: parsed.announcedByMachineId,
+      announcedByDaemonInstanceId: parsed.announcedByDaemonInstanceId,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function parseManagedDaemonPresenceComments(
   comments: IssueComment[],
 ): ManagedDaemonPresenceComment[] {
@@ -339,6 +399,35 @@ export function parseManagedDaemonPresenceComments(
       } satisfies ManagedDaemonPresenceComment
     })
     .filter((comment): comment is ManagedDaemonPresenceComment => comment !== null)
+}
+
+export function parseManagedDaemonUpgradeAnnouncementComments(
+  comments: IssueComment[],
+): ManagedDaemonUpgradeAnnouncementComment[] {
+  return comments
+    .map((comment) => {
+      const announcement = extractManagedDaemonUpgradeAnnouncementComment(comment.body)
+      if (!announcement) return null
+
+      return {
+        ...comment,
+        announcement,
+      } satisfies ManagedDaemonUpgradeAnnouncementComment
+    })
+    .filter((comment): comment is ManagedDaemonUpgradeAnnouncementComment => comment !== null)
+}
+
+export function getLatestManagedDaemonUpgradeAnnouncement(
+  comments: IssueComment[],
+  repo: string,
+): ManagedDaemonUpgradeAnnouncementComment | null {
+  return parseManagedDaemonUpgradeAnnouncementComments(comments)
+    .filter((comment) => comment.announcement.repo === repo)
+    .sort((left, right) => {
+      const announcedDiff = Date.parse(right.announcement.announcedAt) - Date.parse(left.announcement.announcedAt)
+      if (announcedDiff !== 0) return announcedDiff
+      return right.commentId - left.commentId
+    })[0] ?? null
 }
 
 export function isManagedDaemonPresenceExpired(

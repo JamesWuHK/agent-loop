@@ -138,7 +138,32 @@ describe('buildConfig', () => {
       channel: null,
       checkIntervalMs: 900_000,
       reminderIntervalMs: 3_600_000,
+      autoApply: false,
     })
+  })
+
+  test('allows home config to opt into automatic agent-loop upgrades', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          upgrade: {
+            enabled: true,
+            repo: 'JamesWuHK/agent-loop',
+            channel: 'master',
+            checkIntervalMs: 900_000,
+            reminderIntervalMs: 3_600_000,
+            autoApply: true,
+          },
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.upgrade?.autoApply).toBe(true)
   })
 
   test('allows repo-local config to disable agent fallback explicitly', () => {

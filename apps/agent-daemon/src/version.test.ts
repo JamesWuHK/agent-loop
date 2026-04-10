@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import type { AgentConfig, AgentLoopBuildMetadata } from '@agent/shared'
 import {
   abbreviateRevision,
+  applyAgentLoopUpgradeToLocalCheckout,
   checkForAgentLoopUpgrade,
   compareAgentLoopVersions,
   createInitialAgentLoopUpgradeMetadata,
+  listLocalAgentLoopUpgradeDirtyPaths,
+  resolveAgentLoopUpgradePolicy,
 } from './version'
 
 const TEST_CONFIG: AgentConfig = {
@@ -54,6 +57,7 @@ const TEST_CONFIG: AgentConfig = {
     channel: 'master',
     checkIntervalMs: 60_000,
     reminderIntervalMs: 3_600_000,
+    autoApply: false,
   },
 }
 
@@ -96,6 +100,124 @@ describe('createInitialAgentLoopUpgradeMetadata', () => {
 
     expect(metadata.status).toBe('disabled')
     expect(metadata.safeToUpgradeNow).toBe(true)
+  })
+})
+
+describe('resolveAgentLoopUpgradePolicy', () => {
+  test('keeps auto-apply disabled unless explicitly opted in', () => {
+    expect(resolveAgentLoopUpgradePolicy(TEST_CONFIG, LOCAL_BUILD).autoApply).toBe(false)
+    expect(resolveAgentLoopUpgradePolicy({
+      ...TEST_CONFIG,
+      upgrade: {
+        ...TEST_CONFIG.upgrade!,
+        autoApply: true,
+      },
+    }, LOCAL_BUILD).autoApply).toBe(true)
+  })
+})
+
+describe('listLocalAgentLoopUpgradeDirtyPaths', () => {
+  test('ignores local runtime artifacts while preserving real dirty paths', () => {
+    expect(listLocalAgentLoopUpgradeDirtyPaths([
+      '?? .runtime/',
+      ' M README.md',
+      '?? docs/design-notes.md',
+    ].join('\n'))).toEqual([
+      'README.md',
+      'docs/design-notes.md',
+    ])
+  })
+})
+
+describe('applyAgentLoopUpgradeToLocalCheckout', () => {
+  test('pulls the tracked channel and refreshes dependencies for clean matching checkouts', () => {
+    const calls: string[] = []
+
+    const result = applyAgentLoopUpgradeToLocalCheckout({
+      build: LOCAL_BUILD,
+      upgrade: {
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+      },
+    }, {
+      runCommand: (command, args) => {
+        calls.push(`${command} ${args.join(' ')}`)
+        const rendered = `${command} ${args.join(' ')}`
+        if (rendered === 'git status --porcelain --untracked-files=all') {
+          return { stdout: '?? .runtime/\n', stderr: '' }
+        }
+        if (rendered === 'git branch --show-current') {
+          return { stdout: 'master\n', stderr: '' }
+        }
+        if (rendered === 'git rev-parse HEAD') {
+          return {
+            stdout: calls.filter((value) => value === 'git rev-parse HEAD').length === 1
+              ? '1111111111111111111111111111111111111111\n'
+              : '2222222222222222222222222222222222222222\n',
+            stderr: '',
+          }
+        }
+        if (rendered === 'git pull --ff-only origin master') {
+          return { stdout: 'Updating 1111111..2222222\nFast-forward\n', stderr: '' }
+        }
+        if (command === process.execPath && args.join(' ') === 'install --frozen-lockfile') {
+          return { stdout: 'bun install v1.3.6\n', stderr: '' }
+        }
+        throw new Error(`Unexpected command: ${rendered}`)
+      },
+    })
+
+    expect(result).toEqual({
+      currentBranch: 'master',
+      previousRevision: '1111111111111111111111111111111111111111',
+      nextRevision: '2222222222222222222222222222222222222222',
+      changed: true,
+    })
+    expect(calls).toEqual([
+      'git status --porcelain --untracked-files=all',
+      'git branch --show-current',
+      'git rev-parse HEAD',
+      'git pull --ff-only origin master',
+      `${process.execPath} install --frozen-lockfile`,
+      'git rev-parse HEAD',
+    ])
+  })
+
+  test('refuses to auto-upgrade dirty or branch-mismatched local checkouts', () => {
+    expect(() => applyAgentLoopUpgradeToLocalCheckout({
+      build: LOCAL_BUILD,
+      upgrade: {
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+      },
+    }, {
+      runCommand: (command, args) => {
+        const rendered = `${command} ${args.join(' ')}`
+        if (rendered === 'git status --porcelain --untracked-files=all') {
+          return { stdout: ' M README.md\n', stderr: '' }
+        }
+        throw new Error(`Unexpected command: ${rendered}`)
+      },
+    })).toThrow('agent-loop checkout has local changes')
+
+    expect(() => applyAgentLoopUpgradeToLocalCheckout({
+      build: LOCAL_BUILD,
+      upgrade: {
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+      },
+    }, {
+      runCommand: (command, args) => {
+        const rendered = `${command} ${args.join(' ')}`
+        if (rendered === 'git status --porcelain --untracked-files=all') {
+          return { stdout: '', stderr: '' }
+        }
+        if (rendered === 'git branch --show-current') {
+          return { stdout: 'develop\n', stderr: '' }
+        }
+        throw new Error(`Unexpected command: ${rendered}`)
+      },
+    })).toThrow('requires current branch master, found develop')
   })
 })
 

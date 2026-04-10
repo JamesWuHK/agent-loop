@@ -230,6 +230,7 @@ export function buildConfig(
         fileConfig.upgrade?.reminderIntervalMs,
         DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
       ),
+      autoApply: fileConfig.upgrade?.autoApply === true,
     },
   }
 
