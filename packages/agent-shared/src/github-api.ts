@@ -62,7 +62,9 @@ export function buildGhEnv(config: Pick<AgentConfig, 'pat'>): Record<string, str
   return env
 }
 
-const DEFAULT_GH_COMMAND_TIMEOUT_MS = 180_000
+// Keep the default below the daemon poll interval so a single slow GitHub call
+// cannot stall the whole scheduler for multiple minutes.
+const DEFAULT_GH_COMMAND_TIMEOUT_MS = 30_000
 
 export interface GhCommandResult {
   stdout: string
