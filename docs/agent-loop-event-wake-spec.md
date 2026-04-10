@@ -1,6 +1,6 @@
 # Agent Loop Event Wake Spec
 
-- Status: draft
+- Status: partially implemented
 - Owner: engineering
 - Last updated: 2026-04-10
 - Related: `docs/issue-writing.md`, `.github/workflows/agent-ready-gate.yml`
@@ -16,7 +16,17 @@ This document proposes a hybrid model:
 - the local daemon performs a targeted reconcile
 - low-frequency polling remains as a safety net
 
-This is a design draft only. It does not change the current daemon behavior by itself.
+Phase 1 local wake delivery is now implemented in this repo:
+
+- CLI wake commands and a durable local wake queue
+- loopback wake endpoint in the daemon
+- GitHub Actions workflows that translate GitHub events into local wake requests on `self-hosted` runners
+
+What is still pending from this spec:
+
+- targeted reconcile after a wake instead of immediate full discovery
+- slower idle safety-net polling after wake delivery proves stable
+- explicit wake-latency / missed-event measurement
 
 ## Goals
 
@@ -159,11 +169,11 @@ In practice, this should help with rate limits, but it is not a full replacement
 
 ## Rollout
 
-1. Add CLI wake commands and a durable local wake queue.
-2. Add a loopback wake endpoint in the daemon.
-3. Add a GitHub Actions workflow that routes events to self-hosted runners.
-4. Reduce idle poll frequency after wake delivery is stable.
-5. Measure wake latency, missed-event recovery, and GraphQL consumption.
+1. Done: add CLI wake commands and a durable local wake queue.
+2. Done: add a loopback wake endpoint in the daemon.
+3. Done: add GitHub Actions workflows that route events to self-hosted runners.
+4. Pending: reduce idle poll frequency after wake delivery is stable.
+5. Pending: measure wake latency, missed-event recovery, and GraphQL consumption.
 
 ## Acceptance
 
