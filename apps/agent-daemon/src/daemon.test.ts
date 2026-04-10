@@ -245,6 +245,84 @@ describe('wake queue integration', () => {
 
     await daemon.stop()
   })
+
+  test('tries targeted wake requests before falling back to untargeted discovery', async () => {
+    const daemon = createTestDaemon()
+    let targetedWakeAttempts = 0
+    let untargetedResumeAttempts = 0
+    let untargetedClaimAttempts = 0
+    let scheduleCount = 0
+
+    ;(daemon as any).running = true
+    ;(daemon as any).pendingWakeRequests = [{
+      kind: 'issue',
+      issueNumber: 374,
+      reason: 'issues.labeled:agent:ready',
+      sourceEvent: 'issues.labeled',
+      dedupeKey: 'issues:labeled:374:agent:ready',
+      requestedAt: '2026-04-11T09:12:00.000Z',
+    }]
+    ;(daemon as any).refreshObservability = () => undefined
+    ;(daemon as any).maybeStartTargetedIssueWake = async (issueNumber: number) => {
+      targetedWakeAttempts += issueNumber === 374 ? 1 : 0
+      return false
+    }
+    ;(daemon as any).maybeStartResumableIssue = async () => {
+      untargetedResumeAttempts += 1
+      return false
+    }
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => {
+      untargetedClaimAttempts += 1
+      return false
+    }
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
+    ;(daemon as any).scheduleNextPoll = () => {
+      scheduleCount += 1
+    }
+
+    await (daemon as any).pollCycle()
+
+    expect(targetedWakeAttempts).toBe(1)
+    expect(untargetedResumeAttempts).toBe(0)
+    expect(untargetedClaimAttempts).toBe(0)
+    expect(scheduleCount).toBe(1)
+  })
+
+  test('wake-now requests still allow untargeted discovery fallback', async () => {
+    const daemon = createTestDaemon()
+    let untargetedResumeAttempts = 0
+    let scheduleCount = 0
+
+    ;(daemon as any).running = true
+    ;(daemon as any).pendingWakeRequests = [{
+      kind: 'now',
+      reason: 'workflow_dispatch',
+      sourceEvent: 'workflow_dispatch',
+      dedupeKey: 'workflow_dispatch:now',
+      requestedAt: '2026-04-11T09:13:00.000Z',
+    }]
+    ;(daemon as any).refreshObservability = () => undefined
+    ;(daemon as any).maybeStartResumableIssue = async () => {
+      untargetedResumeAttempts += 1
+      return false
+    }
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => false
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
+    ;(daemon as any).scheduleNextPoll = () => {
+      scheduleCount += 1
+    }
+
+    await (daemon as any).pollCycle()
+
+    expect(untargetedResumeAttempts).toBe(1)
+    expect(scheduleCount).toBe(1)
+  })
 })
 
 describe('agent-loop upgrade coordination', () => {

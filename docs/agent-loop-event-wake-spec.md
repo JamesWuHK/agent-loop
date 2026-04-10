@@ -24,7 +24,6 @@ Phase 1 local wake delivery is now implemented in this repo:
 
 What is still pending from this spec:
 
-- targeted reconcile after a wake instead of immediate full discovery
 - slower idle safety-net polling after wake delivery proves stable
 - explicit wake-latency / missed-event measurement
 
