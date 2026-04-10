@@ -42,6 +42,107 @@ import {
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 
+function createTestDaemon(configOverrides: Partial<AgentConfig> = {}): AgentDaemon {
+  const config: AgentConfig = {
+    machineId: 'codex-dev',
+    repo: 'JamesWuHK/digital-employee',
+    pat: 'test-token',
+    pollIntervalMs: 60_000,
+    concurrency: 1,
+    requestedConcurrency: 1,
+    concurrencyPolicy: {
+      requested: 1,
+      effective: 1,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
+    },
+    scheduling: {
+      concurrencyByRepo: {},
+      concurrencyByProfile: {},
+    },
+    recovery: {
+      heartbeatIntervalMs: 30_000,
+      leaseTtlMs: 60_000,
+      workerIdleTimeoutMs: 300_000,
+      leaseAdoptionBackoffMs: 5_000,
+      leaseNoProgressTimeoutMs: 360_000,
+    },
+    worktreesBase: '/tmp/worktrees',
+    project: {
+      profile: 'desktop-vite',
+    },
+    agent: {
+      primary: 'codex',
+      fallback: 'claude',
+      claudePath: 'claude',
+      codexPath: 'codex',
+      timeoutMs: 60_000,
+    },
+    git: {
+      defaultBranch: 'main',
+      authorName: 'agent-loop',
+      authorEmail: 'agent-loop@local',
+    },
+    ...configOverrides,
+  }
+
+  return new AgentDaemon(config, console)
+}
+
+async function createResumableIssueWorktreeFixture(issueNumber = 329, machineId = 'codex-20260403') {
+  const tempDir = mkdtempSync(join(tmpdir(), 'daemon-resumable-issue-worktree-'))
+  const repoDir = join(tempDir, 'repo')
+  const worktreesBase = join(tempDir, 'worktrees')
+  const worktreePath = join(worktreesBase, `issue-${issueNumber}-${machineId}`)
+  const branch = `agent/${issueNumber}/${machineId}`
+
+  mkdirSync(repoDir, { recursive: true })
+  mkdirSync(worktreesBase, { recursive: true })
+
+  await Bun.$`git -C ${repoDir} init -b main`.quiet()
+  await Bun.$`git -C ${repoDir} config user.name test`.quiet()
+  await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
+
+  writeFileSync(join(repoDir, 'README.md'), 'base\n', 'utf-8')
+  await Bun.$`git -C ${repoDir} add README.md`.quiet()
+  await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
+  await Bun.$`git -C ${repoDir} worktree add ${worktreePath} -b ${branch}`.quiet()
+
+  return {
+    tempDir,
+    repoDir,
+    worktreesBase,
+    worktreePath,
+    branch,
+  }
+}
+
+function createHistoricalLeaseComment(issueNumber: number, branch: string, worktreeId: string): ManagedLeaseComment {
+  return {
+    commentId: 1,
+    body: '',
+    createdAt: '2026-04-08T17:37:08.000Z',
+    updatedAt: '2026-04-08T17:37:08.000Z',
+    lease: {
+      leaseId: 'lease-1',
+      scope: 'issue-process',
+      issueNumber,
+      machineId: 'codex-dev',
+      daemonInstanceId: 'daemon-old',
+      branch,
+      worktreeId,
+      phase: 'issue-recovery',
+      startedAt: '2026-04-08T17:37:07.000Z',
+      lastHeartbeatAt: '2026-04-08T17:37:07.000Z',
+      expiresAt: '2026-04-08T17:38:07.000Z',
+      attempt: 10,
+      lastProgressAt: '2026-04-08T17:37:07.000Z',
+      status: 'completed',
+    },
+  }
+}
+
 describe('issue preflight comments', () => {
   test('extracts the latest automated preflight blocker from issue comments', () => {
     const older = buildIssuePreflightFailureComment(
@@ -1226,6 +1327,75 @@ describe('daemon merge recovery helpers', () => {
     } finally {
       process.chdir(previousCwd)
       rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('uses the local worktree branch when acquiring a recovery lease after machine-id changes', async () => {
+    const fixture = await createResumableIssueWorktreeFixture()
+    const previousCwd = process.cwd()
+
+    try {
+      process.chdir(fixture.repoDir)
+
+      const daemon = createTestDaemon({
+        machineId: 'codex-20260403',
+        worktreesBase: fixture.worktreesBase,
+      })
+      const priorLease = createHistoricalLeaseComment(329, 'agent/329/codex-dev', 'issue-329-codex-dev')
+
+      let leasedBranch: string | null = null
+      ;(daemon as any).acquireLeaseForScope = async (input: { branch: string }) => {
+        leasedBranch = input.branch
+        return null
+      }
+
+      await (daemon as any).processResumableIssue({
+        issue: {
+          number: 329,
+          state: 'failed',
+          title: 'Issue 329',
+        },
+        priorLease,
+        requiresRemoteAdoption: false,
+      })
+
+      expect(leasedBranch).not.toBeNull()
+      if (leasedBranch === null) {
+        throw new Error('expected recovery lease acquisition to record a branch')
+      }
+      if (leasedBranch !== fixture.branch) {
+        throw new Error(`expected leased branch ${fixture.branch}, received ${leasedBranch}`)
+      }
+    } finally {
+      process.chdir(previousCwd)
+      rmSync(fixture.tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('keeps using the actual local worktree branch when resuming an existing recovery worktree', async () => {
+    const fixture = await createResumableIssueWorktreeFixture()
+    const previousCwd = process.cwd()
+
+    try {
+      process.chdir(fixture.repoDir)
+
+      const daemon = createTestDaemon({
+        machineId: 'codex-20260403',
+        worktreesBase: fixture.worktreesBase,
+      })
+      const priorLease = createHistoricalLeaseComment(329, 'agent/329/codex-dev', 'issue-329-codex-dev')
+
+      const ensured = await (daemon as any).ensureResumableIssueWorktree(329, priorLease)
+
+      expect(ensured).toMatchObject({
+        status: 'ready',
+        worktreePath: fixture.worktreePath,
+        branch: fixture.branch,
+        worktreeId: 'issue-329-codex-20260403',
+      })
+    } finally {
+      process.chdir(previousCwd)
+      rmSync(fixture.tempDir, { recursive: true, force: true })
     }
   })
 })

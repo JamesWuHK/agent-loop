@@ -11,6 +11,7 @@ import {
 const MANAGED_DAEMON_PRESENCE_ISSUE_TITLE = 'Agent Loop Presence'
 const MANAGED_DAEMON_PRESENCE_ISSUE_MARKER = '<!-- agent-loop:presence-registry -->'
 const MANAGED_DAEMON_PRESENCE_COMMENT_PREFIX = '<!-- agent-loop:presence '
+const GITHUB_REST_TIMEOUT_MS = 180_000
 
 export type ManagedDaemonPresenceStatus = 'idle' | 'busy' | 'stopped'
 
@@ -148,7 +149,7 @@ async function runGitHubRestRequest(
     return response.stdout
   }
 
-  const response = await fetch(`https://api.github.com/${normalizedPath}`, {
+  const response = await fetchWithTimeout(`https://api.github.com/${normalizedPath}`, {
     method,
     headers: {
       Authorization: `token ${config.pat}`,
@@ -162,6 +163,29 @@ async function runGitHubRestRequest(
     throw new Error(`GitHub REST ${method} ${normalizedPath} failed (HTTP ${response.status}): ${parseGitHubRestErrorMessage(text)}`)
   }
   return text
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = GITHUB_REST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`GitHub REST request timed out after ${timeoutMs}ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 function parseGitHubRestErrorMessage(body: string): string {

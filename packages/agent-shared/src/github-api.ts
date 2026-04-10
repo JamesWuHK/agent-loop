@@ -62,7 +62,7 @@ export function buildGhEnv(config: Pick<AgentConfig, 'pat'>): Record<string, str
   return env
 }
 
-const DEFAULT_GH_COMMAND_TIMEOUT_MS = 30_000
+const DEFAULT_GH_COMMAND_TIMEOUT_MS = 180_000
 
 export interface GhCommandResult {
   stdout: string
@@ -132,7 +132,75 @@ export async function runBoundedGhCommand(
 
   return {
     stdout,
-    stderr: timedOut ? appendGhTimeoutMessage(stderr, args, timeoutMs) : stderr,
+    stderr: timedOut ? appendGhTimeoutMessage(stderr, `gh ${args.join(' ')}`, timeoutMs) : stderr,
+    exitCode,
+    timedOut,
+  }
+}
+
+async function runBoundedShellGhCommand(
+  cmd: string,
+  config: Pick<AgentConfig, 'pat' | 'repo'>,
+  options: {
+    timeoutMs?: number
+  } = {},
+): Promise<GhCommandResult> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_GH_COMMAND_TIMEOUT_MS)
+  const fullCmd = `gh ${cmd} --repo ${config.repo}`
+  const proc = Bun.spawn(['sh', '-c', fullCmd], {
+    detached: true,
+    env: buildGhEnv(config),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const stdoutPromise = proc.stdout
+    ? new Response(proc.stdout).text().catch(() => '')
+    : Promise.resolve('')
+  const stderrPromise = proc.stderr
+    ? new Response(proc.stderr).text().catch(() => '')
+    : Promise.resolve('')
+
+  const exitOutcome = await Promise.race([
+    proc.exited.then((exitCode) => ({
+      kind: 'exited' as const,
+      exitCode,
+    })),
+    Bun.sleep(timeoutMs).then(() => ({
+      kind: 'timed-out' as const,
+    })),
+  ])
+
+  let timedOut = false
+  let exitCode: number
+  if (exitOutcome.kind === 'exited') {
+    exitCode = exitOutcome.exitCode
+  } else {
+    timedOut = true
+    await terminateProcessTree(proc.pid).catch(() => {
+      // best-effort cleanup only
+    })
+    void proc.stdout?.cancel().catch(() => {
+      // stream may already be closed
+    })
+    void proc.stderr?.cancel().catch(() => {
+      // stream may already be closed
+    })
+    exitCode = await settleWithin(proc.exited, 124, 250)
+    if (exitCode === 0) {
+      exitCode = 124
+    }
+  }
+
+  const [stdout, stderr] = timedOut
+    ? await Promise.all([
+        settleWithin(stdoutPromise, '', 250),
+        settleWithin(stderrPromise, '', 250),
+      ])
+    : await Promise.all([stdoutPromise, stderrPromise])
+
+  return {
+    stdout,
+    stderr: timedOut ? appendGhTimeoutMessage(stderr, fullCmd, timeoutMs) : stderr,
     exitCode,
     timedOut,
   }
@@ -142,19 +210,7 @@ async function ghRaw(
   cmd: string,
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const fullCmd = `gh ${cmd} --repo ${config.repo}`
-  const proc = Bun.spawn(['sh', '-c', fullCmd], {
-    env: buildGhEnv(config),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-  const exitCode = await proc.exited
-
+  const { stdout, stderr, exitCode } = await runBoundedShellGhCommand(cmd, config)
   return { stdout, stderr, exitCode }
 }
 
@@ -369,6 +425,29 @@ function parseDirectGraphQlErrorMessage(body: string): string | null {
   return null
 }
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = DEFAULT_GH_COMMAND_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`GitHub API request timed out after ${timeoutMs}ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export function extractNextPageUrl(linkHeader: string | null): string | null {
   if (!linkHeader) return null
 
@@ -428,7 +507,7 @@ async function runDirectGitHubApi(
     url: string,
     includeBody: boolean,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; nextPageUrl: string | null }> => {
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: request.method,
       headers,
       body: includeBody ? request.body : undefined,
@@ -529,9 +608,9 @@ function shouldQualifyGhApiEndpoint(endpoint: string): boolean {
   return true
 }
 
-function appendGhTimeoutMessage(stderr: string, args: string[], timeoutMs: number): string {
+function appendGhTimeoutMessage(stderr: string, command: string, timeoutMs: number): string {
   const base = stderr.trimEnd()
-  const message = `gh ${args.join(' ')} timed out after ${timeoutMs}ms`
+  const message = `${command} timed out after ${timeoutMs}ms`
   return base.length > 0 ? `${base}\n${message}` : message
 }
 

@@ -1270,9 +1270,10 @@ export class AgentDaemon {
   ): Promise<ResumableIssueWorktreeResult> {
     const worktreeId = `issue-${issueNumber}-${this.config.machineId}`
     const worktreePath = resolve(this.config.worktreesBase, worktreeId)
-    const branch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
+    const fallbackBranch = priorLease?.lease.branch ?? `agent/${issueNumber}/${this.config.machineId}`
 
     if (hasWorktreeForIssue(issueNumber, this.config)) {
+      const branch = await resolveResumableIssueWorktreeBranch(worktreePath, fallbackBranch, this.logger)
       hydrateManagedIssueWorktree(worktreePath, this.logger)
       return {
         status: 'ready',
@@ -1884,6 +1885,10 @@ export class AgentDaemon {
     let worktreeId = `issue-${issueNumber}-${this.config.machineId}`
 
     try {
+      if (hasWorktreeForIssue(issueNumber, this.config)) {
+        branch = await resolveResumableIssueWorktreeBranch(worktreePath, branch, this.logger)
+      }
+
       const acquiredLease = await this.acquireLeaseForScope({
         targetNumber: issueNumber,
         scope: 'issue-process',
@@ -4089,6 +4094,29 @@ export async function refreshResumableIssueBranchOntoDefault(
   }
 
   return { success: true, refreshed: true }
+}
+
+async function resolveResumableIssueWorktreeBranch(
+  worktreePath: string,
+  fallbackBranch: string,
+  logger = console,
+): Promise<string> {
+  const branchResult = await runGitInWorktree(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  if (branchResult.exitCode !== 0) {
+    return fallbackBranch
+  }
+
+  const localBranch = branchResult.stdout.trim()
+  if (!localBranch) {
+    return fallbackBranch
+  }
+
+  if (localBranch !== fallbackBranch) {
+    logger.log(
+      `[worktree] using local recovery branch ${localBranch} in ${worktreePath} instead of stale lease branch ${fallbackBranch}`,
+    )
+  }
+  return localBranch
 }
 
 async function runGitInWorktree(
