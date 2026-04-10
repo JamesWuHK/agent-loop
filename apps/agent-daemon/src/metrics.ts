@@ -24,12 +24,15 @@
  * - agent_loop_lease_heartbeat_age_seconds: Gauge of oldest held lease heartbeat age
  * - agent_loop_stalled_workers: Gauge of stalled workers tracked by the daemon
  * - agent_loop_transient_loop_errors_total: Counter of transient loop-level GitHub/network errors
+ * - agent_loop_wake_requests_total: Counter of wake requests queued/handled (labels: kind, outcome)
  * - agent_loop_last_transient_loop_error_age_seconds: Gauge of the most recent transient loop error age
+ * - agent_loop_pending_wake_requests: Gauge of queued wake requests waiting in memory
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
+ * - agent_loop_wake_request_age_seconds: Histogram of wake request queue age when handled
  */
 
 import {
@@ -103,6 +106,8 @@ export const agentExecutionsTotal = new Counter({
 
 export type PrReviewStage = 'initial' | 'post_fix' | 'merge_refresh'
 export type PrReviewOutcome = 'approved' | 'rejected' | 'invalid_output' | 'execution_failed'
+export type WakeRequestKind = 'now' | 'issue' | 'pr'
+export type WakeRequestOutcome = 'queued' | 'started_work' | 'no_match' | 'allow_fallback'
 
 /**
  * Total number of automated PR reviews performed by the daemon.
@@ -221,6 +226,19 @@ export const transientLoopErrorsTotal = new Counter({
   name: 'agent_loop_transient_loop_errors_total',
   help: 'Total number of transient loop-level GitHub or network errors that were deferred for retry',
   labelNames: ['kind'] as const,
+  registers: [registry],
+})
+
+/**
+ * Total number of wake requests queued and handled.
+ * Labels:
+ *   - kind: "now" | "issue" | "pr"
+ *   - outcome: "queued" | "started_work" | "no_match" | "allow_fallback"
+ */
+export const wakeRequestsTotal = new Counter({
+  name: 'agent_loop_wake_requests_total',
+  help: 'Total number of wake requests queued and handled by the daemon',
+  labelNames: ['kind', 'outcome'] as const,
   registers: [registry],
 })
 
@@ -399,6 +417,15 @@ export const lastTransientLoopErrorAgeSeconds = new Gauge({
   registers: [registry],
 })
 
+/**
+ * Current number of pending wake requests held in memory.
+ */
+export const pendingWakeRequests = new Gauge({
+  name: 'agent_loop_pending_wake_requests',
+  help: 'Current number of pending wake requests held in the daemon in-memory queue',
+  registers: [registry],
+})
+
 // ─── Histograms ────────────────────────────────────────────────────────────────
 
 /**
@@ -438,6 +465,17 @@ export const worktreeCreationDurationSeconds = new Histogram({
   name: 'agent_loop_worktree_creation_duration_seconds',
   help: 'Duration of worktree creation in seconds',
   buckets: [0.1, 0.5, 1, 2, 5, 10],
+  registers: [registry],
+})
+
+/**
+ * Age of wake requests in seconds when they are handled.
+ */
+export const wakeRequestAgeSeconds = new Histogram({
+  name: 'agent_loop_wake_request_age_seconds',
+  help: 'Age of wake requests in seconds when the daemon handles them',
+  labelNames: ['kind', 'outcome'] as const,
+  buckets: [0.01, 0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600],
   registers: [registry],
 })
 
@@ -563,6 +601,35 @@ export function recordTransientLoopError(
   kind: 'startup-recovery' | 'poll-cycle',
 ): void {
   transientLoopErrorsTotal.inc({ kind })
+}
+
+/**
+ * Record a wake request entering the daemon queue.
+ */
+export function recordQueuedWakeRequest(kind: WakeRequestKind): void {
+  wakeRequestsTotal.inc({ kind, outcome: 'queued' })
+}
+
+/**
+ * Record a handled wake request and its time spent queued.
+ */
+export function recordHandledWakeRequest(
+  kind: WakeRequestKind,
+  outcome: Exclude<WakeRequestOutcome, 'queued'>,
+  requestedAt: string,
+  nowMs: number = Date.now(),
+): void {
+  wakeRequestsTotal.inc({ kind, outcome })
+
+  const requestedAtMs = Date.parse(requestedAt)
+  if (!Number.isFinite(requestedAtMs)) {
+    return
+  }
+
+  wakeRequestAgeSeconds.observe(
+    { kind, outcome },
+    Math.max(0, (nowMs - requestedAtMs) / 1000),
+  )
 }
 
 /**
@@ -725,6 +792,13 @@ export function setBlockedIssueResumeEscalationAgeSeconds(ageSeconds: number): v
  */
 export function setLastTransientLoopErrorAgeSeconds(ageSeconds: number): void {
   lastTransientLoopErrorAgeSeconds.set(ageSeconds)
+}
+
+/**
+ * Update the in-memory pending wake request gauge.
+ */
+export function setPendingWakeRequests(count: number): void {
+  pendingWakeRequests.set(count)
 }
 
 /**

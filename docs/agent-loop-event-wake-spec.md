@@ -2,7 +2,7 @@
 
 - Status: partially implemented
 - Owner: engineering
-- Last updated: 2026-04-10
+- Last updated: 2026-04-11
 - Related: `docs/issue-writing.md`, `.github/workflows/agent-ready-gate.yml`
 
 ## Summary
@@ -21,11 +21,12 @@ Phase 1 local wake delivery is now implemented in this repo:
 - CLI wake commands and a durable local wake queue
 - loopback wake endpoint in the daemon
 - GitHub Actions workflows that translate GitHub events into local wake requests on `self-hosted` runners
+- wake queue observability in Prometheus metrics plus `agent-loop --status` / `--doctor`
 
 What is still pending from this spec:
 
 - slower idle safety-net polling after wake delivery proves stable
-- explicit wake-latency / missed-event measurement
+- end-to-end wake-latency / missed-event measurement beyond local queue handling metrics
 
 ## Goals
 
@@ -172,7 +173,7 @@ In practice, this should help with rate limits, but it is not a full replacement
 2. Done: add a loopback wake endpoint in the daemon.
 3. Done: add GitHub Actions workflows that route events to self-hosted runners.
 4. Pending: reduce idle poll frequency after wake delivery is stable.
-5. Pending: measure wake latency, missed-event recovery, and GraphQL consumption.
+5. Pending: add end-to-end wake latency, missed-event recovery, and GraphQL consumption measurement.
 
 ## Acceptance
 

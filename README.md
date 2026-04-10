@@ -88,6 +88,8 @@ agent-loop --wake-pr 456
 - `--wake-issue` / `--wake-pr`：优先只检查这个 issue / PR 对应的调度路径，不先做全仓库 discovery
 - `--wake-now`：显式允许这轮 wake 继续回退到普通全量扫描，适合手工兜底
 
+现在 `agent-loop --status` / `agent-loop --doctor` 和 `/metrics` 也会把 wake 队列观测带出来，方便你判断“事件有没有进来、有没有被消费、是不是经常 miss target 后回退到全量扫描”。
+
 如果你已经在目标开发机上装了 GitHub self-hosted runner，现在仓库里的 [`agent-daemon-wake.yml`](.github/workflows/agent-daemon-wake.yml) 和 [`agent-ready-gate.yml`](.github/workflows/agent-ready-gate.yml) 会把 issue / PR / manual dispatch 事件翻译成这类本地 wake request：
 
 - `agent:ready` 的 issue 会先过 ready-gate，再 wake 本机 daemon，避免校验和认领抢跑
@@ -407,6 +409,9 @@ agent-loop --doctor
 - `agent_loop_review_auto_fixes_total`
 - `agent_loop_pr_merge_recovery_total`
 - `agent_loop_polls_total`
+- `agent_loop_wake_requests_total`
+- `agent_loop_pending_wake_requests`
+- `agent_loop_wake_request_age_seconds`
 
 职责边界建议：
 
