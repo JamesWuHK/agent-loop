@@ -243,4 +243,48 @@ describe('cli-agent', () => {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
+
+  test('marks upstream API 5xx output as recoverable immediately instead of waiting for idle timeout', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-api-error-test-'))
+    const scriptPath = join(tempDir, 'fake-codex.sh')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      writeFileSync(
+        scriptPath,
+        '#!/bin/sh\ncat >/dev/null\necho "API Error: 502 status code (no body)"\nwhile :; do sleep 1; done\n',
+        'utf-8',
+      )
+      chmodSync(scriptPath, 0o755)
+      mkdirSync(worktreePath, { recursive: true })
+
+      const startedAt = Date.now()
+      const result = await runConfiguredAgent({
+        prompt: 'noop',
+        worktreePath,
+        timeoutMs: 5_000,
+        config: {
+          ...baseConfig,
+          agent: {
+            ...baseConfig.agent,
+            primary: 'codex',
+            fallback: null,
+            codexPath: scriptPath,
+          },
+        },
+        monitor: {
+          heartbeatIntervalMs: 50,
+          idleTimeoutMs: 2_000,
+        },
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.failureKind).toBe('upstream_api_error')
+      expect(result.stdout || result.stderr).toContain('API Error: 502 status code (no body)')
+      expect(Date.now() - startedAt).toBeLessThan(1_500)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
 })

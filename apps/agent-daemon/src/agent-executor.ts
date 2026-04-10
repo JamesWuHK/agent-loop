@@ -1,5 +1,3 @@
-import { resolve } from 'node:path'
-import { writeFileSync } from 'node:fs'
 import {
   getProjectPromptGuidance,
   renderIssueContractForPrompt,
@@ -27,10 +25,7 @@ export async function runAgent(
   logger.log(`[agent] starting agent execution in ${worktreePath}`)
   logger.log(`[agent] issue: #${issueNumber} — ${issueTitle}`)
 
-  // Write prompt file for the agent
-  const promptPath = resolve(worktreePath, 'prompt.md')
   const prompt = buildPrompt(issueNumber, issueTitle, issueBody, config.project)
-  writeFileSync(promptPath, prompt, 'utf-8')
 
   const runResult = await runConfiguredAgent({
     prompt,

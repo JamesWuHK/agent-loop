@@ -574,7 +574,30 @@ export class AgentDaemon {
       || failureKind === 'process_timeout'
       || failureKind === 'execution_error'
       || failureKind === 'nonzero_exit'
+      || failureKind === 'upstream_api_error'
     )
+  }
+
+  private getRecoverableLeaseKind(
+    scope: 'issue-process' | 'pr-review' | 'pr-merge',
+    failureKind: string | undefined,
+  ): string {
+    if (failureKind === 'idle_timeout') {
+      return `${scope}-idle-timeout`
+    }
+    if (failureKind === 'upstream_api_error') {
+      return `${scope}-upstream-api-error`
+    }
+    return `${scope}-recoverable-error`
+  }
+
+  private maybeRecordWorkerIdleTimeout(
+    scope: 'issue-process' | 'pr-review' | 'pr-merge',
+    failureKind: string | undefined,
+  ): void {
+    if (failureKind === 'idle_timeout') {
+      recordWorkerIdleTimeout(scope)
+    }
   }
 
   private async markIssueRecoverable(issueNumber: number, reason: string): Promise<void> {
@@ -1797,10 +1820,10 @@ export class AgentDaemon {
         )
         recordPrReviewOutcome('initial', classifyPrReviewOutcome(firstReview))
         if (this.isRecoverableAgentFailureKind(firstReview.failureKind)) {
-          recordWorkerIdleTimeout('pr-review')
+          this.maybeRecordWorkerIdleTimeout('pr-review', firstReview.failureKind)
           leaseStatus = 'recoverable'
           leaseReason = firstReview.reason
-          leaseRecoveryKind = 'pr-review-idle-timeout'
+          leaseRecoveryKind = this.getRecoverableLeaseKind('pr-review', firstReview.failureKind)
           return
         }
 
@@ -1869,10 +1892,10 @@ export class AgentDaemon {
 
       if (!fixResult.success) {
         if (this.isRecoverableAgentFailureKind(fixResult.failureKind)) {
-          recordWorkerIdleTimeout('pr-review')
+          this.maybeRecordWorkerIdleTimeout('pr-review', fixResult.failureKind)
           leaseStatus = 'recoverable'
           leaseReason = fixResult.error ?? 'review auto-fix hit idle timeout'
-          leaseRecoveryKind = 'pr-review-idle-timeout'
+          leaseRecoveryKind = this.getRecoverableLeaseKind('pr-review', fixResult.failureKind)
           return
         }
 
@@ -1921,10 +1944,10 @@ export class AgentDaemon {
       )
       recordPrReviewOutcome('post_fix', classifyPrReviewOutcome(secondReview))
       if (this.isRecoverableAgentFailureKind(secondReview.failureKind)) {
-        recordWorkerIdleTimeout('pr-review')
+        this.maybeRecordWorkerIdleTimeout('pr-review', secondReview.failureKind)
         leaseStatus = 'recoverable'
         leaseReason = secondReview.reason
-        leaseRecoveryKind = 'pr-review-idle-timeout'
+        leaseRecoveryKind = this.getRecoverableLeaseKind('pr-review', secondReview.failureKind)
         return
       }
 
@@ -1987,12 +2010,8 @@ export class AgentDaemon {
         this.buildManagedLeaseMonitor('pr-merge', pr.number, lease.handle),
       )
       if (mergeResult.recoverable) {
-        if (mergeResult.review?.failureKind === 'idle_timeout') {
-          recordWorkerIdleTimeout('pr-merge')
-          leaseRecoveryKind = 'pr-merge-idle-timeout'
-        } else {
-          leaseRecoveryKind = 'pr-merge-retryable-error'
-        }
+        this.maybeRecordWorkerIdleTimeout('pr-merge', mergeResult.review?.failureKind)
+        leaseRecoveryKind = this.getRecoverableLeaseKind('pr-merge', mergeResult.review?.failureKind)
         leaseStatus = 'recoverable'
         leaseReason = mergeResult.message
         return
@@ -2259,7 +2278,7 @@ export class AgentDaemon {
         }
 
         if (this.isRecoverableAgentFailureKind(recoveryResult.failureKind)) {
-          recordWorkerIdleTimeout('issue-process')
+          this.maybeRecordWorkerIdleTimeout('issue-process', recoveryResult.failureKind)
           await this.markIssueRecoverable(issueNumber, recoveryResult.error ?? 'issue recovery hit idle timeout')
           await this.completeManagedLease(
             'issue-process',
@@ -2267,7 +2286,7 @@ export class AgentDaemon {
             leaseHandle,
             'recoverable',
             recoveryResult.error,
-            'issue-process-idle-timeout',
+            this.getRecoverableLeaseKind('issue-process', recoveryResult.failureKind),
           )
           this.activeWorktrees.delete(issueNumber)
           this.syncRuntimeMetrics()
@@ -2681,16 +2700,14 @@ export class AgentDaemon {
       this.buildManagedLeaseMonitor('pr-review', pr.prNumber, reviewLease.handle),
     )
     if (reviewOutcome.recoverable) {
-      if (reviewOutcome.review.failureKind === 'idle_timeout') {
-        recordWorkerIdleTimeout('pr-review')
-      }
+      this.maybeRecordWorkerIdleTimeout('pr-review', reviewOutcome.review.failureKind)
       await this.completeManagedLease(
         'pr-review',
         pr.prNumber,
         reviewLease.handle,
         'recoverable',
         reviewOutcome.review.reason,
-        'pr-review-idle-timeout',
+        this.getRecoverableLeaseKind('pr-review', reviewOutcome.review.failureKind),
       )
       return {
         status: 'recoverable',
@@ -2724,16 +2741,14 @@ export class AgentDaemon {
         this.buildManagedLeaseMonitor('pr-merge', pr.prNumber, mergeLease.handle),
       )
       if (mergeResult.recoverable) {
-        if (mergeResult.review?.failureKind === 'idle_timeout') {
-          recordWorkerIdleTimeout('pr-merge')
-        }
+        this.maybeRecordWorkerIdleTimeout('pr-merge', mergeResult.review?.failureKind)
         await this.completeManagedLease(
           'pr-merge',
           pr.prNumber,
           mergeLease.handle,
           'recoverable',
           mergeResult.message,
-          'pr-merge-idle-timeout',
+          this.getRecoverableLeaseKind('pr-merge', mergeResult.review?.failureKind),
         )
         return {
           status: 'recoverable',
@@ -2917,7 +2932,7 @@ export class AgentDaemon {
         }
       } else {
         if (this.isRecoverableAgentFailureKind(result.failureKind)) {
-          recordWorkerIdleTimeout('issue-process')
+          this.maybeRecordWorkerIdleTimeout('issue-process', result.failureKind)
           await this.markIssueRecoverable(issueNumber, result.error ?? 'subtask executor hit idle timeout')
           await this.completeManagedLease(
             'issue-process',
@@ -2925,7 +2940,7 @@ export class AgentDaemon {
             leaseHandle,
             'recoverable',
             result.error,
-            'issue-process-idle-timeout',
+            this.getRecoverableLeaseKind('issue-process', result.failureKind),
           )
           this.activeWorktrees.delete(issueNumber)
           this.syncRuntimeMetrics()

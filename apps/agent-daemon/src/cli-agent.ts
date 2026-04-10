@@ -36,7 +36,14 @@ export interface CliAgentRunResult {
   responseText: string
   usedAgent: AgentKind
   usedFallback: boolean
-  failureKind?: 'binary_missing' | 'process_timeout' | 'idle_timeout' | 'execution_error' | 'nonzero_exit' | 'remote_closed'
+  failureKind?:
+    | 'binary_missing'
+    | 'process_timeout'
+    | 'idle_timeout'
+    | 'execution_error'
+    | 'nonzero_exit'
+    | 'remote_closed'
+    | 'upstream_api_error'
 }
 
 export type AgentFailureKind = NonNullable<CliAgentRunResult['failureKind']>
@@ -165,11 +172,21 @@ export async function runConfiguredAgent(
     return primaryResult
   }
 
-  logger.warn(
-    `[agent] primary ${primary} run failed (exit ${primaryResult.exitCode}), trying fallback ${fallback}...`,
+  logAgentFailure(
+    logger,
+    `[agent] primary ${primary} run failed (exit ${primaryResult.exitCode}, kind=${primaryResult.failureKind ?? 'unknown'}), trying fallback ${fallback}...`,
+    primaryResult,
   )
 
-  return runSingleAgent(fallback, true, options)
+  const fallbackResult = await runSingleAgent(fallback, true, options)
+  if (!fallbackResult.ok) {
+    logAgentFailure(
+      logger,
+      `[agent] fallback ${fallback} run failed (exit ${fallbackResult.exitCode}, kind=${fallbackResult.failureKind ?? 'unknown'})`,
+      fallbackResult,
+    )
+  }
+  return fallbackResult
 }
 
 async function runSingleAgent(
@@ -213,6 +230,8 @@ async function runSingleAgent(
   let monitorInFlight = false
   let aborted = false
   let abortMessage = options.monitor?.abortMessage ?? 'Aborted because the remote issue is already done/closed'
+  let recentOutput = ''
+  let upstreamApiError: string | null = null
 
   try {
     const env = buildRuntimeEnv(agent, options.config, tempDir)
@@ -281,13 +300,33 @@ async function runSingleAgent(
     result = await Promise.race([
       (async () => {
         const [stdoutBuffer, stderrBuffer] = await Promise.all([
-          readProcessStream(stdout, () => {
+          readProcessStream(stdout, (chunkText) => {
             lastActivityAt = Date.now()
             notifyActivity(options.monitor, 'stdout')
+            const detected = detectUpstreamApiError(appendRecentOutput(recentOutput, chunkText))
+            recentOutput = appendRecentOutput(recentOutput, chunkText)
+            if (detected && !upstreamApiError) {
+              upstreamApiError = detected
+              try {
+                proc?.kill('SIGKILL')
+              } catch {
+                // ignore kill errors
+              }
+            }
           }),
-          readProcessStream(stderr, () => {
+          readProcessStream(stderr, (chunkText) => {
             lastActivityAt = Date.now()
             notifyActivity(options.monitor, 'stderr')
+            const detected = detectUpstreamApiError(appendRecentOutput(recentOutput, chunkText))
+            recentOutput = appendRecentOutput(recentOutput, chunkText)
+            if (detected && !upstreamApiError) {
+              upstreamApiError = detected
+              try {
+                proc?.kill('SIGKILL')
+              } catch {
+                // ignore kill errors
+              }
+            }
           }),
         ])
         const exitCode = await proc!.exited
@@ -421,34 +460,40 @@ async function runSingleAgent(
   const stdout = await new Response(result.stdout).text()
   const stderr = await new Response(result.stderr).text()
   const responseText = readResponseText(agent, responseFilePath, stdout)
+  const detectedUpstreamApiError = upstreamApiError ?? detectUpstreamApiError(`${stderr}\n${stdout}`)
 
   rmSync(tempDir, { recursive: true, force: true })
 
   return {
-    ok: result.exitCode === 0,
-    exitCode: result.exitCode === 0 ? 0 : 1,
+    ok: result.exitCode === 0 && !detectedUpstreamApiError,
+    exitCode: result.exitCode === 0 && !detectedUpstreamApiError ? 0 : 1,
     stdout,
-    stderr,
+    stderr: detectedUpstreamApiError && !stderr ? detectedUpstreamApiError : stderr,
     responseText,
     usedAgent: agent,
     usedFallback,
-    ...(result.exitCode === 0 ? {} : { failureKind: 'nonzero_exit' as const }),
+    ...(
+      result.exitCode === 0 && !detectedUpstreamApiError
+        ? {}
+        : { failureKind: detectedUpstreamApiError ? 'upstream_api_error' as const : 'nonzero_exit' as const }
+    ),
   }
 }
 
 async function readProcessStream(
   stream: ReadableStream<Uint8Array>,
-  onChunk: () => void,
+  onChunk: (chunkText: string) => void,
 ): Promise<Uint8Array> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
+  const decoder = new TextDecoder()
 
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     if (!value) continue
     chunks.push(value)
-    onChunk()
+    onChunk(decoder.decode(value, { stream: true }))
   }
 
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
@@ -459,6 +504,51 @@ async function readProcessStream(
     offset += chunk.byteLength
   }
   return combined
+}
+
+function appendRecentOutput(existing: string, chunkText: string, maxLength = 4_000): string {
+  const combined = `${existing}${chunkText}`
+  return combined.length <= maxLength ? combined : combined.slice(-maxLength)
+}
+
+function detectUpstreamApiError(output: string): string | null {
+  const normalized = output.replace(/\r/g, '')
+  const apiErrorMatch = normalized.match(/API Error:\s*(5\d{2}[^\n]*)/i)
+  const apiErrorMessage = apiErrorMatch?.[1]
+  if (apiErrorMessage) {
+    return `API Error: ${apiErrorMessage.trim()}`
+  }
+
+  const statusMatch = normalized.match(/\b(5\d{2})\b[^\n]*\b(no body|bad gateway|service unavailable|gateway timeout)\b/i)
+  const statusCode = statusMatch?.[1]
+  const statusReason = statusMatch?.[2]
+  if (statusCode && statusReason) {
+    return `API Error: ${statusCode} ${statusReason.trim()}`
+  }
+
+  return null
+}
+
+function summarizeForLogs(output: string, maxLength = 500): string {
+  const normalized = output.trim().replace(/\s+/g, ' ')
+  if (!normalized) return ''
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength)}...`
+}
+
+function logAgentFailure(
+  logger: typeof console,
+  headline: string,
+  result: CliAgentRunResult,
+): void {
+  logger.warn(headline)
+  const stderrSummary = summarizeForLogs(result.stderr)
+  if (stderrSummary) {
+    logger.warn(`[agent] stderr: ${stderrSummary}`)
+  }
+  const stdoutSummary = summarizeForLogs(result.stdout)
+  if (stdoutSummary) {
+    logger.warn(`[agent] stdout: ${stdoutSummary}`)
+  }
 }
 
 async function pollMonitorProgress(
