@@ -11,6 +11,7 @@
     "agent:issues:audit": "bun apps/agent-daemon/src/audit-issue-contracts.ts",
     "agent:issues:enforce-ready": "bun apps/agent-daemon/src/ready-gate.ts",
     "agent:join-project": "bun apps/agent-daemon/src/index.ts --join-project",
+    "agent:replay:eval": "bun apps/agent-daemon/src/replay-eval.ts",
     "agent:version:bump": "bun scripts/bump-version.ts",
     "start": "bun run apps/agent-daemon/src/index.ts",
     "dev": "bun --watch run apps/agent-daemon/src/index.ts",

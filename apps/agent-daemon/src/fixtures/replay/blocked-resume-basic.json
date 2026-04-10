@@ -1,0 +1,42 @@
+{
+  "name": "blocked-resume-basic",
+  "openIssues": [
+    {
+      "number": 104,
+      "title": "failed issue with terminal linked pr",
+      "body": "## 用户故事\n\n作为 工程负责人，我希望 daemon 能识别 blocked resume。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/example.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- preserve failed issue state\n\n### OutOfScope\n- real GitHub calls\n\n### RequiredSemantics\n- linked PR can block automated resume\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('blocked resume fixture')\n```\n\n## 实现步骤\n1. add replay fixture\n\n## 验收\n- [ ] blocked resume recognized",
+      "labels": [
+        "agent:failed"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updatedAt": "2026-04-11T09:05:00.000Z"
+    }
+  ],
+  "issueComments": [
+    {
+      "issueNumber": 104,
+      "commentId": 1,
+      "body": "<!-- agent-loop:issue-resume-blocked {\"issueNumber\":104,\"prNumber\":205,\"blockedSince\":\"2026-04-11T09:00:00.000Z\",\"escalatedAt\":\"2026-04-11T09:05:00.000Z\",\"thresholdSeconds\":300,\"reason\":\"linked PR #205 is in terminal agent:human-needed; automated review has no remaining structured retry path\",\"machineId\":\"codex-dev\",\"daemonInstanceId\":\"daemon-1\"} -->\n## agent-loop blocked resume escalation",
+      "createdAt": "2026-04-11T09:05:00.000Z",
+      "updatedAt": "2026-04-11T09:05:00.000Z"
+    }
+  ],
+  "openPullRequests": [
+    {
+      "number": 205,
+      "title": "Fix #104: failed issue with terminal linked pr",
+      "labels": [
+        "agent:human-needed"
+      ],
+      "isDraft": false,
+      "headRefName": "agent/104/codex-dev",
+      "headRefOid": "abc123"
+    }
+  ],
+  "expected": {
+    "claimable": 0,
+    "blocked": 1,
+    "invalid": 0
+  }
+}

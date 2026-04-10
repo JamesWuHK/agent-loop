@@ -5,11 +5,14 @@ import { join } from 'node:path'
 import type { AgentConfig, ManagedLeaseComment } from '@agent/shared'
 import {
   AgentDaemon,
+  WAKE_PATH,
   buildIssueWorkingTransitionEvent,
   buildBlockedIssueResumeEscalationComment,
+  buildIssueResumeResolutionComment,
   buildDaemonRuntimeStatus,
   buildIssuePreflightFailureComment,
   buildPrReviewRefreshFailureComment,
+  canResumeBlockedIssueFromResolution,
   canRetryPrReviewRefresh,
   canResumeIssueFromLease,
   getEffectiveActiveTaskCount,
@@ -17,6 +20,7 @@ import {
   createWorktreeFromRemoteBranch,
   extractAutomatedIssuePreflightReasons,
   extractBlockedIssueResumeEscalationComment,
+  extractIssueResumeResolutionComment,
   getResumableIssueLinkedPrHandoff,
   getFailedIssueResumeBlock,
   isMissingRemoteBranchRecoveryReason,
@@ -42,8 +46,15 @@ import {
   shouldResumeManagedIssue,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
+import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
 
-function createTestDaemon(configOverrides: Partial<AgentConfig> = {}): AgentDaemon {
+function createTestDaemon(
+  configOverrides: Partial<AgentConfig> = {},
+  healthServerConfig?: {
+    host?: string
+    port?: number
+  },
+): AgentDaemon {
   const config: AgentConfig = {
     machineId: 'codex-dev',
     repo: 'JamesWuHK/digital-employee',
@@ -88,7 +99,7 @@ function createTestDaemon(configOverrides: Partial<AgentConfig> = {}): AgentDaem
     ...configOverrides,
   }
 
-  return new AgentDaemon(config, console)
+  return new AgentDaemon(config, console, healthServerConfig)
 }
 
 async function createResumableIssueWorktreeFixture(issueNumber = 329, machineId = 'codex-20260403') {
@@ -164,6 +175,74 @@ describe('issue preflight comments', () => {
     ])).toEqual([
       'Issue preflight failed before PR creation: changed forbidden files: apps/desktop/src/App.tsx',
     ])
+  })
+})
+
+describe('wake queue integration', () => {
+  test('drains queued wake requests and forces the next reconcile immediately', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-daemon-wake-'))
+    const queuePath = buildWakeQueuePath({
+      homeDir,
+      repo: 'JamesWuHK/agent-loop',
+      machineId: 'codex-dev',
+    })
+
+    appendWakeRequest(queuePath, {
+      kind: 'now',
+      reason: 'workflow_dispatch',
+      sourceEvent: 'workflow_dispatch',
+      dedupeKey: 'wake-now',
+      requestedAt: '2026-04-11T09:10:00.000Z',
+    })
+
+    const daemon = createTestDaemon({
+      repo: 'JamesWuHK/agent-loop',
+      machineId: 'codex-dev',
+      worktreesBase: join(homeDir, 'worktrees'),
+    })
+
+    await daemon.drainWakeQueueOnce()
+
+    const status = daemon.getStatus()
+    expect(status.nextPollReason).toBe('wake-request')
+    expect(status.nextPollDelayMs).toBe(0)
+    expect(existsSync(queuePath)).toBe(false)
+  })
+
+  test('loopback wake endpoint forces the next reconcile immediately', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-daemon-wake-endpoint-'))
+    const daemon = createTestDaemon({
+      repo: 'JamesWuHK/agent-loop',
+      machineId: 'codex-dev',
+      worktreesBase: join(homeDir, 'worktrees'),
+    }, {
+      port: 0,
+    })
+    const daemonInternal = daemon as unknown as {
+      running: boolean
+      pollTimeoutId: ReturnType<typeof setTimeout> | null
+      healthServer: { port: number } | null
+      startHealthServer: () => void
+      scheduleNextPoll: (options?: {
+        delayMs?: number
+        reason?: string
+      }) => void
+    }
+
+    daemonInternal.running = true
+    daemonInternal.pollTimeoutId = setTimeout(() => undefined, 60_000)
+    daemonInternal.scheduleNextPoll = () => undefined
+    daemonInternal.startHealthServer()
+
+    const response = await fetch(`http://127.0.0.1:${daemonInternal.healthServer!.port}${WAKE_PATH}`, {
+      method: 'POST',
+    })
+
+    expect(response.status).toBe(202)
+    expect(daemon.getStatus().nextPollReason).toBe('wake-request')
+    expect(daemon.getStatus().nextPollDelayMs).toBe(0)
+
+    await daemon.stop()
   })
 })
 
@@ -603,6 +682,95 @@ describe('daemon merge recovery helpers', () => {
       machineId: 'codex-dev',
       daemonInstanceId: 'daemon-codex-dev-1',
     })
+  })
+
+  test('round-trips blocked issue resume resolution comments', () => {
+    const comment = buildIssueResumeResolutionComment({
+      issueNumber: 91,
+      prNumber: 110,
+      resolvedAt: '2026-04-11T08:25:00.000Z',
+      resolution: 'human-follow-up-complete',
+    })
+
+    expect(extractIssueResumeResolutionComment(comment)).toEqual({
+      issueNumber: 91,
+      prNumber: 110,
+      resolvedAt: '2026-04-11T08:25:00.000Z',
+      resolution: 'human-follow-up-complete',
+    })
+  })
+
+  test('unblocks only when a newer matching resolution comment exists', () => {
+    const blockedComment = {
+      commentId: 1,
+      createdAt: '2026-04-11T08:10:00.000Z',
+      updatedAt: '2026-04-11T08:10:00.000Z',
+      body: buildBlockedIssueResumeEscalationComment({
+        issueNumber: 91,
+        prNumber: 110,
+        blockedSince: '2026-04-11T08:00:00.000Z',
+        escalatedAt: '2026-04-11T08:10:00.000Z',
+        thresholdSeconds: 300,
+        reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+        machineId: 'codex-dev',
+        daemonInstanceId: 'daemon-1',
+      }),
+    }
+
+    const resolutionComment = {
+      commentId: 2,
+      createdAt: '2026-04-11T08:25:00.000Z',
+      updatedAt: '2026-04-11T08:25:00.000Z',
+      body: buildIssueResumeResolutionComment({
+        issueNumber: 91,
+        prNumber: 110,
+        resolvedAt: '2026-04-11T08:25:00.000Z',
+        resolution: 'human-follow-up-complete',
+      }),
+    }
+
+    expect(canResumeBlockedIssueFromResolution(
+      [blockedComment, resolutionComment],
+      91,
+      110,
+    )).toBe(true)
+
+    expect(canResumeBlockedIssueFromResolution(
+      [
+        blockedComment,
+        {
+          ...resolutionComment,
+          commentId: 3,
+          updatedAt: '2026-04-11T08:05:00.000Z',
+          body: buildIssueResumeResolutionComment({
+            issueNumber: 91,
+            prNumber: 110,
+            resolvedAt: '2026-04-11T08:05:00.000Z',
+            resolution: 'too-early',
+          }),
+        },
+      ],
+      91,
+      110,
+    )).toBe(false)
+
+    expect(canResumeBlockedIssueFromResolution(
+      [
+        blockedComment,
+        {
+          ...resolutionComment,
+          commentId: 4,
+          body: buildIssueResumeResolutionComment({
+            issueNumber: 91,
+            prNumber: 111,
+            resolvedAt: '2026-04-11T08:25:00.000Z',
+            resolution: 'wrong-pr',
+          }),
+        },
+      ],
+      91,
+      110,
+    )).toBe(false)
   })
 
   test('finds blocked issue resume escalations for the same issue and linked PR', () => {

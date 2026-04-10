@@ -66,6 +66,12 @@ import {
 } from './metrics'
 import { resolveCurrentRuntimeSupervisor } from './background'
 import {
+  buildWakeQueuePath,
+  drainWakeQueue,
+  hasPendingWakeRequests,
+  resolveWakeQueueHomeDirFromWorktreesBase,
+} from './wake-queue'
+import {
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresenceRuntimeState,
 } from './presence'
@@ -83,9 +89,11 @@ export interface HealthServerConfig {
 }
 
 export const HEALTH_PATH = '/health'
+export const WAKE_PATH = '/wake'
 export const DEFAULT_HEALTH_SERVER_PORT = 9310
 export const DEFAULT_HEALTH_SERVER_HOST = '127.0.0.1'
 const LOCAL_METRICS_HOST = '127.0.0.1'
+const WAKE_QUEUE_CHECK_INTERVAL_MS = 1_000
 
 export type IssueWorkingTransitionKind = 'fresh-claim' | 'resume' | 'recoverable'
 
@@ -108,6 +116,7 @@ const RETRYABLE_DAEMON_ERROR_PATTERNS = [
 ] as const
 const BLOCKED_ISSUE_RESUME_ESCALATION_COOLDOWN_SECONDS = 30 * 60
 const BLOCKED_ISSUE_RESUME_ESCALATION_COMMENT_PREFIX = '<!-- agent-loop:issue-resume-blocked '
+const ISSUE_RESUME_RESOLUTION_COMMENT_PREFIX = '<!-- agent-loop:issue-resume-resolved '
 export const BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS = 5 * 60
 const MISSING_REMOTE_BRANCH_RECOVERY_REASON_PREFIX = 'missing-remote-branch:'
 
@@ -197,6 +206,17 @@ export interface BlockedIssueResumeEscalationRecord extends IssueComment {
   escalation: BlockedIssueResumeEscalationComment
 }
 
+export interface IssueResumeResolutionComment {
+  issueNumber: number
+  prNumber: number
+  resolvedAt: string
+  resolution: string
+}
+
+export interface IssueResumeResolutionRecord extends IssueComment {
+  resolutionComment: IssueResumeResolutionComment
+}
+
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
@@ -219,14 +239,17 @@ export class AgentDaemon {
   private lastPollAt: string | null = null
   private lastClaimedAt: string | null = null
   private pollTimeoutId: ReturnType<typeof setTimeout> | null = null
+  private wakeQueueCheckIntervalId: ReturnType<typeof setInterval> | null = null
   private nextPollAt: string | null = null
   private nextPollReason: string | null = null
   private nextPollDelayMs: number | null = null
+  private pendingWakeRequested = false
   private healthServer: ReturnType<typeof Bun.serve> | null = null
   private healthServerConfig: HealthServerConfig = {
     host: DEFAULT_HEALTH_SERVER_HOST,
     port: DEFAULT_HEALTH_SERVER_PORT,
   }
+  private readonly wakeQueuePath: string
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
   private presencePublisher: ManagedDaemonPresencePublisher | null = null
@@ -254,6 +277,11 @@ export class AgentDaemon {
       this.healthServerConfig = { ...this.healthServerConfig, ...healthServerConfig }
     }
     this.metricsPort = metricsPort ?? 9090
+    this.wakeQueuePath = buildWakeQueuePath({
+      repo: this.config.repo,
+      machineId: this.config.machineId,
+      homeDir: resolveWakeQueueHomeDirFromWorktreesBase(this.config.worktreesBase),
+    })
     this.agentLoopBuild = resolveAgentLoopBuildMetadata()
     this.agentLoopUpgrade = createInitialAgentLoopUpgradeMetadata(
       this.config,
@@ -544,6 +572,74 @@ export class AgentDaemon {
     )
   }
 
+  async drainWakeQueueOnce(options: {
+    scheduleImmediate?: boolean
+  } = {}): Promise<void> {
+    let drained
+
+    try {
+      drained = drainWakeQueue(this.wakeQueuePath)
+    } catch (error) {
+      this.logger.warn(`[daemon] failed to drain wake queue at ${this.wakeQueuePath}: ${formatDaemonError(error)}`)
+      return
+    }
+
+    for (const invalidEntry of drained.invalidEntries) {
+      this.logger.warn(
+        `[daemon] skipped invalid wake queue entry at ${this.wakeQueuePath}:${invalidEntry.lineNumber}: ${invalidEntry.error}`,
+      )
+    }
+
+    if (drained.requests.length === 0) {
+      return
+    }
+
+    this.logger.log(
+      `[daemon] drained ${drained.requests.length} wake request(s) from ${this.wakeQueuePath}`,
+    )
+
+    if (options.scheduleImmediate !== false) {
+      this.requestImmediateReconcile('wake-request')
+    }
+  }
+
+  private startWakeQueueMonitor(): void {
+    if (this.wakeQueueCheckIntervalId !== null) {
+      clearInterval(this.wakeQueueCheckIntervalId)
+    }
+
+    this.wakeQueueCheckIntervalId = setInterval(() => {
+      if (!this.running || this.shutdownRequested) {
+        return
+      }
+
+      if (!hasPendingWakeRequests(this.wakeQueuePath)) {
+        return
+      }
+
+      this.requestImmediateReconcile('wake-request')
+    }, WAKE_QUEUE_CHECK_INTERVAL_MS)
+  }
+
+  private requestImmediateReconcile(reason: string): void {
+    if (this.shutdownRequested) {
+      return
+    }
+
+    this.pendingWakeRequested = true
+    this.nextPollAt = new Date().toISOString()
+    this.nextPollReason = reason
+    this.nextPollDelayMs = 0
+    this.syncRuntimeMetrics()
+
+    if (this.pollTimeoutId !== null) {
+      this.scheduleNextPoll({
+        delayMs: 0,
+        reason,
+      })
+    }
+  }
+
   async start(): Promise<void> {
     this.logger.log(`[daemon] starting agent-loop v${this.agentLoopBuild.version} (${abbreviateRevision(this.agentLoopBuild.revision)})`)
     this.logger.log(`[daemon] machineId: ${this.config.machineId}`)
@@ -577,6 +673,7 @@ export class AgentDaemon {
 
     this.running = true
     this.syncRuntimeMetrics()
+    this.startWakeQueueMonitor()
 
     this.presencePublisher = new ManagedDaemonPresencePublisher({
       config: this.config,
@@ -676,6 +773,11 @@ export class AgentDaemon {
           })
         }
 
+        if (request.method === 'POST' && url.pathname === WAKE_PATH) {
+          this.requestImmediateReconcile('wake-request')
+          return new Response(null, { status: 202 })
+        }
+
         return new Response('Not Found', { status: 404 })
       },
     })
@@ -694,6 +796,12 @@ export class AgentDaemon {
     this.nextPollAt = null
     this.nextPollReason = null
     this.nextPollDelayMs = null
+    this.pendingWakeRequested = false
+
+    if (this.wakeQueueCheckIntervalId !== null) {
+      clearInterval(this.wakeQueueCheckIntervalId)
+      this.wakeQueueCheckIntervalId = null
+    }
 
     // Stop health server
     if (this.healthServer) {
@@ -813,9 +921,12 @@ export class AgentDaemon {
       clearTimeout(this.pollTimeoutId)
     }
 
-    const delayMs = Math.max(0, options.delayMs ?? this.config.pollIntervalMs)
+    const shouldWakeImmediately = this.pendingWakeRequested || hasPendingWakeRequests(this.wakeQueuePath)
+    const delayMs = shouldWakeImmediately
+      ? 0
+      : Math.max(0, options.delayMs ?? this.config.pollIntervalMs)
     this.nextPollAt = new Date(Date.now() + delayMs).toISOString()
-    this.nextPollReason = options.reason ?? 'normal'
+    this.nextPollReason = shouldWakeImmediately ? 'wake-request' : options.reason ?? 'normal'
     this.nextPollDelayMs = delayMs
     this.syncRuntimeMetrics()
 
@@ -825,6 +936,7 @@ export class AgentDaemon {
         this.nextPollAt = null
         this.nextPollReason = null
         this.nextPollDelayMs = null
+        this.pendingWakeRequested = false
         this.syncRuntimeMetrics()
         this.runPollCycleSafely().catch(err => this.logger.error('[daemon] poll wrapper error:', err))
       },
@@ -835,6 +947,11 @@ export class AgentDaemon {
   private async runPollCycleSafely(): Promise<void> {
     const startedAt = Date.now()
     void this.maybeRefreshAgentLoopUpgradeStatus()
+    this.pendingWakeRequested = false
+
+    await this.drainWakeQueueOnce({
+      scheduleImmediate: false,
+    })
 
     try {
       const startupResult = await this.runStartupMaintenanceIfNeeded()
@@ -1266,10 +1383,20 @@ export class AgentDaemon {
         ? getFailedIssueResumeBlock(linkedPr, linkedPrCanResumeHumanNeededReview)
         : null
       if (blockedResume) {
-        blockedIssueNumbers.add(issue.number)
-        this.noteBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason)
-        await this.maybeEscalateBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason, comments)
-        continue
+        if (
+          blockedResume.prNumber !== null
+          && canResumeBlockedIssueFromResolution(comments, issue.number, blockedResume.prNumber)
+        ) {
+          this.logger.log(
+            `[daemon] issue #${issue.number} received a matching resolution signal for linked PR #${blockedResume.prNumber}; retrying failed issue recovery`,
+          )
+          this.clearBlockedIssueResume(issue.number)
+        } else {
+          blockedIssueNumbers.add(issue.number)
+          this.noteBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason)
+          await this.maybeEscalateBlockedIssueResume(issue.number, blockedResume.prNumber, blockedResume.reason, comments)
+          continue
+        }
       }
       this.clearBlockedIssueResume(issue.number)
       if (!canAdoptLease) continue
@@ -3265,6 +3392,22 @@ Reason:
 Next step: clear or replace the linked PR state before expecting automatic issue resume.`
 }
 
+export function buildIssueResumeResolutionComment(
+  payload: IssueResumeResolutionComment,
+): string {
+  return `${ISSUE_RESUME_RESOLUTION_COMMENT_PREFIX}${JSON.stringify(payload)} -->
+## agent-loop issue resume resolution
+
+This blocked failed issue has a matching manual resolution signal and may be retried.
+
+- Issue: #${payload.issueNumber}
+- Linked PR: #${payload.prNumber}
+- Resolved at: ${payload.resolvedAt}
+- Resolution: ${payload.resolution}
+
+Next step: the daemon may retry failed issue recovery on the next reconcile.`
+}
+
 export function extractBlockedIssueResumeEscalationComment(
   body: string,
 ): BlockedIssueResumeEscalationComment | null {
@@ -3296,6 +3439,29 @@ export function extractBlockedIssueResumeEscalationComment(
   }
 }
 
+export function extractIssueResumeResolutionComment(
+  body: string,
+): IssueResumeResolutionComment | null {
+  const match = body.match(/<!-- agent-loop:issue-resume-resolved (\{.*\}) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<IssueResumeResolutionComment>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (!Number.isInteger(parsed.issueNumber) || !Number.isInteger(parsed.prNumber)) return null
+    if (typeof parsed.resolvedAt !== 'string' || typeof parsed.resolution !== 'string') return null
+
+    return {
+      issueNumber: parsed.issueNumber as number,
+      prNumber: parsed.prNumber as number,
+      resolvedAt: parsed.resolvedAt,
+      resolution: parsed.resolution,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function listBlockedIssueResumeEscalationComments(
   comments: IssueComment[],
   issueNumber: number,
@@ -3316,6 +3482,63 @@ export function listBlockedIssueResumeEscalationComments(
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
 }
 
+export function listIssueResumeResolutionComments(
+  comments: IssueComment[],
+  issueNumber: number,
+  prNumber: number,
+): IssueResumeResolutionRecord[] {
+  return comments
+    .map((comment) => {
+      const resolutionComment = extractIssueResumeResolutionComment(comment.body)
+      if (!resolutionComment) return null
+      if (resolutionComment.issueNumber !== issueNumber) return null
+      if (resolutionComment.prNumber !== prNumber) return null
+      return {
+        ...comment,
+        resolutionComment,
+      } satisfies IssueResumeResolutionRecord
+    })
+    .filter((comment): comment is IssueResumeResolutionRecord => comment !== null)
+    .sort((left, right) => readIssueCommentTimestamp(right, right.resolutionComment.resolvedAt) - readIssueCommentTimestamp(left, left.resolutionComment.resolvedAt))
+}
+
+export function evaluateBlockedIssueResumeResolution(
+  comments: IssueComment[],
+  issueNumber: number,
+  prNumber: number,
+): {
+  latestEscalation: BlockedIssueResumeEscalationRecord | null
+  latestResolution: IssueResumeResolutionRecord | null
+  canResume: boolean
+} {
+  const latestEscalation = listBlockedIssueResumeEscalationComments(comments, issueNumber, prNumber)[0] ?? null
+  const latestResolution = listIssueResumeResolutionComments(comments, issueNumber, prNumber)[0] ?? null
+
+  if (!latestEscalation || !latestResolution) {
+    return {
+      latestEscalation,
+      latestResolution,
+      canResume: false,
+    }
+  }
+
+  return {
+    latestEscalation,
+    latestResolution,
+    canResume:
+      readIssueCommentTimestamp(latestResolution, latestResolution.resolutionComment.resolvedAt)
+      > readIssueCommentTimestamp(latestEscalation, latestEscalation.escalation.escalatedAt),
+  }
+}
+
+export function canResumeBlockedIssueFromResolution(
+  comments: IssueComment[],
+  issueNumber: number,
+  prNumber: number,
+): boolean {
+  return evaluateBlockedIssueResumeResolution(comments, issueNumber, prNumber).canResume
+}
+
 export function summarizeBlockedIssueResumeEscalations(
   comments: IssueComment[],
   issueNumber: number,
@@ -3326,6 +3549,23 @@ export function summarizeBlockedIssueResumeEscalations(
     escalationCount: matches.length,
     lastEscalatedAt: matches[0]?.updatedAt ?? matches[0]?.createdAt ?? matches[0]?.escalation.escalatedAt ?? null,
   }
+}
+
+function readIssueCommentTimestamp(
+  comment: Pick<IssueComment, 'updatedAt' | 'createdAt'>,
+  fallbackIso: string | null = null,
+): number {
+  const candidates = [comment.updatedAt, comment.createdAt, fallbackIso]
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const parsed = Date.parse(candidate)
+    if (Number.isFinite(parsed)) {
+      return parsed
+    }
+  }
+
+  return 0
 }
 
 export function shouldEscalateBlockedIssueResume(input: {

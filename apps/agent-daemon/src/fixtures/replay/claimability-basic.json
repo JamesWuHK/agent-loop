@@ -1,0 +1,34 @@
+{
+  "name": "claimability-basic",
+  "openIssues": [
+    {
+      "number": 91,
+      "title": "ready issue",
+      "body": "## 用户故事\n\n作为 开发者，我希望 daemon 能 claim 这个 issue。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/example.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- ready issue remains ready\n\n### OutOfScope\n- unrelated scheduler changes\n\n### RequiredSemantics\n- issue is claimable\n\n### ReviewHints\n- check contract validity\n\n### Validation\n- `bun run typecheck`\n\n## RED 测试\n\n```ts\nthrow new Error('fixture red test body')\n```\n\n## 实现步骤\n1. add test\n\n## 验收\n- [ ] contract valid",
+      "labels": [
+        "agent:ready"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updatedAt": "2026-04-11T09:00:00.000Z"
+    },
+    {
+      "number": 92,
+      "title": "invalid ready issue",
+      "body": "## 用户故事\n\n作为 开发者，我希望 daemon 发现这个 issue contract 不完整。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/example.ts\n\n## 实现步骤\n1. missing sections on purpose\n\n## 验收\n- [ ] this issue should be invalid",
+      "labels": [
+        "agent:ready"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updatedAt": "2026-04-11T09:01:00.000Z"
+    }
+  ],
+  "issueComments": [],
+  "openPullRequests": [],
+  "expected": {
+    "claimable": 1,
+    "blocked": 0,
+    "invalid": 1
+  }
+}

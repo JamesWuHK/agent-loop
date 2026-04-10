@@ -11,6 +11,7 @@ import {
   DEFAULT_HEALTH_SERVER_PORT,
   BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS,
   HEALTH_PATH,
+  evaluateBlockedIssueResumeResolution,
   getFailedIssueResumeBlock,
 } from './daemon'
 import {
@@ -1493,6 +1494,7 @@ async function collectRemoteGitHubLeaseChecks(
 
   const checks: GitHubLeaseAuditCheck[] = []
   const prBlockers: GitHubPrBlockerSummary[] = []
+  const issueCommentsByNumber = new Map<number, IssueComment[]>()
   const prCommentsByNumber = new Map<number, IssueComment[]>()
   const openIssues = normalizeGitHubIssueList(issueListResult.data)
     .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
@@ -1501,26 +1503,24 @@ async function collectRemoteGitHubLeaseChecks(
   const issueBodiesByNumber = new Map(openIssues.map((issue) => [issue.number, issue.body]))
 
   for (const issue of openIssues) {
-    const key = buildLeaseAuditKey('issue-process', issue.number)
-    if (knownKeys.has(key)) continue
-
-    const commentResult = await fetchActiveRemoteManagedLease({
-      repo: health.repo,
-      targetNumber: issue.number,
-      scope: 'issue-process',
-      runner,
-    })
-    if (commentResult.error) {
+    const issueCommentResult = await fetchRemoteManagedLeaseComments(issue.number, runner, health.repo)
+    if (issueCommentResult.error) {
       return {
         checks,
         prBlockers,
-        error: `issue-process#${issue.number}: ${commentResult.error}`,
+        error: `issue-process#${issue.number}: ${issueCommentResult.error}`,
       }
     }
-    if (!commentResult.comment) continue
+    issueCommentsByNumber.set(issue.number, issueCommentResult.comments ?? [])
+
+    const key = buildLeaseAuditKey('issue-process', issue.number)
+    if (knownKeys.has(key)) continue
+
+    const comment = getActiveManagedLease(issueCommentResult.comments ?? [], 'issue-process')
+    if (!comment) continue
 
     checks.push(buildGitHubLeaseAuditCheckFromState(
-      buildLeaseAuditSubjectFromComment(commentResult.comment, issue.number, 'remote', health.daemonInstanceId),
+      buildLeaseAuditSubjectFromComment(comment, issue.number, 'remote', health.daemonInstanceId),
       issue.state,
       issue.labels,
     ))
@@ -1564,7 +1564,7 @@ async function collectRemoteGitHubLeaseChecks(
     }
   }
 
-  checks.push(...collectRemoteBlockedIssueResumeChecks(openIssues, openPrs, prCommentsByNumber))
+  checks.push(...collectRemoteBlockedIssueResumeChecks(openIssues, openPrs, issueCommentsByNumber, prCommentsByNumber))
 
   return {
     checks,
@@ -1733,6 +1733,7 @@ function normalizeGitHubLabels(labels: Array<{ name?: unknown }> | undefined): s
 function collectRemoteBlockedIssueResumeChecks(
   issues: Array<{ number: number; state: string; labels: string[]; updatedAt: string; body: string }>,
   prs: Array<{ number: number; state: string; labels: string[]; headRefName: string; headRefOid: string | null }>,
+  issueCommentsByNumber: Map<number, IssueComment[]>,
   prCommentsByNumber: Map<number, IssueComment[]>,
 ): GitHubLeaseAuditCheck[] {
   const checks: GitHubLeaseAuditCheck[] = []
@@ -1750,7 +1751,9 @@ function collectRemoteBlockedIssueResumeChecks(
     if (linkedPrs.length === 0) continue
 
     let firstBlocked: { prNumber: number; reason: string; blockedAgeSeconds: number | null } | null = null
+    let firstResolutionSignal: { prNumber: number; resolvedAt: string; resolution: string } | null = null
     let hasResumableLinkedPr = false
+    const issueComments = issueCommentsByNumber.get(issue.number) ?? []
 
     for (const pr of linkedPrs) {
       const prComments = prCommentsByNumber.get(pr.number) ?? []
@@ -1772,6 +1775,21 @@ function collectRemoteBlockedIssueResumeChecks(
         break
       }
 
+      const resolution = evaluateBlockedIssueResumeResolution(issueComments, issue.number, pr.number)
+      if (resolution.canResume && resolution.latestResolution) {
+        if (
+          firstResolutionSignal === null
+          || Date.parse(resolution.latestResolution.resolutionComment.resolvedAt) > Date.parse(firstResolutionSignal.resolvedAt)
+        ) {
+          firstResolutionSignal = {
+            prNumber: pr.number,
+            resolvedAt: resolution.latestResolution.resolutionComment.resolvedAt,
+            resolution: resolution.latestResolution.resolutionComment.resolution,
+          }
+        }
+        continue
+      }
+
       const blockedAgeSeconds = getLatestAutomatedPrReviewCommentAgeSeconds(prComments)
       if (
         firstBlocked === null
@@ -1785,7 +1803,21 @@ function collectRemoteBlockedIssueResumeChecks(
       }
     }
 
-    if (hasResumableLinkedPr || firstBlocked === null) continue
+    if (hasResumableLinkedPr) continue
+
+    if (firstBlocked === null && firstResolutionSignal !== null) {
+      checks.push({
+        scope: 'issue-process',
+        targetNumber: issue.number,
+        state: issue.state,
+        labels: issue.labels,
+        warning: `issue-process#${issue.number} received a valid resolution signal for linked PR #${firstResolutionSignal.prNumber} at ${firstResolutionSignal.resolvedAt}: ${firstResolutionSignal.resolution}`,
+        source: 'remote',
+      })
+      continue
+    }
+
+    if (firstBlocked === null) continue
 
     checks.push({
       scope: 'issue-process',

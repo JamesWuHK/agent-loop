@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
+import { appendWakeRequest, buildWakeQueuePath, type WakeRequest } from './wake-queue'
 import {
   buildCurrentProcessRuntimeRecord,
   buildBackgroundRuntimePaths,
@@ -49,6 +50,25 @@ import {
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
 const RESTART_BACKGROUND_RUNTIME_STOP_TIMEOUT_MS = 30_000
+
+export interface WakeCommand {
+  kind: 'now' | 'issue' | 'pr'
+  issueNumber?: number
+  prNumber?: number
+}
+
+export interface ExecuteWakeCommandInput {
+  command: WakeCommand
+  repo?: string
+  machineId?: string
+  healthPort: number
+}
+
+export interface ExecuteWakeCommandResult {
+  queuePath: string
+  request: WakeRequest
+  notified: boolean
+}
 
 export interface RestartManagedRuntimeInput {
   discoveredRuntime: BackgroundRuntimeSnapshot | null
@@ -113,6 +133,14 @@ interface RestartManagedRuntimeDependencies {
   launchBackgroundRuntime: typeof launchBackgroundRuntime
 }
 
+interface WakeCommandDependencies {
+  resolveLocalDaemonIdentity: LocalDaemonIdentityResolver
+  buildWakeQueuePath: typeof buildWakeQueuePath
+  appendWakeRequest: typeof appendWakeRequest
+  notifyLocalWake: typeof notifyLocalWake
+  now: () => Date
+}
+
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   platform: process.platform,
   resolveLocalDaemonIdentity,
@@ -123,6 +151,14 @@ const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   stopLaunchdService,
   stopBackgroundRuntime,
   launchBackgroundRuntime,
+}
+
+const DEFAULT_WAKE_COMMAND_DEPENDENCIES: WakeCommandDependencies = {
+  resolveLocalDaemonIdentity,
+  buildWakeQueuePath,
+  appendWakeRequest,
+  notifyLocalWake,
+  now: () => new Date(),
 }
 
 async function main() {
@@ -155,6 +191,9 @@ async function main() {
       doctor: { type: 'boolean' },
       'health-host': { type: 'string' },
       'health-port': { type: 'string' },
+      'wake-now': { type: 'boolean' },
+      'wake-issue': { type: 'string' },
+      'wake-pr': { type: 'string' },
       help: { type: 'boolean' },
     },
   })
@@ -169,6 +208,16 @@ async function main() {
   if (args.help) {
     printHelp()
     process.exit(0)
+  }
+
+  const wakeCommand = resolveWakeCommand({
+    'wake-now': args['wake-now'] as boolean | undefined,
+    'wake-issue': args['wake-issue'] as string | undefined,
+    'wake-pr': args['wake-pr'] as string | undefined,
+  })
+
+  if (wakeCommand) {
+    assertWakeCommandCompatible(args)
   }
 
   if (args['repo-cap'] && !args['join-project']) {
@@ -312,6 +361,22 @@ async function main() {
   if (cliArgs.healthPort) healthServerConfig.port = cliArgs.healthPort
 
   try {
+    if (wakeCommand) {
+      const result = await executeWakeCommand({
+        command: wakeCommand,
+        repo: cliArgs.repo,
+        machineId: cliArgs.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+      })
+      console.log(`[agent-loop] queued wake request at ${result.queuePath}`)
+      console.log(
+        result.notified
+          ? `[agent-loop] local daemon notified via http://${DEFAULT_HEALTH_SERVER_HOST}:${healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT}/wake`
+          : '[agent-loop] wake request persisted; local daemon notify was not confirmed',
+      )
+      process.exit(0)
+    }
+
     if (args.dashboard) {
       const config = loadConfig(cliArgs)
       const server = startDashboardServer({
@@ -535,6 +600,9 @@ agent-loop — Distributed automation daemon
 Usage:
   agent-loop [options]
   agent-loop --join-project [options]
+  agent-loop --wake-now [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
+  agent-loop --wake-issue <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
+  agent-loop --wake-pr <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -558,6 +626,9 @@ Options:
       --health-host <host>    Health check server host (default: 127.0.0.1)
       --health-port <port>    Health check server port (default: 9310)
       --metrics-port <port>   Prometheus metrics port (default: 9090)
+      --wake-now              Queue an immediate local wake request and best-effort notify the daemon
+      --wake-issue <number>   Queue a targeted issue wake request and best-effort notify the daemon
+      --wake-pr <number>      Queue a targeted PR wake request and best-effort notify the daemon
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -596,6 +667,9 @@ Examples:
   agent-loop --repo owner/repo --concurrency 2
   agent-loop --health-port 8080
   agent-loop --metrics-port 9090
+  agent-loop --wake-now --repo owner/repo
+  agent-loop --wake-issue 374 --repo owner/repo --machine-id macbook-pro-b
+  agent-loop --wake-pr 381 --health-port 9311
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
@@ -655,6 +729,112 @@ function resolveDiscoveredRuntime(input: {
 function ensureLaunchdSupported(): void {
   if (process.platform !== 'darwin') {
     throw new Error('launchd management is only supported on macOS')
+  }
+}
+
+export function resolveWakeCommand(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+}): WakeCommand | null {
+  const commands: WakeCommand[] = []
+
+  if (args['wake-now']) {
+    commands.push({ kind: 'now' })
+  }
+
+  if (typeof args['wake-issue'] === 'string') {
+    commands.push({
+      kind: 'issue',
+      issueNumber: parseWakeTargetNumber(args['wake-issue'], '--wake-issue'),
+    })
+  }
+
+  if (typeof args['wake-pr'] === 'string') {
+    commands.push({
+      kind: 'pr',
+      prNumber: parseWakeTargetNumber(args['wake-pr'], '--wake-pr'),
+    })
+  }
+
+  if (commands.length > 1) {
+    throw new Error('Only one of --wake-now, --wake-issue, or --wake-pr can be used at a time')
+  }
+
+  return commands[0] ?? null
+}
+
+export function buildWakeRequestFromCli(
+  command: WakeCommand,
+  requestedAt = new Date().toISOString(),
+): WakeRequest {
+  switch (command.kind) {
+    case 'now':
+      return {
+        kind: 'now',
+        reason: 'cli:wake-now',
+        sourceEvent: 'cli',
+        dedupeKey: 'cli:wake-now',
+        requestedAt,
+      }
+    case 'issue':
+      return {
+        kind: 'issue',
+        issueNumber: command.issueNumber!,
+        reason: 'cli:wake-issue',
+        sourceEvent: 'cli',
+        dedupeKey: `cli:wake-issue:${command.issueNumber!}`,
+        requestedAt,
+      }
+    case 'pr':
+      return {
+        kind: 'pr',
+        prNumber: command.prNumber!,
+        reason: 'cli:wake-pr',
+        sourceEvent: 'cli',
+        dedupeKey: `cli:wake-pr:${command.prNumber!}`,
+        requestedAt,
+      }
+  }
+}
+
+export async function executeWakeCommand(
+  input: ExecuteWakeCommandInput,
+  deps: WakeCommandDependencies = DEFAULT_WAKE_COMMAND_DEPENDENCIES,
+): Promise<ExecuteWakeCommandResult> {
+  const identity = deps.resolveLocalDaemonIdentity(
+    {
+      repo: input.repo,
+      machineId: input.machineId,
+    },
+    {
+      persistGeneratedMachineId: false,
+    },
+  )
+  const request = buildWakeRequestFromCli(input.command, deps.now().toISOString())
+  const queuePath = deps.buildWakeQueuePath({
+    repo: identity.repo,
+    machineId: identity.machineId,
+  })
+
+  deps.appendWakeRequest(queuePath, request)
+
+  let notified = false
+
+  try {
+    await deps.notifyLocalWake({
+      healthPort: input.healthPort,
+      request,
+    })
+    notified = true
+  } catch {
+    notified = false
+  }
+
+  return {
+    queuePath,
+    request,
+    notified,
   }
 }
 
@@ -765,6 +945,97 @@ function isManagedRuntimeValueFlag(flag: string): boolean {
 
 function isManagedRuntimeBooleanFlag(flag: string): boolean {
   return flag === '--dry-run' || flag === '--once'
+}
+
+function assertWakeCommandCompatible(args: {
+  pat?: string
+  concurrency?: string
+  'poll-interval'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+}): void {
+  const incompatibleFlags = [
+    typeof args.pat === 'string' ? '--pat' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Wake commands cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function parseWakeTargetNumber(value: string, flag: string): number {
+  const trimmed = value.trim()
+
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${flag} must be a positive integer`)
+  }
+
+  const parsed = Number.parseInt(trimmed, 10)
+
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flag} must be a positive integer`)
+  }
+
+  return parsed
+}
+
+async function notifyLocalWake(input: {
+  healthPort: number
+  request: WakeRequest
+}): Promise<void> {
+  const response = await fetch(`http://${DEFAULT_HEALTH_SERVER_HOST}:${input.healthPort}/wake`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(input.request),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Wake endpoint returned ${response.status}`)
+  }
 }
 
 export function readManagedRuntimeLog(input: {

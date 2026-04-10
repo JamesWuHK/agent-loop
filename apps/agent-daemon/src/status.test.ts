@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { buildManagedLeaseComment, type DaemonStatus, type ManagedLease } from '@agent/shared'
+import {
+  buildBlockedIssueResumeEscalationComment,
+  buildIssueResumeResolutionComment,
+} from './daemon'
 import { buildPrReviewComment } from './pr-reviewer'
 import {
   collectDaemonObservability,
@@ -894,6 +898,138 @@ describe('status helpers', () => {
     }))
     const blockedCheck = audit.checks.find((check) => check.scope === 'issue-process' && check.targetNumber === 91)
     expect(blockedCheck?.blockedAgeSeconds).toBeGreaterThan(300)
+  })
+
+  test('surfaces valid blocked-issue resolution signals from GitHub state', async () => {
+    const blockedComment = buildPrReviewComment(110, {
+      approved: false,
+      canMerge: false,
+      reason: 'Selection state still breaks the issue contract.',
+      findings: [
+        {
+          severity: 'high',
+          file: 'apps/desktop/src/pages/MainPage.tsx',
+          summary: 'selection mode regressed the required session list behavior',
+          mustFix: ['restore the issue-scoped session list semantics'],
+          mustNotDo: ['do not expand scope beyond issue #91'],
+          validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+          scopeRationale: 'issue #91 only covers existing session summary and switching',
+        },
+      ],
+    }, 3, 'human-needed')
+
+    const audit = await collectGitHubLeaseAudit({
+      daemonInstanceId: baseHealth.daemonInstanceId,
+      repo: 'JamesWuHK/digital-employee',
+      runtime: {
+        activeLeaseDetails: [],
+      },
+    }, async (args) => {
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 91,
+              state: 'OPEN',
+              labels: [{ name: 'agent:failed' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return {
+          ok: true,
+          data: [
+            {
+              number: 110,
+              state: 'OPEN',
+              headRefName: 'agent/91/codex-dev',
+              labels: [{ name: 'agent:review-failed' }, { name: 'agent:human-needed' }],
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/91/comments') {
+        return {
+          ok: true,
+          data: [
+            {
+              id: 201,
+              body: buildBlockedIssueResumeEscalationComment({
+                issueNumber: 91,
+                prNumber: 110,
+                blockedSince: '2026-04-11T08:00:00.000Z',
+                escalatedAt: '2026-04-11T08:10:00.000Z',
+                thresholdSeconds: 300,
+                reason: 'linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+                machineId: 'codex-dev',
+                daemonInstanceId: 'daemon-1',
+              }),
+              created_at: '2026-04-11T08:10:00.000Z',
+              updated_at: '2026-04-11T08:10:00.000Z',
+            },
+            {
+              id: 202,
+              body: buildIssueResumeResolutionComment({
+                issueNumber: 91,
+                prNumber: 110,
+                resolvedAt: '2026-04-11T08:25:00.000Z',
+                resolution: 'human-follow-up-complete',
+              }),
+              created_at: '2026-04-11T08:25:00.000Z',
+              updated_at: '2026-04-11T08:25:00.000Z',
+            },
+          ],
+          error: null,
+        }
+      }
+
+      if (args[0] === 'api' && args[1] === 'repos/JamesWuHK/digital-employee/issues/110/comments') {
+        return {
+          ok: true,
+          data: [
+            {
+              id: 301,
+              body: blockedComment,
+              created_at: '2000-04-05T08:02:00.000Z',
+              updated_at: '2000-04-05T08:02:30.000Z',
+            },
+          ],
+          error: null,
+        }
+      }
+
+      return {
+        ok: false,
+        data: null,
+        error: `unexpected gh invocation: ${args.join(' ')}`,
+      }
+    })
+
+    expect(audit.ok).toBe(true)
+    expect(audit.warnings).toContain('issue-process#91 received a valid resolution signal for linked PR #110 at 2026-04-11T08:25:00.000Z: human-follow-up-complete')
+    expect(audit.warnings).not.toContain('issue-process#91 is blocked by linked PR #110: linked PR #110 is in terminal agent:human-needed; automated review has no remaining structured retry path')
+
+    const report = formatStatusReport({
+      ok: true,
+      healthUrl: 'http://127.0.0.1:9310/health',
+      metricsUrl: null,
+      error: null,
+      diagnosticRepo: baseHealth.repo,
+      localRuntime: baseLocalRuntime,
+      health: baseHealth,
+      metrics: null,
+      metricsError: null,
+      githubAudit: audit,
+      warnings: [],
+    })
+
+    expect(report).toContain('issue-process#91 received a valid resolution signal for linked PR #110 at 2026-04-11T08:25:00.000Z: human-follow-up-complete')
   })
 
   test('collects remote GitHub lease diagnostics even when the local health endpoint is unreachable', async () => {

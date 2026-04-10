@@ -64,6 +64,42 @@ agent-loop --launchd-install --health-port 9311 --metrics-port 9091
 agent-loop --once
 ```
 
+## Single-Repo Multi-Machine Mode
+
+当前这一版的重点不是“模仿 OpenHands”，而是把“多台机器协同开发同一个仓库”做稳定：
+
+- 显式调度优先级：给 issue 加 `agent:priority-high` 或 `agent:priority-low`；未打标的 issue 走默认优先级。claim 顺序固定为 `high > default > low`，同优先级内再按更早的 `updatedAt` 和更小的 issue number 稳定排序。
+- 低延迟唤醒：除了周期性 polling，还可以主动唤醒本机 daemon。
+
+```bash
+agent-loop --wake-now
+agent-loop --wake-issue 123
+agent-loop --wake-pr 456
+```
+
+这些 wake request 会先落到本地 durable queue，再由 daemon 在启动时和空闲期间消费，所以即使 loopback notify 失败，也不会直接丢信号。默认路径：
+
+```text
+~/.agent-loop/wake-queue/{owner-repo}/{machineId}.jsonl
+```
+
+- 离线回放评估：daemon 行为变更可以用 fixture 目录做 replay/eval，而不是只靠手工盯日志。
+
+```bash
+bun run agent:replay:eval -- --fixtures-dir apps/agent-daemon/src/fixtures/replay
+```
+
+- 人机接力恢复：如果某个 failed issue 被关联 PR 的 `agent:human-needed` 状态卡住，可以在 issue 评论区写入一个更新、更晚的 resolution comment，daemon 就会在下一次 reconcile 尝试恢复。
+
+```md
+<!-- agent-loop:issue-resume-resolved {"issueNumber":104,"prNumber":205,"resolvedAt":"2026-04-11T09:10:00.000Z","resolution":"manual fix applied and ready for daemon retry"} -->
+## agent-loop issue resume resolution
+
+This blocked failed issue has a matching manual resolution signal and may be retried.
+```
+
+这个 resolution signal 必须发在 issue comment，不是 PR comment。`agent-loop --status` 和 `agent-loop --doctor` 也会把它识别出来并报告出来。
+
 ## Self-Hosting（用 Agent Loop 开发 Agent Loop）
 
 Issue body format is defined in [docs/issue-writing.md](docs/issue-writing.md).

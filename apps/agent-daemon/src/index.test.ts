@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  buildWakeRequestFromCli,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeWakeCommand,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
+  resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
   formatLaunchdStatus,
@@ -17,6 +20,7 @@ import {
   stopManagedRuntime,
 } from './index'
 import type { BackgroundRuntimeSnapshot } from './background'
+import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
 
 describe('index helpers', () => {
   test('builds stable restart args for a managed runtime', () => {
@@ -31,6 +35,96 @@ describe('index helpers', () => {
       '--health-port', '9311',
       '--metrics-port', '9091',
     ])
+  })
+
+  test('resolves wake commands and validates targeted wake numbers', () => {
+    expect(resolveWakeCommand({
+      'wake-now': true,
+    })).toEqual({
+      kind: 'now',
+    })
+
+    expect(resolveWakeCommand({
+      'wake-issue': '42',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 42,
+    })
+
+    expect(resolveWakeCommand({
+      'wake-pr': '381',
+    })).toEqual({
+      kind: 'pr',
+      prNumber: 381,
+    })
+
+    expect(() => resolveWakeCommand({
+      'wake-issue': 'abc',
+    })).toThrow('--wake-issue must be a positive integer')
+
+    expect(() => resolveWakeCommand({
+      'wake-now': true,
+      'wake-pr': '381',
+    })).toThrow('Only one of --wake-now, --wake-issue, or --wake-pr can be used at a time')
+  })
+
+  test('builds stable wake requests from CLI commands', () => {
+    expect(buildWakeRequestFromCli(
+      { kind: 'issue', issueNumber: 374 },
+      '2026-04-11T09:30:00.000Z',
+    )).toEqual({
+      kind: 'issue',
+      issueNumber: 374,
+      reason: 'cli:wake-issue',
+      sourceEvent: 'cli',
+      dedupeKey: 'cli:wake-issue:374',
+      requestedAt: '2026-04-11T09:30:00.000Z',
+    })
+  })
+
+  test('persists wake requests even when local daemon notification fails', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'agent-loop-wake-command-test-'))
+
+    const result = await executeWakeCommand({
+      command: { kind: 'pr', prNumber: 381 },
+      healthPort: 9311,
+    }, {
+      resolveLocalDaemonIdentity: () => ({
+        repo: 'JamesWuHK/agent-loop',
+        machineId: 'macbook-pro-b',
+      }),
+      buildWakeQueuePath: (input) => buildWakeQueuePath({
+        ...input,
+        homeDir,
+      }),
+      appendWakeRequest,
+      notifyLocalWake: async () => {
+        throw new Error('connection refused')
+      },
+      now: () => new Date('2026-04-11T09:40:00.000Z'),
+    })
+
+    const queuePath = buildWakeQueuePath({
+      repo: 'JamesWuHK/agent-loop',
+      machineId: 'macbook-pro-b',
+      homeDir,
+    })
+
+    expect(result).toEqual({
+      queuePath,
+      request: {
+        kind: 'pr',
+        prNumber: 381,
+        reason: 'cli:wake-pr',
+        sourceEvent: 'cli',
+        dedupeKey: 'cli:wake-pr:381',
+        requestedAt: '2026-04-11T09:40:00.000Z',
+      },
+      notified: false,
+    })
+    expect(readFileSync(queuePath, 'utf-8')).toBe(
+      '{"kind":"pr","prNumber":381,"reason":"cli:wake-pr","sourceEvent":"cli","dedupeKey":"cli:wake-pr:381","requestedAt":"2026-04-11T09:40:00.000Z"}\n',
+    )
   })
 
   test('preserves existing managed runtime launch args and replaces explicit overrides', () => {
@@ -171,15 +265,20 @@ describe('index helpers', () => {
   })
 
   test('reports when no managed daemon log file exists', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-loop-missing-log-test-'))
+    const missingLogPath = join(dir, 'missing-daemon.log')
+
     const result = readManagedRuntimeLog({
-      discoveredRuntime: null,
+      discoveredRuntime: buildRuntimeSnapshot({
+        logPath: missingLogPath,
+      }),
       repo: 'JamesWuHK/digital-employee',
       machineId: 'codex-dev',
       healthPort: 9311,
     })
 
     expect(result.found).toBe(false)
-    expect(result.path).toContain('jameswuhk-digital-employee__codex-dev__9311.log')
+    expect(result.path).toBe(missingLogPath)
     expect(formatManagedRuntimeLog(result)).toContain('No managed daemon log file found')
   })
 
