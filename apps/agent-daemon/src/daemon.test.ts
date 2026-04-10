@@ -247,6 +247,41 @@ describe('wake queue integration', () => {
 })
 
 describe('daemon merge recovery helpers', () => {
+  test('skips deferred resumable issue handoffs and keeps scanning for another local resume candidate', async () => {
+    const daemon = createTestDaemon({ concurrency: 2 }) as any
+    const seen: number[] = []
+    const started: number[] = []
+    const candidate330 = {
+      issue: { number: 330 },
+      priorLease: null,
+      requiresRemoteAdoption: false,
+    }
+    const candidate348 = {
+      issue: { number: 348 },
+      priorLease: null,
+      requiresRemoteAdoption: false,
+    }
+
+    daemon.findResumableIssue = async (skipIssueNumbers: ReadonlySet<number> = new Set<number>()) => {
+      if (!skipIssueNumbers.has(330)) return candidate330
+      if (!skipIssueNumbers.has(348)) return candidate348
+      return null
+    }
+    daemon.shouldPreferLinkedPrHandoff = async (candidate: { issue: { number: number } }) => {
+      seen.push(candidate.issue.number)
+      return candidate.issue.number === 330
+    }
+    daemon.processResumableIssue = async (candidate: { issue: { number: number } }) => {
+      started.push(candidate.issue.number)
+    }
+
+    await expect(daemon.maybeStartResumableIssue()).resolves.toBe(true)
+    await Promise.resolve()
+
+    expect(seen).toEqual([330, 348])
+    expect(started).toEqual([348])
+  })
+
   test('skips duplicate claimed comments when a freshly claimed issue enters working', () => {
     expect(buildIssueWorkingTransitionEvent('fresh-claim', 'codex-dev')).toBeNull()
   })

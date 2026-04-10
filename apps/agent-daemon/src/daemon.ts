@@ -1172,9 +1172,13 @@ export class AgentDaemon {
   }
 
   private async maybeStartResumableIssue(): Promise<boolean> {
-    const resumableIssue = await this.findResumableIssue()
+    const deferredIssueNumbers = new Set<number>()
+    let resumableIssue = await this.findResumableIssue(deferredIssueNumbers)
+    while (resumableIssue && await this.shouldPreferLinkedPrHandoff(resumableIssue)) {
+      deferredIssueNumbers.add(resumableIssue.issue.number)
+      resumableIssue = await this.findResumableIssue(deferredIssueNumbers)
+    }
     if (!resumableIssue) return false
-    if (await this.shouldPreferLinkedPrHandoff(resumableIssue)) return false
 
     this.activeIssueProcesses.add(resumableIssue.issue.number)
     const processPromise = this.processResumableIssue(resumableIssue)
@@ -1322,7 +1326,9 @@ export class AgentDaemon {
     )
   }
 
-  private async findResumableIssue(): Promise<ResumableIssueCandidate | null> {
+  private async findResumableIssue(
+    skipIssueNumbers: ReadonlySet<number> = new Set<number>(),
+  ): Promise<ResumableIssueCandidate | null> {
     const issues = await listOpenAgentIssues(this.config)
     const prs = await listOpenAgentPullRequests(this.config)
     const now = Date.now()
@@ -1330,6 +1336,7 @@ export class AgentDaemon {
     let candidate: ResumableIssueCandidate | null = null
 
     for (const issue of issues) {
+      if (skipIssueNumbers.has(issue.number)) continue
       if (this.activeIssueProcesses.has(issue.number)) continue
       if (this.activeWorktrees.has(issue.number)) continue
       const attempts = this.failedIssueResumeAttempts.get(issue.number) ?? 0
