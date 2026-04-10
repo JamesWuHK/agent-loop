@@ -15,6 +15,7 @@ import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, ty
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
 import { appendWakeRequest, buildWakeQueuePath, type WakeRequest } from './wake-queue'
+import { readWakeRequestFromGitHubEventContext } from './github-event-wake'
 import {
   buildCurrentProcessRuntimeRecord,
   buildBackgroundRuntimePaths,
@@ -59,6 +60,13 @@ export interface WakeCommand {
 
 export interface ExecuteWakeCommandInput {
   command: WakeCommand
+  repo?: string
+  machineId?: string
+  healthPort: number
+}
+
+export interface ExecuteWakeRequestInput {
+  request: WakeRequest
   repo?: string
   machineId?: string
   healthPort: number
@@ -194,6 +202,9 @@ async function main() {
       'wake-now': { type: 'boolean' },
       'wake-issue': { type: 'string' },
       'wake-pr': { type: 'string' },
+      'wake-from-github-event': { type: 'boolean' },
+      'github-event-name': { type: 'string' },
+      'github-event-path': { type: 'string' },
       help: { type: 'boolean' },
     },
   })
@@ -217,6 +228,13 @@ async function main() {
   })
 
   if (wakeCommand) {
+    assertWakeCommandCompatible(args)
+  }
+
+  if (args['wake-from-github-event']) {
+    if (wakeCommand) {
+      throw new Error('--wake-from-github-event cannot be combined with --wake-now, --wake-issue, or --wake-pr')
+    }
     assertWakeCommandCompatible(args)
   }
 
@@ -368,6 +386,32 @@ async function main() {
         machineId: cliArgs.machineId,
         healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
       })
+      console.log(`[agent-loop] queued wake request at ${result.queuePath}`)
+      console.log(
+        result.notified
+          ? `[agent-loop] local daemon notified via http://${DEFAULT_HEALTH_SERVER_HOST}:${healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT}/wake`
+          : '[agent-loop] wake request persisted; local daemon notify was not confirmed',
+      )
+      process.exit(0)
+    }
+
+    if (args['wake-from-github-event']) {
+      const request = readWakeRequestFromGitHubEventContext({
+        eventName: args['github-event-name'] as string | undefined,
+        eventPath: args['github-event-path'] as string | undefined,
+      })
+      if (!request) {
+        console.log('[agent-loop] github event did not require a wake request')
+        process.exit(0)
+      }
+
+      const result = await executeWakeRequest({
+        request,
+        repo: cliArgs.repo,
+        machineId: cliArgs.machineId,
+        healthPort: healthServerConfig.port ?? DEFAULT_HEALTH_SERVER_PORT,
+      })
+      console.log(`[agent-loop] resolved ${result.request.kind} wake request from ${result.request.sourceEvent}`)
       console.log(`[agent-loop] queued wake request at ${result.queuePath}`)
       console.log(
         result.notified
@@ -603,6 +647,7 @@ Usage:
   agent-loop --wake-now [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-issue <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-pr <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
+  agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -629,6 +674,10 @@ Options:
       --wake-now              Queue an immediate local wake request and best-effort notify the daemon
       --wake-issue <number>   Queue a targeted issue wake request and best-effort notify the daemon
       --wake-pr <number>      Queue a targeted PR wake request and best-effort notify the daemon
+      --wake-from-github-event
+                              Translate the current GitHub Actions event into a local wake request
+      --github-event-name     Override the GitHub event name used by --wake-from-github-event
+      --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -802,6 +851,18 @@ export async function executeWakeCommand(
   input: ExecuteWakeCommandInput,
   deps: WakeCommandDependencies = DEFAULT_WAKE_COMMAND_DEPENDENCIES,
 ): Promise<ExecuteWakeCommandResult> {
+  return executeWakeRequest({
+    request: buildWakeRequestFromCli(input.command, deps.now().toISOString()),
+    repo: input.repo,
+    machineId: input.machineId,
+    healthPort: input.healthPort,
+  }, deps)
+}
+
+export async function executeWakeRequest(
+  input: ExecuteWakeRequestInput,
+  deps: WakeCommandDependencies = DEFAULT_WAKE_COMMAND_DEPENDENCIES,
+): Promise<ExecuteWakeCommandResult> {
   const identity = deps.resolveLocalDaemonIdentity(
     {
       repo: input.repo,
@@ -811,20 +872,19 @@ export async function executeWakeCommand(
       persistGeneratedMachineId: false,
     },
   )
-  const request = buildWakeRequestFromCli(input.command, deps.now().toISOString())
   const queuePath = deps.buildWakeQueuePath({
     repo: identity.repo,
     machineId: identity.machineId,
   })
 
-  deps.appendWakeRequest(queuePath, request)
+  deps.appendWakeRequest(queuePath, input.request)
 
   let notified = false
 
   try {
     await deps.notifyLocalWake({
       healthPort: input.healthPort,
-      request,
+      request: input.request,
     })
     notified = true
   } catch {
@@ -833,7 +893,7 @@ export async function executeWakeCommand(
 
   return {
     queuePath,
-    request,
+    request: input.request,
     notified,
   }
 }
