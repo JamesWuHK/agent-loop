@@ -919,6 +919,7 @@ export class AgentDaemon {
     let startedWork = false
 
     while (!this.shutdownRequested && this.running) {
+      const activeIssueTaskCount = Math.max(this.activeWorktrees.size, this.activeIssueProcesses.size)
       const activeTaskCount = getEffectiveActiveTaskCount({
         activeWorktreeCount: this.activeWorktrees.size,
         inFlightIssueProcessCount: this.activeIssueProcesses.size,
@@ -937,12 +938,33 @@ export class AgentDaemon {
         return
       }
 
-      if (await this.maybeStartStandaloneApprovedPrMerge()) {
+      if (await this.maybeStartResumableIssue()) {
         startedWork = true
         continue
       }
 
-      if (await this.maybeStartResumableIssue()) {
+      const shouldReserveIssueSlot = shouldReserveIssueCapacityForStandalonePrTask({
+        concurrency: this.config.concurrency,
+        activeTaskCount,
+        activeIssueTaskCount,
+      })
+
+      if (!shouldReserveIssueSlot && await this.maybeStartStandaloneApprovedPrMerge()) {
+        startedWork = true
+        continue
+      }
+
+      if (shouldReserveIssueSlot && await this.maybeRequeueFailedIssue()) {
+        startedWork = true
+        continue
+      }
+
+      if (shouldReserveIssueSlot && await this.maybeStartClaimedIssue()) {
+        startedWork = true
+        continue
+      }
+
+      if (shouldReserveIssueSlot && await this.maybeStartStandaloneApprovedPrMerge()) {
         startedWork = true
         continue
       }
@@ -952,36 +974,42 @@ export class AgentDaemon {
         continue
       }
 
-      if (await this.maybeRequeueFailedIssue()) {
+      if (!shouldReserveIssueSlot && await this.maybeRequeueFailedIssue()) {
         startedWork = true
         continue
       }
 
-      const claimedIssue = await pollAndClaim(this.config, this.logger)
-
-      if (claimedIssue === null) {
-        recordPoll(startedWork ? 'success' : 'no_issues')
-        recordPollDuration(Date.now() - pollStartTime)
-        this.scheduleNextPoll()
-        return
+      if (!shouldReserveIssueSlot && await this.maybeStartClaimedIssue()) {
+        startedWork = true
+        continue
       }
 
-      this.lastClaimedAt = new Date().toISOString()
-      this.activeIssueProcesses.add(claimedIssue.number)
-      const processPromise = this.processIssue(claimedIssue)
-        .catch((err) => {
-          this.logger.error(`[daemon] processIssue #${claimedIssue.number} threw:`, err)
-        })
-        .finally(() => {
-          this.activeIssueProcesses.delete(claimedIssue.number)
-          this.inFlightIssueProcesses.delete(processPromise)
-          this.syncRuntimeMetrics()
-        })
-
-      this.inFlightIssueProcesses.add(processPromise)
-      this.syncRuntimeMetrics()
-      startedWork = true
+      recordPoll(startedWork ? 'success' : 'no_issues')
+      recordPollDuration(Date.now() - pollStartTime)
+      this.scheduleNextPoll()
+      return
     }
+  }
+
+  private async maybeStartClaimedIssue(): Promise<boolean> {
+    const claimedIssue = await pollAndClaim(this.config, this.logger)
+    if (claimedIssue === null) return false
+
+    this.lastClaimedAt = new Date().toISOString()
+    this.activeIssueProcesses.add(claimedIssue.number)
+    const processPromise = this.processIssue(claimedIssue)
+      .catch((err) => {
+        this.logger.error(`[daemon] processIssue #${claimedIssue.number} threw:`, err)
+      })
+      .finally(() => {
+        this.activeIssueProcesses.delete(claimedIssue.number)
+        this.inFlightIssueProcesses.delete(processPromise)
+        this.syncRuntimeMetrics()
+      })
+
+    this.inFlightIssueProcesses.add(processPromise)
+    this.syncRuntimeMetrics()
+    return true
   }
 
   private async maybeStartStandalonePrReview(): Promise<boolean> {
@@ -3138,6 +3166,16 @@ export function shouldDeferResumableIssueForActiveLinkedPrTask(
   activePrReviews: ReadonlySet<number>,
 ): boolean {
   return prNumber !== null && activePrReviews.has(prNumber)
+}
+
+export function shouldReserveIssueCapacityForStandalonePrTask(input: {
+  concurrency: number
+  activeTaskCount: number
+  activeIssueTaskCount: number
+}): boolean {
+  if (input.concurrency <= 1) return false
+  if (input.activeIssueTaskCount > 0) return false
+  return input.activeTaskCount >= input.concurrency - 1
 }
 
 export function shouldDeferResumableIssueForActiveLinkedPrLease(

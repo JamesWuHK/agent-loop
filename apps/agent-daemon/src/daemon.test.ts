@@ -21,6 +21,7 @@ import {
   getFailedIssueResumeBlock,
   isMissingRemoteBranchRecoveryReason,
   listBlockedIssueResumeEscalationComments,
+  shouldReserveIssueCapacityForStandalonePrTask,
   shouldDeferStandalonePrTaskForActiveIssueProcess,
   shouldDeferStandalonePrTaskForActiveIssueLease,
   shouldDeferResumableIssueForActiveLinkedPrTask,
@@ -211,6 +212,40 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([250]))).toBe(true)
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(250, new Set([249]))).toBe(false)
     expect(shouldDeferResumableIssueForActiveLinkedPrTask(null, new Set([250]))).toBe(false)
+  })
+
+  test('reserves the last free slot for issue work when no issue task is active', () => {
+    expect(shouldReserveIssueCapacityForStandalonePrTask({
+      concurrency: 2,
+      activeTaskCount: 1,
+      activeIssueTaskCount: 0,
+    })).toBe(true)
+
+    expect(shouldReserveIssueCapacityForStandalonePrTask({
+      concurrency: 3,
+      activeTaskCount: 2,
+      activeIssueTaskCount: 0,
+    })).toBe(true)
+  })
+
+  test('does not reserve issue capacity when concurrency is single-slot or an issue is already active', () => {
+    expect(shouldReserveIssueCapacityForStandalonePrTask({
+      concurrency: 1,
+      activeTaskCount: 0,
+      activeIssueTaskCount: 0,
+    })).toBe(false)
+
+    expect(shouldReserveIssueCapacityForStandalonePrTask({
+      concurrency: 2,
+      activeTaskCount: 1,
+      activeIssueTaskCount: 1,
+    })).toBe(false)
+
+    expect(shouldReserveIssueCapacityForStandalonePrTask({
+      concurrency: 3,
+      activeTaskCount: 1,
+      activeIssueTaskCount: 0,
+    })).toBe(false)
   })
 
   test('defers standalone PR tasks while a linked issue lease is active on GitHub', () => {
