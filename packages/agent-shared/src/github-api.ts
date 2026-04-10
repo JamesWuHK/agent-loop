@@ -221,9 +221,6 @@ async function ghApiRaw(
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const qualifiedArgs = qualifyGhApiArgs(args, config)
-  if (config.pat) {
-    return runDirectGitHubApi(qualifiedArgs, config)
-  }
   return runBoundedGhCommand(['api', ...qualifiedArgs], config)
 }
 
