@@ -216,11 +216,19 @@ async function ghRaw(
   return { stdout, stderr, exitCode }
 }
 
-async function ghApiRaw(
+export async function ghApiRaw(
   args: string[],
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const qualifiedArgs = qualifyGhApiArgs(args, config)
+  if (config.pat) {
+    try {
+      buildDirectGitHubApiRequest(qualifiedArgs, config)
+      return await runDirectGitHubApi(qualifiedArgs, config)
+    } catch {
+      // Fall back to gh api for argument shapes that direct mode does not support yet.
+    }
+  }
   return runBoundedGhCommand(['api', ...qualifiedArgs], config)
 }
 
@@ -336,6 +344,11 @@ export function buildDirectGitHubApiRequest(
 
     if (token === '--paginate') {
       paginate = true
+      continue
+    }
+
+    if (typeof token === 'string' && token.startsWith('-')) {
+      throw new Error(`unsupported gh api option for direct mode: ${token}`)
     }
   }
 

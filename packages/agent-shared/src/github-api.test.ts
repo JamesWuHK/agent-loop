@@ -23,10 +23,11 @@ import {
   parseGhApiErrorMessage,
   parseMergePrResponse,
   qualifyGhApiArgs,
+  ghApiRaw,
   sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
 } from './github-api'
-import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, type AgentIssue } from './types'
+import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, type AgentConfig, type AgentIssue } from './types'
 
 describe('buildGhEnv', () => {
   test('removes proxy variables and injects GitHub auth tokens', () => {
@@ -130,6 +131,77 @@ describe('buildDirectGitHubApiRequest', () => {
     expect(JSON.parse(request.body ?? '{}')).toEqual({
       labels: ['agent:ready', 'agent:claimed'],
     })
+  })
+
+  test('rejects unsupported gh api flags so callers can fall back to gh', () => {
+    expect(() => buildDirectGitHubApiRequest(
+      [
+        'repos/JamesWuHK/digital-employee/issues/334',
+        '--cache',
+        '1h',
+      ],
+      { repo: 'JamesWuHK/digital-employee' },
+    )).toThrow('unsupported gh api option for direct mode: --cache')
+  })
+})
+
+describe('ghApiRaw', () => {
+  test('uses direct fetch for PAT-backed paginated REST requests', async () => {
+    const originalFetch = globalThis.fetch
+    const seen: string[] = []
+    const config = {
+      repo: 'JamesWuHK/digital-employee',
+      pat: 'ghp_test',
+    } as AgentConfig
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+      seen.push(url)
+
+      if (seen.length === 1) {
+        expect(init?.headers).toMatchObject({
+          Authorization: 'token ghp_test',
+          Accept: 'application/vnd.github+json',
+        })
+        return new Response(
+          JSON.stringify([{ id: 11, body: 'page-1', created_at: '2026-04-11T10:00:00.000Z', updated_at: '2026-04-11T10:00:00.000Z' }]),
+          {
+            status: 200,
+            headers: {
+              link: '<https://api.github.com/repos/JamesWuHK/digital-employee/issues/334/comments?page=2>; rel="next"',
+            },
+          },
+        )
+      }
+
+      return new Response(
+        JSON.stringify([{ id: 12, body: 'page-2', created_at: '2026-04-11T10:00:01.000Z', updated_at: '2026-04-11T10:00:01.000Z' }]),
+        { status: 200 },
+      )
+    }) as typeof fetch
+
+    try {
+      const result = await ghApiRaw(
+        ['repos/JamesWuHK/digital-employee/issues/334/comments', '--paginate'],
+        config,
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(seen).toEqual([
+        'https://api.github.com/repos/JamesWuHK/digital-employee/issues/334/comments',
+        'https://api.github.com/repos/JamesWuHK/digital-employee/issues/334/comments?page=2',
+      ])
+      expect(JSON.parse(result.stdout)).toEqual([
+        { id: 11, body: 'page-1', created_at: '2026-04-11T10:00:00.000Z', updated_at: '2026-04-11T10:00:00.000Z' },
+        { id: 12, body: 'page-2', created_at: '2026-04-11T10:00:01.000Z', updated_at: '2026-04-11T10:00:01.000Z' },
+      ])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 
