@@ -9,6 +9,11 @@ export const ISSUE_LABELS = {
   STALE: 'agent:stale',
 } as const
 
+export const ISSUE_PRIORITY_LABELS = {
+  HIGH: 'agent:priority-high',
+  LOW: 'agent:priority-low',
+} as const
+
 export const PR_REVIEW_LABELS = {
   APPROVED: 'agent:review-approved',
   FAILED: 'agent:review-failed',
@@ -17,6 +22,7 @@ export const PR_REVIEW_LABELS = {
 } as const
 
 export type IssueLabel = (typeof ISSUE_LABELS)[keyof typeof ISSUE_LABELS]
+export type IssuePriorityLabel = (typeof ISSUE_PRIORITY_LABELS)[keyof typeof ISSUE_PRIORITY_LABELS]
 
 export type IssueState =
   | 'ready'

@@ -12,7 +12,7 @@ import type {
   ManagedLeaseScope,
   ManagedPullRequest,
 } from './types'
-import { ISSUE_LABELS, PR_REVIEW_LABELS } from './types'
+import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, PR_REVIEW_LABELS } from './types'
 import {
   inferState,
   buildEventComment,
@@ -796,6 +796,24 @@ export function applyDependencyClaimability(
       isClaimable: issue.state === 'ready' && issue.assignee === null && blockedBy.length === 0,
       claimBlockedBy: blockedBy,
     }
+  })
+}
+
+function getClaimSchedulingPriorityRank(issue: Pick<AgentIssue, 'labels'>): number {
+  if (issue.labels.includes(ISSUE_PRIORITY_LABELS.HIGH)) return 0
+  if (issue.labels.includes(ISSUE_PRIORITY_LABELS.LOW)) return 2
+  return 1
+}
+
+export function sortClaimableIssuesForScheduling(issues: AgentIssue[]): AgentIssue[] {
+  return [...issues].sort((left, right) => {
+    const priorityDiff = getClaimSchedulingPriorityRank(left) - getClaimSchedulingPriorityRank(right)
+    if (priorityDiff !== 0) return priorityDiff
+
+    const updatedAtDiff = left.updatedAt.localeCompare(right.updatedAt)
+    if (updatedAtDiff !== 0) return updatedAtDiff
+
+    return left.number - right.number
   })
 }
 

@@ -23,9 +23,10 @@ import {
   parseGhApiErrorMessage,
   parseMergePrResponse,
   qualifyGhApiArgs,
+  sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
 } from './github-api'
-import { ISSUE_LABELS } from './types'
+import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, type AgentIssue } from './types'
 
 describe('buildGhEnv', () => {
   test('removes proxy variables and injects GitHub auth tokens', () => {
@@ -384,6 +385,58 @@ describe('applyDependencyClaimability', () => {
 
     expect(issue?.isClaimable).toBe(true)
     expect(issue?.claimBlockedBy).toEqual([])
+  })
+})
+
+describe('sortClaimableIssuesForScheduling', () => {
+  function buildIssue(input: Partial<AgentIssue> & Pick<AgentIssue, 'number'>): AgentIssue {
+    const { number, ...rest } = input
+
+    return {
+      number,
+      title: `issue-${number}`,
+      body: '',
+      state: 'ready',
+      labels: [ISSUE_LABELS.READY],
+      assignee: null,
+      isClaimable: true,
+      updatedAt: '2026-04-11T08:00:00.000Z',
+      dependencyIssueNumbers: [],
+      hasDependencyMetadata: true,
+      dependencyParseError: false,
+      claimBlockedBy: [],
+      hasExecutableContract: true,
+      contractValidationErrors: [],
+      ...rest,
+    }
+  }
+
+  test('orders high before default before low and keeps ties deterministic', () => {
+    const ordered = sortClaimableIssuesForScheduling([
+      buildIssue({ number: 14 }),
+      buildIssue({ number: 13, labels: [ISSUE_LABELS.READY, ISSUE_PRIORITY_LABELS.LOW] }),
+      buildIssue({
+        number: 12,
+        labels: [ISSUE_LABELS.READY, ISSUE_PRIORITY_LABELS.HIGH],
+        updatedAt: '2026-04-11T08:05:00.000Z',
+      }),
+      buildIssue({
+        number: 11,
+        labels: [ISSUE_LABELS.READY, ISSUE_PRIORITY_LABELS.HIGH],
+        updatedAt: '2026-04-11T08:01:00.000Z',
+      }),
+      buildIssue({
+        number: 10,
+        labels: [ISSUE_LABELS.READY, 'agent:custom-priority'],
+        updatedAt: '2026-04-11T07:55:00.000Z',
+      }),
+      buildIssue({
+        number: 9,
+        updatedAt: '2026-04-11T07:55:00.000Z',
+      }),
+    ])
+
+    expect(ordered.map((issue) => issue.number)).toEqual([11, 12, 9, 10, 14, 13])
   })
 })
 
