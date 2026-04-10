@@ -107,6 +107,7 @@ describe('buildConfig', () => {
       leaseAdoptionBackoffMs: 5_000,
       leaseNoProgressTimeoutMs: 360_000,
     })
+    expect(config.idlePollIntervalMs).toBe(300_000)
     expect(config.worktreesBase).toBe('/tmp/agent-loop-home/.agent-worktrees/JamesWuHK-digital-employee')
   })
 
@@ -132,6 +133,7 @@ describe('buildConfig', () => {
     expect(config.concurrency).toBe(1)
     expect(config.recovery.leaseTtlMs).toBe(60_000)
     expect(config.recovery.leaseNoProgressTimeoutMs).toBe(360_000)
+    expect(config.idlePollIntervalMs).toBe(300_000)
     expect(config.upgrade).toEqual({
       enabled: true,
       repo: null,
@@ -184,6 +186,24 @@ describe('buildConfig', () => {
 
     expect(config.agent.primary).toBe('codex')
     expect(config.agent.fallback).toBeNull()
+  })
+
+  test('lets CLI override the idle backstop poll interval but never below the active poll interval', () => {
+    const config = buildConfig(
+      {
+        pollIntervalMs: 90_000,
+        idlePollIntervalMs: 30_000,
+      },
+      {
+        fileConfig: baseFileConfig,
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.pollIntervalMs).toBe(90_000)
+    expect(config.idlePollIntervalMs).toBe(90_000)
   })
 
   test('applies repo, profile, and project concurrency caps to the effective daemon limit', () => {

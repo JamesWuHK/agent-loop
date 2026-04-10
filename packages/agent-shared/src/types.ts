@@ -276,6 +276,7 @@ export interface AgentConfig {
   repo: string
   pat: string
   pollIntervalMs: number
+  idlePollIntervalMs?: number
   concurrency: number
   requestedConcurrency: number
   concurrencyPolicy: ConcurrencyPolicy
@@ -344,6 +345,7 @@ export interface DaemonStatus {
   daemonInstanceId: string
   repo: string
   pollIntervalMs: number
+  idlePollIntervalMs?: number
   concurrency: number
   requestedConcurrency: number
   concurrencyPolicy: ConcurrencyPolicy
