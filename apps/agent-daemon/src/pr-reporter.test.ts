@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentConfig } from '@agent/shared'
+import type { AgentConfig, PrLineageMetadata } from '@agent/shared'
 import { createOrFindPr, hasReusableOpenPr, isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
 
 const TEST_CONFIG: AgentConfig = {
@@ -268,5 +268,52 @@ describe('createOrFindPr', () => {
     })
     expect(pushCalls).toBe(1)
     expect(createCalls).toBe(0)
+  })
+
+  test('writes deterministic lineage metadata into newly created PR bodies', async () => {
+    let capturedBody = ''
+    const lineageMetadata: PrLineageMetadata = {
+      version: 1,
+      issue: 37,
+      headBranch: 'agent/37/codex-dev',
+      baseBranch: 'master',
+      baseSha: '11fc78e',
+      attempt: 1,
+      fingerprint: 'lineage-fingerprint',
+    }
+
+    const result = await createOrFindPr(
+      '/tmp/agent-loop-create-pr',
+      'agent/37/codex-dev',
+      37,
+      'record lineage metadata',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => ({
+          prNumber: null,
+          prUrl: null,
+          prState: null,
+        }),
+        pushBranch: async () => {},
+        resolvePrLineageMetadata: async () => lineageMetadata,
+        createPr: async (_branch, _issueNumber, _issueTitle, body) => {
+          capturedBody = body
+          return { number: 91, url: 'https://example.test/pr/91' }
+        },
+      },
+    )
+
+    expect(result).toEqual({
+      kind: 'created',
+      prNumber: 91,
+      prUrl: 'https://example.test/pr/91',
+    })
+    expect(capturedBody).toContain('## Summary')
+    expect(capturedBody).toContain('Fixes #37')
+    expect(capturedBody).toContain('<!-- agent-loop:pr-lineage {"version":1,"issue":37,"headBranch":"agent/37/codex-dev","baseBranch":"master","baseSha":"11fc78e","attempt":1,"fingerprint":"lineage-fingerprint"} -->')
+    expect(capturedBody).toContain('## Metadata')
+    expect(capturedBody).toContain('"generated_by": "agent-loop"')
+    expect(capturedBody).toContain('## Test Plan')
   })
 })

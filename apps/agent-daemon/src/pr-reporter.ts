@@ -1,5 +1,6 @@
-import type { AgentConfig, PrCheckResult } from '@agent/shared'
+import type { AgentConfig, PrCheckResult, PrLineageMetadata } from '@agent/shared'
 import { checkPrExists, createPr } from '@agent/shared'
+import { buildPrLineageMetadata, renderPrLineageMetadataComment } from './pr-lineage'
 
 interface GitCommandResult {
   exitCode: number
@@ -31,6 +32,7 @@ interface CreateOrFindPrDependencies {
   checkPrExists?: typeof checkPrExists
   createPr?: typeof createPr
   pushBranch?: typeof pushBranch
+  resolvePrLineageMetadata?: typeof resolvePrLineageMetadata
 }
 
 export type CreateOrFindPrResult =
@@ -180,6 +182,8 @@ const PR_BODY_TEMPLATE = (issueNumber: number, machineId: string) => `
 
 Fixes #${issueNumber}
 
+${renderPrLineageMetadataCommentPlaceholder}
+
 ## Metadata
 
 \`\`\`json
@@ -195,6 +199,43 @@ Fixes #${issueNumber}
 - [ ] tested locally
 - [ ] CI passes
 `.trim()
+
+const renderPrLineageMetadataCommentPlaceholder = '__AGENT_LOOP_PR_LINEAGE_METADATA__'
+
+function buildPrBody(
+  issueNumber: number,
+  machineId: string,
+  lineageMetadata: PrLineageMetadata,
+): string {
+  return PR_BODY_TEMPLATE(issueNumber, machineId)
+    .replace(renderPrLineageMetadataCommentPlaceholder, renderPrLineageMetadataComment(lineageMetadata))
+}
+
+async function resolvePrLineageMetadata(
+  worktreePath: string,
+  branch: string,
+  issueNumber: number,
+  config: AgentConfig,
+  gitRunner: PushBranchDependencies['runGit'] = runGit,
+): Promise<PrLineageMetadata> {
+  const fetchBase = await gitRunner(worktreePath, ['fetch', 'origin', config.git.defaultBranch])
+  if (fetchBase.exitCode !== 0) {
+    throw new Error(fetchBase.stderr || fetchBase.stdout || `Failed to fetch origin/${config.git.defaultBranch}`)
+  }
+
+  const baseSha = await gitRunner(worktreePath, ['rev-parse', `origin/${config.git.defaultBranch}`])
+  if (baseSha.exitCode !== 0) {
+    throw new Error(baseSha.stderr || baseSha.stdout || `Failed to resolve origin/${config.git.defaultBranch}`)
+  }
+
+  return buildPrLineageMetadata({
+    issueNumber,
+    headBranch: branch,
+    baseBranch: config.git.defaultBranch,
+    baseSha: baseSha.stdout.trim(),
+    attempt: 1,
+  })
+}
 
 /**
  * Create a PR for the given branch (idempotent).
@@ -212,6 +253,7 @@ export async function createOrFindPr(
   const checkExistingPr = dependencies.checkPrExists ?? checkPrExists
   const createPullRequest = dependencies.createPr ?? createPr
   const pushManagedBranch = dependencies.pushBranch ?? pushBranch
+  const resolveMetadata = dependencies.resolvePrLineageMetadata ?? resolvePrLineageMetadata
 
   // Check idempotency: PR might already exist
   const existing = await checkExistingPr(branch, config)
@@ -250,7 +292,8 @@ export async function createOrFindPr(
   // Push branch first if not pushed yet
   await pushManagedBranch(worktreePath, branch, logger)
 
-  const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
+  const lineageMetadata = await resolveMetadata(worktreePath, branch, issueNumber, config)
+  const body = buildPrBody(issueNumber, config.machineId, lineageMetadata)
   const pr = await createPullRequest(branch, issueNumber, issueTitle, body, config)
 
   logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)

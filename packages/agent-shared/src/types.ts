@@ -68,6 +68,16 @@ export interface ManagedPullRequest {
   labels: string[]
 }
 
+export interface PrLineageMetadata {
+  version: 1
+  issue: number
+  headBranch: string
+  baseBranch: string
+  baseSha: string
+  attempt: number
+  fingerprint: string
+}
+
 // ─── Internal Issue (derived) ───────────────────────────────────────────────
 
 export interface AgentIssue {
