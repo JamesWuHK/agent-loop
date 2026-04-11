@@ -15,6 +15,10 @@ import {
 } from './config'
 import { DEFAULT_HEALTH_SERVER_HOST } from './daemon'
 import {
+  DEFAULT_AGENT_LOOP_UPGRADE_CHECK_INTERVAL_MS,
+  DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
+} from './version'
+import {
   assertLaunchdWorkingDirectorySafe,
   buildLaunchdServicePaths,
   buildLaunchdServiceSpec,
@@ -121,6 +125,19 @@ export function buildJoinProjectConfigFile(
     ...existingConfig,
     repo: input.repo,
     machineId: input.machineId,
+    upgrade: {
+      ...(existingConfig.upgrade ?? {}),
+      enabled: existingConfig.upgrade?.enabled !== false,
+      repo: existingConfig.upgrade?.repo ?? null,
+      channel: existingConfig.upgrade?.channel ?? null,
+      checkIntervalMs:
+        existingConfig.upgrade?.checkIntervalMs
+        ?? DEFAULT_AGENT_LOOP_UPGRADE_CHECK_INTERVAL_MS,
+      reminderIntervalMs:
+        existingConfig.upgrade?.reminderIntervalMs
+        ?? DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
+      autoApply: existingConfig.upgrade?.autoApply !== false,
+    },
   }
 
   const normalizedPat = normalizeNonEmptyString(input.pat)
