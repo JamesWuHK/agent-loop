@@ -9,12 +9,12 @@ import {
   type IssueComment,
   type ManagedPullRequest,
 } from '@agent/shared'
-import { parseIssueContract } from '../../../packages/agent-shared/src/issue-contract'
 import {
   buildAuditedIssue,
   buildAuditIssueSummary,
   type AuditIssueSummary,
 } from './audit-issue-contracts'
+import { buildBootstrapGateReportForRepo } from './bootstrap-gate'
 import {
   canResumeHumanNeededPrReview,
   extractLatestAutomatedPrReviewBlockerSummary,
@@ -83,14 +83,6 @@ const BOOTSTRAP_FAILURE_KIND_ORDER: BootstrapFailureKind[] = [
 ]
 
 const DEFAULT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
-const RELEASE_EVIDENCE_SPECS = [
-  {
-    code: 'self_bootstrap_suite_green',
-    matchesIssue: (issue: Pick<AgentIssue, 'body'>) =>
-      parseIssueContract(issue.body).requiredSemantics
-        .some((entry) => entry.includes('agent-loop --bootstrap-scenarios')),
-  },
-] as const
 
 export function classifyBootstrapFailureKind(reason: string): BootstrapFailureKind {
   const normalized = reason.toLowerCase()
@@ -264,6 +256,21 @@ export async function buildBootstrapScorecardForRepo(
       linkedIssueLoader,
     ),
   ])
+  const releaseEvidenceMissing = await collectScorecardSource(
+    async () => {
+      const report = await buildBootstrapGateReportForRepo({
+        config: input.config,
+      }, {
+        getAgentIssueByNumber: deps.getAgentIssueByNumber,
+      })
+
+      return report.requiredEvidence
+        .filter((evidence) => !evidence.satisfied)
+        .map((evidence) => evidence.code)
+    },
+    transportBlockers,
+    'release evidence',
+  )
 
   return buildBootstrapScorecard({
     audit: issuesResult
@@ -273,7 +280,7 @@ export async function buildBootstrapScorecardForRepo(
     prBlockers,
     reviewBlockers,
     transportBlockers,
-    releaseEvidenceMissing: collectMissingReleaseEvidence(managedIssues),
+    releaseEvidenceMissing: releaseEvidenceMissing ?? [],
   })
 }
 
@@ -332,22 +339,6 @@ function buildEmptyAuditIssueSummary(): AuditIssueSummary {
     lowScoreIssueCount: 0,
     warningIssueCount: 0,
   }
-}
-
-function collectMissingReleaseEvidence(
-  issues: AgentIssue[],
-): string[] {
-  const missing = new Set<string>()
-
-  for (const issue of issues) {
-    for (const evidence of RELEASE_EVIDENCE_SPECS) {
-      if (evidence.matchesIssue(issue)) {
-        missing.add(evidence.code)
-      }
-    }
-  }
-
-  return [...missing]
 }
 
 async function collectScorecardSource<T>(
@@ -489,10 +480,13 @@ async function collectPrLifecycleBlockers(
       }
 
       if (firstBlocked === null) {
-        firstBlocked = {
-          issueNumber: issue.number,
-          prNumber: pullRequest.number,
-          reason: blocked.reason,
+        const blockedCategory = classifyBootstrapFailureKind(blocked.reason)
+        if (blockedCategory === 'pr_lifecycle_failure') {
+          firstBlocked = {
+            issueNumber: issue.number,
+            prNumber: pullRequest.number,
+            reason: blocked.reason,
+          }
         }
       }
     }

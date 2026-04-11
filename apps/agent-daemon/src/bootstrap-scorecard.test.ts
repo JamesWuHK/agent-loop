@@ -61,38 +61,6 @@ function buildBlockedResumeEscalationComment(
 ## agent-loop blocked resume escalation`
 }
 
-function buildReleaseEvidenceIssueBody(): string {
-  return [
-    '## 用户故事',
-    '',
-    '作为维护者，我希望 self-bootstrap suite 变成稳定 release evidence。',
-    '',
-    '## Context',
-    '',
-    '### Dependencies',
-    '```json',
-    '{"dependsOn":[]}',
-    '```',
-    '',
-    '### RequiredSemantics',
-    '- `agent-loop --bootstrap-scenarios` 执行固定 self-bootstrap suite',
-    '',
-    '### Validation',
-    '- `bun test apps/agent-daemon/src/replay-eval.test.ts apps/agent-daemon/src/index.test.ts`',
-    '',
-    '## RED 测试',
-    '```ts',
-    'throw new Error("red")',
-    '```',
-    '',
-    '## 实现步骤',
-    '1. add suite',
-    '',
-    '## 验收',
-    '- [ ] suite green',
-  ].join('\n')
-}
-
 describe('buildBootstrapScorecard', () => {
   test('groups blockers into stable failure taxonomy buckets', () => {
     expect(classifyBootstrapFailureKind('closed PR blocked fresh PR creation')).toBe('pr_lifecycle_failure')
@@ -115,7 +83,7 @@ describe('buildBootstrapScorecard', () => {
 })
 
 describe('buildBootstrapScorecardForRepo', () => {
-  test('reuses repo-native issue and pull request signals without hardcoded bootstrap issue numbers', async () => {
+  test('keeps terminal human-needed review blockers out of pr lifecycle failures', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
         repo: 'JamesWuHK/agent-loop',
@@ -145,22 +113,6 @@ describe('buildBootstrapScorecardForRepo', () => {
           body: '',
           state: 'failed',
           labels: ['agent:failed'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
-        {
-          number: 69,
-          title: 'self_bootstrap_suite_green release evidence still missing',
-          body: buildReleaseEvidenceIssueBody(),
-          state: 'working',
-          labels: ['agent:working'],
           assignee: null,
           isClaimable: false,
           updatedAt: '2026-04-11T10:00:00.000Z',
@@ -201,8 +153,8 @@ describe('buildBootstrapScorecardForRepo', () => {
         number: issueNumber,
         title: `Issue ${issueNumber}`,
         body: '',
-        state: 'working',
-        labels: ['agent:working'],
+        state: issueNumber === 69 ? 'done' : 'working',
+        labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
         assignee: null,
         isClaimable: false,
         updatedAt: '2026-04-11T10:00:00.000Z',
@@ -217,7 +169,7 @@ describe('buildBootstrapScorecardForRepo', () => {
 
     expect(scorecard.categoryCounts).toMatchObject({
       contract_failure: 1,
-      pr_lifecycle_failure: 1,
+      pr_lifecycle_failure: 0,
       review_failure: 1,
       release_process_failure: 1,
       runtime_failure: 0,
@@ -229,11 +181,6 @@ describe('buildBootstrapScorecardForRepo', () => {
         reason: '1 invalid ready issue(s) require executable contracts',
       }),
       expect.objectContaining({
-        category: 'pr_lifecycle_failure',
-        issueNumber: 61,
-        prNumber: 91,
-      }),
-      expect.objectContaining({
         category: 'review_failure',
         issueNumber: 61,
         prNumber: 91,
@@ -241,12 +188,12 @@ describe('buildBootstrapScorecardForRepo', () => {
       }),
       expect.objectContaining({
         category: 'release_process_failure',
-        reason: 'missing required evidence: self_bootstrap_suite_green',
+        reason: 'missing required evidence: bootstrap_scorecard_green',
       }),
     ])
   })
 
-  test('does not derive release blockers from issue titles alone', async () => {
+  test('sources release blockers from bootstrap gate required evidence instead of open-issue body scans', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
         repo: 'JamesWuHK/agent-loop',
@@ -255,8 +202,8 @@ describe('buildBootstrapScorecardForRepo', () => {
     }, {
       listOpenAgentIssues: async () => [
         {
-          number: 70,
-          title: 'add bootstrap scorecard taxonomy report',
+          number: 69,
+          title: 'self_bootstrap_suite_green release evidence tracking',
           body: '',
           state: 'working',
           labels: ['agent:working'],
@@ -273,10 +220,29 @@ describe('buildBootstrapScorecardForRepo', () => {
       ],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
-      getAgentIssueByNumber: async () => null,
+      getAgentIssueByNumber: async (issueNumber) => ({
+        number: issueNumber,
+        title: `Issue ${issueNumber}`,
+        body: '',
+        state: issueNumber === 69 ? 'done' : 'working',
+        labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
+        assignee: null,
+        isClaimable: false,
+        updatedAt: '2026-04-11T10:00:00.000Z',
+        dependencyIssueNumbers: [],
+        hasDependencyMetadata: false,
+        dependencyParseError: false,
+        claimBlockedBy: [],
+        hasExecutableContract: true,
+        contractValidationErrors: [],
+      }),
     })
 
-    expect(scorecard.categoryCounts.release_process_failure).toBe(0)
+    expect(scorecard.categoryCounts.release_process_failure).toBe(1)
+    expect(scorecard.topBlockers).toContainEqual(expect.objectContaining({
+      category: 'release_process_failure',
+      reason: 'missing required evidence: bootstrap_scorecard_green',
+    }))
     expect(scorecard.categoryCounts.runtime_failure).toBe(0)
   })
 
@@ -332,29 +298,42 @@ describe('buildBootstrapScorecardForRepo', () => {
     }))
   })
 
-  test('does not synthesize lifecycle or release blockers for another repo when unrelated issue numbers are missing', async () => {
+  test('mirrors bootstrap gate release evidence codes even when open issues are empty', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
-        repo: 'someone-else/example',
+        repo: 'JamesWuHK/agent-loop',
         pat: 'test-token',
       } as never,
     }, {
       listOpenAgentIssues: async () => [],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
-      getAgentIssueByNumber: async () => null,
+      getAgentIssueByNumber: async (issueNumber) => ({
+        number: issueNumber,
+        title: `Issue ${issueNumber}`,
+        body: '',
+        state: issueNumber === 69 ? 'done' : 'working',
+        labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
+        assignee: null,
+        isClaimable: false,
+        updatedAt: '2026-04-11T10:00:00.000Z',
+        dependencyIssueNumbers: [],
+        hasDependencyMetadata: false,
+        dependencyParseError: false,
+        claimBlockedBy: [],
+        hasExecutableContract: true,
+        contractValidationErrors: [],
+      }),
     })
 
-    expect(scorecard.ready).toBe(true)
-    expect(scorecard.categoryCounts).toEqual({
-      contract_failure: 0,
-      runtime_failure: 0,
-      pr_lifecycle_failure: 0,
-      review_failure: 0,
-      github_transport_failure: 0,
-      release_process_failure: 0,
-    })
-    expect(scorecard.topBlockers).toEqual([])
+    expect(scorecard.ready).toBe(false)
+    expect(scorecard.categoryCounts.release_process_failure).toBe(1)
+    expect(scorecard.topBlockers).toEqual([
+      expect.objectContaining({
+        category: 'release_process_failure',
+        reason: 'missing required evidence: bootstrap_scorecard_green',
+      }),
+    ])
   })
 
   test('suppresses review blockers for resumable human-needed pull requests', async () => {
@@ -469,7 +448,7 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts).toMatchObject({
       contract_failure: 1,
       review_failure: 1,
-      github_transport_failure: 1,
+      github_transport_failure: 2,
       runtime_failure: 0,
       pr_lifecycle_failure: 0,
       release_process_failure: 0,
@@ -508,6 +487,10 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.topBlockers).toEqual([
       expect.objectContaining({
         category: 'github_transport_failure',
+      }),
+      expect.objectContaining({
+        category: 'release_process_failure',
+        reason: 'missing required evidence: self_bootstrap_suite_green',
       }),
     ])
   })
