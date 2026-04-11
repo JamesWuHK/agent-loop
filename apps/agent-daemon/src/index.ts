@@ -11,7 +11,7 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
@@ -94,6 +94,13 @@ import {
   splitTrackingIssue,
   type SplitTrackingIssueResult,
 } from './issue-splitter'
+import {
+  evaluateBootstrapScenarioFixtureDirectory,
+  formatBootstrapScenarioSuiteReport,
+  formatBootstrapScenarioSuiteReportJson,
+  resolveBootstrapScenarioSuiteExitCode,
+  type BootstrapScenarioSuiteReport,
+} from './replay-eval'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -151,6 +158,10 @@ export interface ExecuteIssueLintInput {
 export interface ExecuteBootstrapGateInput {
   repo?: string
   pat?: string
+}
+
+export interface ExecuteBootstrapScenarioInput {
+  fixturesDir?: string
 }
 
 export interface ExecuteAuditIssuesInput {
@@ -301,6 +312,10 @@ interface BootstrapGateCommandDependencies {
   buildBootstrapGateReportForRepo: typeof buildBootstrapGateReportForRepo
 }
 
+interface BootstrapScenarioCommandDependencies {
+  evaluateBootstrapScenarioFixtureDirectory: typeof evaluateBootstrapScenarioFixtureDirectory
+}
+
 interface AuditIssuesCommandDependencies {
   loadConfig: typeof loadConfig
   loadIssuesForAudit: typeof loadIssuesForAudit
@@ -373,6 +388,11 @@ const DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES: BootstrapGateCommandDependenc
   loadConfig,
   buildBootstrapGateReportForRepo,
 }
+
+const DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES: BootstrapScenarioCommandDependencies = {
+  evaluateBootstrapScenarioFixtureDirectory,
+}
+const DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR = join(import.meta.dir, 'fixtures', 'replay')
 
 const DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES: AuditIssuesCommandDependencies = {
   loadConfig,
@@ -462,6 +482,7 @@ async function main() {
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
       'bootstrap-gate': { type: 'boolean' },
+      'bootstrap-scenarios': { type: 'boolean' },
       'simulate-issue': { type: 'string' },
       'simulate-file': { type: 'string' },
       'repair-file': { type: 'string' },
@@ -587,6 +608,53 @@ async function main() {
       'repair-file': args['repair-file'] as string | undefined,
       'lint-issue': args['lint-issue'] as string | undefined,
       'lint-file': args['lint-file'] as string | undefined,
+      'simulate-issue': args['simulate-issue'] as string | undefined,
+      'simulate-file': args['simulate-file'] as string | undefined,
+      'rewrite-file': args['rewrite-file'] as string | undefined,
+      'split-file': args['split-file'] as string | undefined,
+      'split-start-number': args['split-start-number'] as string | undefined,
+      simulate: args.simulate as boolean | undefined,
+      concurrency: args.concurrency as string | undefined,
+      'poll-interval': args['poll-interval'] as string | undefined,
+      'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
+      'machine-id': args['machine-id'] as string | undefined,
+      'dry-run': args['dry-run'] as boolean | undefined,
+      'metrics-port': args['metrics-port'] as string | undefined,
+      dashboard: args.dashboard as boolean | undefined,
+      'dashboard-host': args['dashboard-host'] as string | undefined,
+      'dashboard-port': args['dashboard-port'] as string | undefined,
+      daemonize: args.daemonize as boolean | undefined,
+      'join-project': args['join-project'] as boolean | undefined,
+      'repo-cap': args['repo-cap'] as string | undefined,
+      runtimes: args.runtimes as boolean | undefined,
+      start: args.start as boolean | undefined,
+      logs: args.logs as boolean | undefined,
+      reconcile: args.reconcile as boolean | undefined,
+      restart: args.restart as boolean | undefined,
+      'launchd-install': args['launchd-install'] as boolean | undefined,
+      'launchd-uninstall': args['launchd-uninstall'] as boolean | undefined,
+      'launchd-status': args['launchd-status'] as boolean | undefined,
+      stop: args.stop as boolean | undefined,
+      once: args.once as boolean | undefined,
+      status: args.status as boolean | undefined,
+      doctor: args.doctor as boolean | undefined,
+      'health-host': args['health-host'] as string | undefined,
+      'health-port': args['health-port'] as string | undefined,
+    })
+  }
+
+  if (args['bootstrap-scenarios']) {
+    assertBootstrapScenarioCompatible({
+      'wake-now': args['wake-now'] as boolean | undefined,
+      'wake-issue': args['wake-issue'] as string | undefined,
+      'wake-pr': args['wake-pr'] as string | undefined,
+      'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
+      'audit-issues': args['audit-issues'] as boolean | undefined,
+      'apply-file': args['apply-file'] as string | undefined,
+      'repair-file': args['repair-file'] as string | undefined,
+      'lint-issue': args['lint-issue'] as string | undefined,
+      'lint-file': args['lint-file'] as string | undefined,
+      'bootstrap-gate': args['bootstrap-gate'] as boolean | undefined,
       'simulate-issue': args['simulate-issue'] as string | undefined,
       'simulate-file': args['simulate-file'] as string | undefined,
       'rewrite-file': args['rewrite-file'] as string | undefined,
@@ -865,6 +933,9 @@ async function main() {
     if (args['bootstrap-gate']) {
       throw new Error('--wake-from-github-event cannot be combined with --bootstrap-gate')
     }
+    if (args['bootstrap-scenarios']) {
+      throw new Error('--wake-from-github-event cannot be combined with --bootstrap-scenarios')
+    }
     assertWakeCommandCompatible(args)
   }
 
@@ -949,6 +1020,12 @@ async function main() {
     })
     console.log(formatBootstrapGateOutput(report, args.json as boolean | undefined))
     process.exit(resolveBootstrapGateExitCode(report))
+  }
+
+  if (args['bootstrap-scenarios']) {
+    const report = await executeBootstrapScenarioCommand()
+    console.log(formatBootstrapScenarioOutput(report, args.json as boolean | undefined))
+    process.exit(resolveBootstrapScenarioSuiteExitCode(report))
   }
 
   if (issueApplyInput) {
@@ -1381,6 +1458,7 @@ Usage:
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
   agent-loop --bootstrap-gate [--repo owner/repo --json]
+  agent-loop --bootstrap-scenarios [--json]
   agent-loop --simulate-file <path> [--repo owner/repo --json]
   agent-loop --simulate-issue <number> [--repo owner/repo --json]
   agent-loop --rewrite-file <path> [--repo owner/repo]
@@ -1428,6 +1506,7 @@ Options:
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
       --bootstrap-gate        Evaluate the deterministic self-bootstrap release gate
+      --bootstrap-scenarios   Evaluate the fixed self-bootstrap replay suite
       --simulate-file <path>  Run read-only executability simulation for a local issue markdown file
       --simulate-issue <number>
                               Run read-only executability simulation for a remote GitHub issue body
@@ -1435,7 +1514,7 @@ Options:
       --split-file <path>     Split a tracking parent draft into ordered child issue contracts
       --split-start-number <n>
                               First issue number to use when filling child dependency JSON
-      --json                  Print machine-readable JSON for issue audit/apply/lint/repair/simulate/bootstrap commands
+      --json                  Print machine-readable JSON for issue audit/apply/lint/repair/simulate/bootstrap/replay commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -1484,6 +1563,7 @@ Examples:
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
   agent-loop --bootstrap-gate --repo JamesWuHK/agent-loop --json
+  agent-loop --bootstrap-scenarios --json
   agent-loop --simulate-file docs/issues/ready-gate.md --json
   agent-loop --simulate-issue 374 --repo owner/repo --json
   agent-loop --rewrite-file docs/issues/draft.md
@@ -1837,6 +1917,15 @@ export async function executeBootstrapGateCommand(
   })
 }
 
+export async function executeBootstrapScenarioCommand(
+  input: ExecuteBootstrapScenarioInput = {},
+  deps: BootstrapScenarioCommandDependencies = DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES,
+): Promise<BootstrapScenarioSuiteReport> {
+  return deps.evaluateBootstrapScenarioFixtureDirectory(
+    input.fixturesDir ?? DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR,
+  )
+}
+
 export async function executeAuditIssuesCommand(
   input: ExecuteAuditIssuesInput,
   deps: AuditIssuesCommandDependencies = DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES,
@@ -2123,6 +2212,13 @@ export function formatBootstrapGateOutput(
   asJson = false,
 ): string {
   return asJson ? formatBootstrapGateReportJson(report) : formatBootstrapGateReport(report)
+}
+
+export function formatBootstrapScenarioOutput(
+  report: BootstrapScenarioSuiteReport,
+  asJson = false,
+): string {
+  return asJson ? formatBootstrapScenarioSuiteReportJson(report) : formatBootstrapScenarioSuiteReport(report)
 }
 
 export function formatAuditIssuesOutput(
@@ -2607,6 +2703,100 @@ function assertBootstrapGateCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Bootstrap gate cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertBootstrapScenarioCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'audit-issues'?: boolean
+  'apply-file'?: string
+  'repair-file'?: string
+  'lint-issue'?: string
+  'lint-file'?: string
+  'bootstrap-gate'?: boolean
+  'simulate-issue'?: string
+  'simulate-file'?: string
+  'rewrite-file'?: string
+  'split-file'?: string
+  'split-start-number'?: string
+  simulate?: boolean
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    args['audit-issues'] ? '--audit-issues' : null,
+    typeof args['apply-file'] === 'string' ? '--apply-file' : null,
+    typeof args['repair-file'] === 'string' ? '--repair-file' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    args['bootstrap-gate'] ? '--bootstrap-gate' : null,
+    typeof args['simulate-issue'] === 'string' ? '--simulate-issue' : null,
+    typeof args['simulate-file'] === 'string' ? '--simulate-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    typeof args['split-file'] === 'string' ? '--split-file' : null,
+    typeof args['split-start-number'] === 'string' ? '--split-start-number' : null,
+    args.simulate ? '--simulate' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Bootstrap scenarios cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 
