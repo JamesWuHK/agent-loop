@@ -17,6 +17,7 @@ import type {
   ManagedLeaseComment,
   ManagedLeaseScope,
   ManagedPullRequest,
+  PrCheckResult,
   RecoveryActionRuntimeDetail,
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
@@ -2662,20 +2663,21 @@ export class AgentDaemon {
         abortMessage: `Aborted because remote issue #${issueNumber} is already done`,
       })
 
-      const prCheck = await checkPrExists(branch, this.config)
-      const linkedOpenPr = prCheck.prNumber !== null && prCheck.prState === 'open'
-        ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
-        : null
-      if (linkedOpenPr && shouldResetLinkedPrToRetryOnIssueResume(linkedOpenPr.labels)) {
-        await setManagedPrReviewLabels(linkedOpenPr.number, 'retry', this.config)
+      const linkedRecoveryPr = getOpenLinkedPrForIssueRecovery(
+        await checkPrExists(branch, this.config),
+        branch,
+        await listOpenAgentPullRequests(this.config),
+      )
+      if (linkedRecoveryPr && shouldResetLinkedPrToRetryOnIssueResume(linkedRecoveryPr.pr.labels)) {
+        await setManagedPrReviewLabels(linkedRecoveryPr.pr.number, 'retry', this.config)
         this.logger.log(
-          `[daemon] marked linked PR #${linkedOpenPr.number} as retry because issue #${issueNumber} resumed local recovery`,
+          `[daemon] marked linked PR #${linkedRecoveryPr.pr.number} as retry because issue #${issueNumber} resumed local recovery`,
         )
       }
       const recentBlockingReasons = [
         ...extractAutomatedIssuePreflightReasons(await listIssueComments(issueNumber, this.config)),
-        ...(prCheck.prNumber !== null
-          ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
+        ...(linkedRecoveryPr
+          ? extractAutomatedReviewReasons(await listIssueComments(linkedRecoveryPr.pr.number, this.config))
           : []),
       ]
       const recoveryResult = await runIssueRecovery(
@@ -2685,9 +2687,7 @@ export class AgentDaemon {
         issue.body,
         this.config,
         this.logger,
-        prCheck.prNumber !== null && prCheck.prUrl
-          ? { number: prCheck.prNumber, url: prCheck.prUrl, branch }
-          : null,
+        linkedRecoveryPr?.context ?? null,
         recentBlockingReasons,
         monitor,
       )
@@ -4881,6 +4881,47 @@ export function shouldApplyStandaloneIssueTransition(
 export function shouldResetLinkedPrToRetryOnIssueResume(prLabels: string[]): boolean {
   const labels = new Set(prLabels)
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) || labels.has(PR_REVIEW_LABELS.FAILED)
+}
+
+export function shouldUseOpenPrCheckForRecovery(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState'>,
+): prCheck is Pick<PrCheckResult, 'prState'> & { prNumber: number; prState: 'open' } {
+  return prCheck.prNumber !== null && prCheck.prState === 'open'
+}
+
+export function getIssueRecoveryLinkedPrContext(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState' | 'prUrl'>,
+  branch: string,
+): { number: number; url: string; branch: string } | null {
+  if (!shouldUseOpenPrCheckForRecovery(prCheck) || !prCheck.prUrl) {
+    return null
+  }
+
+  return {
+    number: prCheck.prNumber,
+    url: prCheck.prUrl,
+    branch,
+  }
+}
+
+export function getOpenLinkedPrForIssueRecovery(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState' | 'prUrl'>,
+  branch: string,
+  openPrs: Array<Pick<ManagedPullRequest, 'number' | 'url' | 'headRefName' | 'labels'>>,
+): {
+  pr: Pick<ManagedPullRequest, 'number' | 'url' | 'headRefName' | 'labels'>
+  context: { number: number; url: string; branch: string }
+} | null {
+  const context = getIssueRecoveryLinkedPrContext(prCheck, branch)
+  if (!context) return null
+
+  const pr = openPrs.find((candidate) => candidate.number === context.number) ?? null
+  if (!pr) return null
+
+  return {
+    pr,
+    context,
+  }
 }
 
 export function shouldCompleteIssueRecoveryOnRemoteClose(

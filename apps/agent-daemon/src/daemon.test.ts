@@ -35,6 +35,9 @@ import {
   shouldRefreshBlockedHumanNeededPr,
   shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
+  shouldUseOpenPrCheckForRecovery,
+  getIssueRecoveryLinkedPrContext,
+  getOpenLinkedPrForIssueRecovery,
   isRetryableDaemonLoopError,
   isMergeabilityFailure,
   refreshResumableIssueBranchOntoDefault,
@@ -610,6 +613,20 @@ describe('agent-loop upgrade coordination', () => {
         safeToUpgradeNow: true,
         message: 'channel master is newer: local v0.1.0, latest v0.1.2',
       }
+      daemon.autoUpgradeState = {
+        attemptCount: 0,
+        successCount: 0,
+        failureCount: 0,
+        noChangeCount: 0,
+        consecutiveFailureCount: 0,
+        lastTargetVersion: null,
+        lastTargetRevision: null,
+        lastAttemptAt: null,
+        lastSuccessAt: null,
+        lastOutcome: null,
+        lastError: null,
+        pausedUntil: null,
+      }
 
       expect(await daemon.maybeAutoApplyAgentLoopUpgrade()).toBe(false)
       expect(autoUpgradeAttempts).toBe(0)
@@ -1090,98 +1107,98 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldDeferResumableIssueForActiveLinkedPrLease(null, null)).toBe(false)
   })
 
-  test('includes effective concurrency policy and local endpoints in status snapshots', () => {
-    const config: AgentConfig = {
-      machineId: 'codex-dev',
-      repo: 'JamesWuHK/digital-employee',
-      pat: 'test-token',
-      pollIntervalMs: 60_000,
-      idlePollIntervalMs: 300_000,
-      concurrency: 2,
-      requestedConcurrency: 5,
-      concurrencyPolicy: {
-        requested: 5,
-        effective: 2,
-        repoCap: 4,
-        profileCap: 2,
-        projectCap: 3,
-      },
-      scheduling: {
-        concurrencyByRepo: {
-          'JamesWuHK/digital-employee': 4,
+  test('includes effective concurrency policy and local endpoints in status snapshots', async () => {
+    await withRuntimeSupervisor('direct', async () => {
+      const config: AgentConfig = {
+        machineId: 'codex-dev',
+        repo: 'JamesWuHK/digital-employee',
+        pat: 'test-token',
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        concurrency: 2,
+        requestedConcurrency: 5,
+        concurrencyPolicy: {
+          requested: 5,
+          effective: 2,
+          repoCap: 4,
+          profileCap: 2,
+          projectCap: 3,
         },
-        concurrencyByProfile: {
-          'desktop-vite': 2,
+        scheduling: {
+          concurrencyByRepo: {
+            'JamesWuHK/digital-employee': 4,
+          },
+          concurrencyByProfile: {
+            'desktop-vite': 2,
+          },
         },
-      },
-      recovery: {
-        heartbeatIntervalMs: 30_000,
-        leaseTtlMs: 60_000,
-        workerIdleTimeoutMs: 300_000,
-        leaseAdoptionBackoffMs: 5_000,
-        leaseNoProgressTimeoutMs: 360_000,
-      },
-      worktreesBase: '/tmp/worktrees',
-      project: {
-        profile: 'desktop-vite',
-        maxConcurrency: 3,
-      },
-      agent: {
-        primary: 'codex',
-        fallback: 'claude',
-        claudePath: 'claude',
-        codexPath: 'codex',
-        timeoutMs: 60_000,
-      },
-      git: {
-        defaultBranch: 'main',
-        authorName: 'agent-loop',
-        authorEmail: 'agent-loop@local',
-      },
-    }
+        recovery: {
+          heartbeatIntervalMs: 30_000,
+          leaseTtlMs: 60_000,
+          workerIdleTimeoutMs: 300_000,
+          leaseAdoptionBackoffMs: 5_000,
+          leaseNoProgressTimeoutMs: 360_000,
+        },
+        worktreesBase: '/tmp/worktrees',
+        project: {
+          profile: 'desktop-vite',
+          maxConcurrency: 3,
+        },
+        agent: {
+          primary: 'codex',
+          fallback: 'claude',
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 60_000,
+        },
+        git: {
+          defaultBranch: 'main',
+          authorName: 'agent-loop',
+          authorEmail: 'agent-loop@local',
+        },
+      }
 
-    const daemon = new AgentDaemon(
-      config,
-      console,
-      { host: '127.0.0.1', port: 9311 },
-      9091,
-    )
+      const daemon = new AgentDaemon(
+        config,
+        console,
+        { host: '127.0.0.1', port: 9311 },
+        9091,
+      )
 
-    expect(daemon.getStatus()).toMatchObject({
-      repo: 'JamesWuHK/digital-employee',
-      idlePollIntervalMs: 300_000,
-      concurrency: 2,
-      requestedConcurrency: 5,
-      concurrencyPolicy: {
-        requested: 5,
-        effective: 2,
-        repoCap: 4,
-        profileCap: 2,
-        projectCap: 3,
-      },
-      project: {
-        profile: 'desktop-vite',
-        defaultBranch: 'main',
-        maxConcurrency: 3,
-      },
-      endpoints: {
-        health: {
-          host: '127.0.0.1',
-          port: 9311,
-          path: '/health',
+      expect(daemon.getStatus()).toMatchObject({
+        repo: 'JamesWuHK/digital-employee',
+        idlePollIntervalMs: 300_000,
+        concurrency: 2,
+        requestedConcurrency: 5,
+        concurrencyPolicy: {
+          requested: 5,
+          effective: 2,
+          repoCap: 4,
+          profileCap: 2,
+          projectCap: 3,
         },
-        metrics: {
-          host: '127.0.0.1',
-          port: 9091,
-          path: '/metrics',
+        project: {
+          profile: 'desktop-vite',
+          defaultBranch: 'main',
+          maxConcurrency: 3,
         },
-      },
-      runtime: {
-        supervisor: 'direct',
-        workingDirectory: process.cwd(),
-        runtimeRecordPath: null,
-        logPath: null,
-      },
+        endpoints: {
+          health: {
+            host: '127.0.0.1',
+            port: 9311,
+            path: '/health',
+          },
+          metrics: {
+            host: '127.0.0.1',
+            port: 9091,
+            path: '/metrics',
+          },
+        },
+        runtime: {
+          supervisor: 'direct',
+          workingDirectory: process.cwd(),
+        },
+      })
     })
   })
 
@@ -1788,6 +1805,92 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.RETRY])).toBe(false)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.APPROVED])).toBe(false)
+  })
+
+  test('uses only open PRs as recovery context', () => {
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 386,
+      prState: 'open',
+    })).toBe(true)
+
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 386,
+      prState: 'closed',
+    })).toBe(false)
+
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 386,
+      prState: 'merged',
+    })).toBe(false)
+
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: null,
+      prState: null,
+    })).toBe(false)
+  })
+
+  test('only reuses open linked PR context during issue recovery', () => {
+    expect(getIssueRecoveryLinkedPrContext({
+      prNumber: 110,
+      prState: 'open',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev')).toEqual({
+      number: 110,
+      url: 'https://example.com/pr/110',
+      branch: 'agent/110/codex-dev',
+    })
+
+    expect(getIssueRecoveryLinkedPrContext({
+      prNumber: 110,
+      prState: 'closed',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev')).toBeNull()
+
+    expect(getIssueRecoveryLinkedPrContext({
+      prNumber: 110,
+      prState: 'merged',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev')).toBeNull()
+  })
+
+  test('only uses open linked PRs that are still present in the open PR list during issue recovery', () => {
+    const openPr = {
+      number: 110,
+      url: 'https://example.com/pr/110',
+      headRefName: 'agent/110/codex-dev',
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'open',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toEqual({
+      pr: openPr,
+      context: {
+        number: 110,
+        url: 'https://example.com/pr/110',
+        branch: 'agent/110/codex-dev',
+      },
+    })
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'closed',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toBeNull()
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'merged',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toBeNull()
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'open',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [])).toBeNull()
   })
 
   test('prefers standalone PR handoff for resumable issues when the branch is already synced', () => {

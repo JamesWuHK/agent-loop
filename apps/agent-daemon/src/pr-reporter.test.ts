@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
+import type { AgentConfig } from '@agent/shared'
+import { createOrFindPr, isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
 
 async function runGit(
   worktreePath: string,
@@ -22,7 +23,150 @@ async function runGit(
   return { exitCode, stdout, stderr }
 }
 
+const TEST_CONFIG: AgentConfig = {
+  machineId: 'codex-dev',
+  repo: 'JamesWuHK/agent-loop',
+  pat: 'test-token',
+  pollIntervalMs: 60_000,
+  idlePollIntervalMs: 300_000,
+  concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+    leaseNoProgressTimeoutMs: 360_000,
+  },
+  worktreesBase: '/tmp/worktrees',
+  project: {
+    profile: 'generic',
+  },
+  agent: {
+    primary: 'codex',
+    fallback: 'claude',
+    claudePath: 'claude',
+    codexPath: 'codex',
+    timeoutMs: 60_000,
+  },
+  git: {
+    defaultBranch: 'main',
+    authorName: 'agent-loop',
+    authorEmail: 'agent-loop@local',
+  },
+}
+
 describe('pr reporter push recovery', () => {
+  test('reuses open PRs after pushing the managed branch', async () => {
+    const calls: string[] = []
+
+    const result = await createOrFindPr(
+      '/tmp/worktree',
+      'agent/110/codex-dev',
+      110,
+      'Test issue',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => {
+          calls.push('check')
+          return { prNumber: 41, prUrl: 'https://example.com/pr/41', prState: 'open' }
+        },
+        createPr: async () => {
+          calls.push('create')
+          return { number: 99, url: 'https://example.com/pr/99' }
+        },
+        pushBranch: async () => {
+          calls.push('push')
+        },
+      },
+    )
+
+    expect(result).toEqual({ prNumber: 41, prUrl: 'https://example.com/pr/41' })
+    expect(calls).toEqual(['check', 'push'])
+  })
+
+  test('keeps merged PRs terminal without pushing or recreating', async () => {
+    const calls: string[] = []
+
+    const result = await createOrFindPr(
+      '/tmp/worktree',
+      'agent/111/codex-dev',
+      111,
+      'Merged issue',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => {
+          calls.push('check')
+          return { prNumber: 42, prUrl: 'https://example.com/pr/42', prState: 'merged' }
+        },
+        createPr: async () => {
+          calls.push('create')
+          return { number: 99, url: 'https://example.com/pr/99' }
+        },
+        pushBranch: async () => {
+          calls.push('push')
+        },
+      },
+    )
+
+    expect(result).toEqual({ prNumber: 42, prUrl: 'https://example.com/pr/42' })
+    expect(calls).toEqual(['check'])
+  })
+
+  test('creates a fresh PR when the existing branch PR is closed', async () => {
+    const events: string[] = []
+
+    const created = await createOrFindPr(
+      '/tmp/worktree',
+      'agent/350/codex-dev',
+      350,
+      '[AL-16] fixture',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => ({
+          prNumber: 386,
+          prUrl: 'https://example.test/pr/386',
+          prState: 'closed',
+        }),
+        pushBranch: async (worktreePath, branch) => {
+          events.push(`push:${worktreePath}:${branch}`)
+        },
+        createPr: async (branch, issueNumber, issueTitle, body) => {
+          events.push(`create:${branch}:${issueNumber}:${issueTitle}`)
+          expect(body).toContain('"issue": 350')
+          expect(body).toContain('"machine": "codex-dev"')
+          return {
+            number: 390,
+            url: 'https://example.test/pr/390',
+          }
+        },
+      },
+    )
+
+    expect(created).toEqual({
+      prNumber: 390,
+      prUrl: 'https://example.test/pr/390',
+    })
+    expect(events).toEqual([
+      'push:/tmp/worktree:agent/350/codex-dev',
+      'create:agent/350/codex-dev:350:[AL-16] fixture',
+    ])
+  })
+
   test('detects retryable managed-branch push failures', () => {
     expect(isRetryableManagedBranchPushFailure('! [rejected] agent/78/codex -> agent/78/codex (fetch first)')).toBe(true)
     expect(isRetryableManagedBranchPushFailure('To origin\n ! [rejected] agent/78/codex -> agent/78/codex (stale info)\nerror: failed to push some refs')).toBe(true)
