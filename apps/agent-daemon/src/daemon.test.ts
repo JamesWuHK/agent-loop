@@ -250,6 +250,35 @@ describe('issue ops observability', () => {
   })
 })
 
+describe('terminal PR safeguards', () => {
+  test('skips standalone PR automation when the branch record is already closed or merged', async () => {
+    const daemon = createTestDaemon()
+    const pr = {
+      number: 386,
+      title: '[AL-24] stale closed PR',
+      url: 'https://github.com/JamesWuHK/agent-loop/pull/386',
+      headRefName: 'agent/83/codex-dev',
+      headRefOid: 'abc123',
+      isDraft: false,
+      labels: [PR_REVIEW_LABELS.RETRY],
+    }
+
+    for (const prState of ['closed', 'merged'] as const) {
+      ;(daemon as any).resolveBranchPullRequestRecord = async () => ({
+        number: 386,
+        prUrl: pr.url,
+        prState,
+        headRefName: pr.headRefName,
+        baseRefName: 'main',
+        body: null,
+      })
+
+      await expect((daemon as any).getAutomationEligibleStandalonePr(pr, 'review')).resolves.toBeNull()
+      await expect((daemon as any).getAutomationEligibleStandalonePr(pr, 'merge')).resolves.toBeNull()
+    }
+  })
+})
+
 describe('issue preflight comments', () => {
   test('extracts the latest automated preflight blocker from issue comments', () => {
     const older = buildIssuePreflightFailureComment(

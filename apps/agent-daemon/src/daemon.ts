@@ -747,6 +747,23 @@ export class AgentDaemon {
     return pullRequests.find(pullRequest => pullRequest.number === prNumber) ?? null
   }
 
+  private async getAutomationEligibleStandalonePr(
+    pr: ManagedPullRequest | null,
+    stage: 'review' | 'merge',
+  ): Promise<ManagedPullRequest | null> {
+    if (!pr) return null
+
+    const branchPullRequest = await this.resolveBranchPullRequestRecord(pr.headRefName, pr.number)
+    if (branchPullRequest && branchPullRequest.prState !== 'open') {
+      this.logger.warn(
+        `[daemon] skipping terminal linked PR #${pr.number} (${branchPullRequest.prState}) during standalone PR ${stage}`,
+      )
+      return null
+    }
+
+    return pr
+  }
+
   private async observePrLineageForIssue(
     input: PrLineageObservationInput,
   ): Promise<void> {
@@ -2225,7 +2242,10 @@ export class AgentDaemon {
   private async findPendingStandaloneApprovedPrMergeByNumber(
     prNumber: number,
   ): Promise<ManagedPullRequest | null> {
-    const pr = await getManagedPullRequestByNumber(prNumber, this.config)
+    const pr = await this.getAutomationEligibleStandalonePr(
+      await getManagedPullRequestByNumber(prNumber, this.config),
+      'merge',
+    )
     if (!pr) return null
     if (pr.isDraft) return null
     if (this.activePrReviews.has(pr.number)) return null
@@ -2318,7 +2338,10 @@ export class AgentDaemon {
   private async findPendingStandalonePrReviewByNumber(
     prNumber: number,
   ): Promise<ManagedPullRequest | null> {
-    const pr = await getManagedPullRequestByNumber(prNumber, this.config)
+    const pr = await this.getAutomationEligibleStandalonePr(
+      await getManagedPullRequestByNumber(prNumber, this.config),
+      'review',
+    )
     if (!pr) return null
     if (pr.isDraft) return null
     if (this.activePrReviews.has(pr.number)) return null
@@ -2375,6 +2398,9 @@ export class AgentDaemon {
   }
 
   private async processStandalonePrReview(pr: ManagedPullRequest): Promise<void> {
+    if (!(await this.getAutomationEligibleStandalonePr(pr, 'review'))) {
+      return
+    }
     this.logger.log(`[pr-review-subagent] reviewing existing PR #${pr.number}: "${pr.title}"`)
     const priorComments = await listIssueComments(pr.number, this.config)
     const nextAttempt = getNextAutomatedPrReviewAttempt(priorComments)
@@ -2760,6 +2786,9 @@ export class AgentDaemon {
   }
 
   private async processStandaloneApprovedPrMerge(pr: ManagedPullRequest): Promise<void> {
+    if (!(await this.getAutomationEligibleStandalonePr(pr, 'merge'))) {
+      return
+    }
     this.logger.log(`[pr-merge-subagent] attempting merge for approved PR #${pr.number}: "${pr.title}"`)
     const issueNumber = extractIssueNumberFromPrTitle(pr.title)
     const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)

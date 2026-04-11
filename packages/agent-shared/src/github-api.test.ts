@@ -17,6 +17,7 @@ import {
   getActiveManagedLease,
   fetchIssueBodySnapshot,
   getLatestManagedLease,
+  getManagedPullRequestByNumber,
   isGraphQlRateLimitErrorMessage,
   isManagedLeaseExpired,
   isManagedLeaseProgressStale,
@@ -305,6 +306,88 @@ describe('issue body helpers', () => {
         url: 'https://github.com/JamesWuHK/agent-loop/issues/54',
         updatedAt: '2026-04-12T08:06:00.000Z',
       })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('getManagedPullRequestByNumber', () => {
+  test('returns null for closed managed PRs so automation does not target terminal lineage', async () => {
+    const originalFetch = globalThis.fetch
+    const config = {
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    } as AgentConfig
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+
+      expect(url).toBe('https://api.github.com/repos/JamesWuHK/agent-loop/pulls/386')
+
+      return new Response(JSON.stringify({
+        number: 386,
+        title: '[AL-24] stale closed PR',
+        html_url: 'https://github.com/JamesWuHK/agent-loop/pull/386',
+        state: 'closed',
+        merged_at: null,
+        draft: false,
+        head: {
+          ref: 'agent/83/codex-dev',
+          sha: 'abc123',
+        },
+        labels: [
+          { name: 'agent:retry' },
+        ],
+      }), { status: 200 })
+    }) as typeof fetch
+
+    try {
+      await expect(getManagedPullRequestByNumber(386, config)).resolves.toBeNull()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('returns null for merged managed PRs so automation does not target terminal lineage', async () => {
+    const originalFetch = globalThis.fetch
+    const config = {
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    } as AgentConfig
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+
+      expect(url).toBe('https://api.github.com/repos/JamesWuHK/agent-loop/pulls/387')
+
+      return new Response(JSON.stringify({
+        number: 387,
+        title: '[AL-24] merged PR',
+        html_url: 'https://github.com/JamesWuHK/agent-loop/pull/387',
+        state: 'closed',
+        merged_at: '2026-04-12T09:00:00.000Z',
+        draft: false,
+        head: {
+          ref: 'agent/83/codex-dev',
+          sha: 'def456',
+        },
+        labels: [
+          { name: 'agent:approved' },
+        ],
+      }), { status: 200 })
+    }) as typeof fetch
+
+    try {
+      await expect(getManagedPullRequestByNumber(387, config)).resolves.toBeNull()
     } finally {
       globalThis.fetch = originalFetch
     }

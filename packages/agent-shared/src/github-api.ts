@@ -1666,7 +1666,11 @@ async function getManagedPullRequestByNumberRest(
     )
   }
 
-  const mapped = mapRawRestPullRequest(extractRestPullRequest(JSON.parse(stdout)) ?? {})
+  const rawPullRequest = extractRestPullRequest(JSON.parse(stdout)) ?? {}
+  const prState = derivePullRequestStateFromRaw(rawPullRequest.state, rawPullRequest.merged_at ?? null)
+  if (prState !== 'open') return null
+
+  const mapped = mapRawRestPullRequest(rawPullRequest)
   if (!mapped) return null
   if (!mapped.headRefName.startsWith('agent/')) return null
   return mapped
