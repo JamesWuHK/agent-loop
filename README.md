@@ -89,6 +89,7 @@ agent-loop --wake-pr 456
 - `--wake-now`：显式允许这轮 wake 继续回退到普通全量扫描，适合手工兜底
 
 现在 `agent-loop --status` / `agent-loop --doctor` 和 `/metrics` 也会把 wake 队列观测带出来，方便你判断“事件有没有进来、有没有被消费、是不是经常 miss target 后回退到全量扫描”。
+现在它们也会显示 GitHub API 读写观测，能直接区分 `graphql` / `rest`、`direct` / `gh_cli`，以及 `success` / `error` / `timeout` / `rate_limited`。
 
 一旦这台机器已经收到过 wake 流量，daemon 在“空闲且没有发现任何 work”的周期里会自动切到更慢的 idle safety-net polling；但只要新的 wake request 到来，还是会立刻把下一轮 reconcile 拉到 0ms，不会因为慢轮询拖慢响应。
 
@@ -419,6 +420,8 @@ agent-loop --doctor
 - `agent_loop_review_auto_fixes_total`
 - `agent_loop_pr_merge_recovery_total`
 - `agent_loop_polls_total`
+- `agent_loop_github_api_requests_total`
+- `agent_loop_github_api_request_duration_seconds`
 - `agent_loop_wake_requests_total`
 - `agent_loop_pending_wake_requests`
 - `agent_loop_wake_request_age_seconds`

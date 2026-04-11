@@ -44,6 +44,8 @@ const MERGE_RECOVERY_OUTCOME_ORDER = [
 const POLL_OUTCOME_ORDER = ['success', 'skipped_concurrency', 'no_issues', 'error'] as const
 const WAKE_KIND_ORDER = ['now', 'issue', 'pr'] as const
 const WAKE_OUTCOME_ORDER = ['queued', 'started_work', 'no_match', 'allow_fallback'] as const
+const GITHUB_API_REQUEST_KEY_ORDER = ['graphql/direct', 'graphql/gh_cli', 'rest/direct', 'rest/gh_cli'] as const
+const GITHUB_API_OUTCOME_ORDER = ['success', 'error', 'timeout', 'rate_limited'] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
 const RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS = 5 * 60
 export interface DaemonHealthPayload extends DaemonStatus {
@@ -54,6 +56,7 @@ export interface DaemonHealthPayload extends DaemonStatus {
 
 export interface DaemonMetricSummary {
   polls: Record<string, number>
+  githubApiRequests: Record<string, Record<string, number>>
   wakeRequests: Record<string, Record<string, number>>
   prReviews: Record<string, Record<string, number>>
   autoFixes: Record<string, number>
@@ -454,6 +457,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     lines.push(
       `outcomes: polls ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)} | wake ${formatOrderedMap(summarizeWakeOutcomes(snapshot.metrics.wakeRequests), WAKE_OUTCOME_ORDER)} | reviews ${formatOrderedMap(reviewTotals, REVIEW_OUTCOME_ORDER)} | auto-fix ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)} | merge ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
     )
+    lines.push(`github api: ${formatGitHubApiRequestSummary(snapshot.metrics.githubApiRequests)}`)
     lines.push(
       `wake: pending ${snapshot.metrics.pendingWakeRequests ?? 0} | ${formatWakeRequestSummary(snapshot.metrics.wakeRequests)}`,
     )
@@ -560,6 +564,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
   const outcomeLines = snapshot.metrics
     ? [
         `polls: ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)}`,
+        `github-api-requests: ${formatGitHubApiRequestSummary(snapshot.metrics.githubApiRequests)}`,
         ...REVIEW_STAGE_ORDER.map((stage) => `reviews.${stage}: ${formatOrderedMap(snapshot.metrics?.prReviews[stage] ?? {}, REVIEW_OUTCOME_ORDER)}`),
         `auto-fix: ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)}`,
         `merge-recovery: ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
@@ -785,6 +790,7 @@ function parsePortFromUrl(url: string): number | null {
 export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary {
   const summary: DaemonMetricSummary = {
     polls: {},
+    githubApiRequests: {},
     wakeRequests: {},
     prReviews: {},
     autoFixes: {},
@@ -810,6 +816,11 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     switch (sample.name) {
       case 'agent_loop_polls_total':
         if (sample.labels.result) summary.polls[sample.labels.result] = sample.value
+        break
+      case 'agent_loop_github_api_requests_total':
+        if (!sample.labels.transport || !sample.labels.mode || !sample.labels.outcome) break
+        summary.githubApiRequests[formatGitHubApiRequestKey(sample.labels.transport, sample.labels.mode)] ??= {}
+        summary.githubApiRequests[formatGitHubApiRequestKey(sample.labels.transport, sample.labels.mode)]![sample.labels.outcome] = sample.value
         break
       case 'agent_loop_wake_requests_total':
         if (!sample.labels.kind || !sample.labels.outcome) break
@@ -1023,6 +1034,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if ((snapshot.metrics?.leaseConflicts ?? 0) > 0) {
     warnings.push(`managed lease conflicts observed: ${snapshot.metrics?.leaseConflicts}`)
   }
+  if (countGitHubApiOutcomes(snapshot.metrics?.githubApiRequests ?? {}, 'rate_limited') > 0) {
+    warnings.push(`github api rate limits observed: ${formatGitHubApiRequestSummary(filterGitHubApiOutcome(snapshot.metrics?.githubApiRequests ?? {}, 'rate_limited'))}`)
+  }
   if (Object.values(snapshot.metrics?.workerIdleTimeouts ?? {}).reduce((sum, value) => sum + value, 0) > 0) {
     warnings.push(`worker idle timeouts observed: ${formatInlineKeyValue(snapshot.metrics?.workerIdleTimeouts ?? {})}`)
   }
@@ -1151,6 +1165,10 @@ function summarizeWakeOutcomes(
   return totals
 }
 
+function formatGitHubApiRequestKey(transport: string, mode: string): string {
+  return `${transport}/${mode}`
+}
+
 function buildEndpointUrl(host: string, port: number, path: string): string {
   return `http://${host}:${port}${path}`
 }
@@ -1234,6 +1252,35 @@ function formatWakeRequestSummary(values: Record<string, Record<string, number>>
     .map((kind) => `${kind}[${formatOrderedMap(values[kind] ?? {}, WAKE_OUTCOME_ORDER)}]`)
 
   return parts.join(', ') || 'none'
+}
+
+function formatGitHubApiRequestSummary(values: Record<string, Record<string, number>>): string {
+  const parts = GITHUB_API_REQUEST_KEY_ORDER
+    .filter((key) => values[key] !== undefined)
+    .map((key) => `${key}[${formatOrderedMap(values[key] ?? {}, GITHUB_API_OUTCOME_ORDER)}]`)
+
+  return parts.join(', ') || 'none'
+}
+
+function countGitHubApiOutcomes(
+  values: Record<string, Record<string, number>>,
+  outcome: string,
+): number {
+  return Object.values(values).reduce((sum, counts) => sum + (counts[outcome] ?? 0), 0)
+}
+
+function filterGitHubApiOutcome(
+  values: Record<string, Record<string, number>>,
+  outcome: string,
+): Record<string, Record<string, number>> {
+  const filtered: Record<string, Record<string, number>> = {}
+
+  for (const [key, counts] of Object.entries(values)) {
+    if ((counts[outcome] ?? 0) <= 0) continue
+    filtered[key] = { [outcome]: counts[outcome] ?? 0 }
+  }
+
+  return filtered
 }
 
 function formatActiveLeaseInlineSummary(details: DaemonHealthPayload['runtime']['activeLeaseDetails']): string {
