@@ -607,6 +607,40 @@ describe('status helpers', () => {
     expect(report).toContain('- automatic agent-loop upgrades paused until 2099-04-05T09:00:00.000Z after 2 consecutive failure(s)')
   })
 
+  test('doctor warnings require a manual restart for direct-mode upgrades', () => {
+    const report = formatDoctorReport({
+      ok: true,
+      healthUrl: 'http://127.0.0.1:9310/health',
+      metricsUrl: 'http://127.0.0.1:9090/metrics',
+      error: null,
+      diagnosticRepo: baseHealth.repo,
+      localRuntime: null,
+      health: {
+        ...baseHealth,
+        runtime: {
+          ...baseHealth.runtime,
+          supervisor: 'direct',
+        },
+        upgrade: {
+          ...baseHealth.upgrade!,
+          safeToUpgradeNow: true,
+        },
+      },
+      metrics: summarizeDaemonMetrics(metricsText),
+      metricsError: null,
+      githubAudit: {
+        ok: true,
+        error: null,
+        checks: [],
+        prBlockers: [],
+        warnings: [],
+      },
+      warnings: [],
+    })
+
+    expect(report).toContain('- agent-loop upgrade available, but this daemon is running in direct mode; manual restart is required')
+  })
+
   test('doctor warnings call out adoptable leases and repeated recoveries for the same target', async () => {
     const metricsServer = Bun.serve({
       hostname: '127.0.0.1',

@@ -1005,9 +1005,11 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if (snapshot.health.upgrade?.status === 'upgrade-available') {
     warnings.push(
-      snapshot.health.upgrade.safeToUpgradeNow
-        ? 'agent-loop upgrade available and this daemon is currently idle enough to restart safely'
-        : 'agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work',
+      snapshot.health.runtime.supervisor === 'direct'
+        ? 'agent-loop upgrade available, but this daemon is running in direct mode; manual restart is required'
+        : snapshot.health.upgrade.safeToUpgradeNow
+          ? 'agent-loop upgrade available and this daemon is currently idle enough to restart safely'
+          : 'agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work',
     )
   }
   if (snapshot.health.upgrade?.status === 'error' && snapshot.health.upgrade.message) {

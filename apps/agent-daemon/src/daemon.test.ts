@@ -108,6 +108,28 @@ function createTestDaemon(
   return new AgentDaemon(config, console, healthServerConfig)
 }
 
+async function withRuntimeSupervisor<T>(
+  supervisor: 'direct' | 'detached' | 'launchd',
+  run: () => Promise<T> | T,
+): Promise<T> {
+  const previous = process.env.AGENT_LOOP_RUNTIME_MANAGER
+  if (supervisor === 'direct') {
+    delete process.env.AGENT_LOOP_RUNTIME_MANAGER
+  } else {
+    process.env.AGENT_LOOP_RUNTIME_MANAGER = supervisor
+  }
+
+  try {
+    return await run()
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AGENT_LOOP_RUNTIME_MANAGER
+    } else {
+      process.env.AGENT_LOOP_RUNTIME_MANAGER = previous
+    }
+  }
+}
+
 async function createResumableIssueWorktreeFixture(issueNumber = 329, machineId = 'codex-20260403') {
   const tempDir = mkdtempSync(join(tmpdir(), 'daemon-resumable-issue-worktree-'))
   const repoDir = join(tempDir, 'repo')
@@ -503,156 +525,244 @@ describe('agent-loop upgrade coordination', () => {
   })
 
   test('attempts automatic self-upgrade after an idle no-issues poll when enabled', async () => {
-    const daemon = createTestDaemon({
-      upgrade: {
+    await withRuntimeSupervisor('detached', async () => {
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      })
+
+      let scheduledPolls = 0
+      let autoUpgradeAttempts = 0
+
+      ;(daemon as any).running = true
+      ;(daemon as any).startupRecoveryPending = false
+      ;(daemon as any).maybeStartResumableIssue = async () => false
+      ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+      ;(daemon as any).maybeRequeueFailedIssue = async () => false
+      ;(daemon as any).maybeStartClaimedIssue = async () => false
+      ;(daemon as any).maybeStartStandalonePrReview = async () => false
+      ;(daemon as any).maybeRefreshAgentLoopUpgradeStatus = async () => {}
+      ;(daemon as any).performAutomaticAgentLoopUpgrade = async () => {
+        autoUpgradeAttempts += 1
+        return true
+      }
+      ;(daemon as any).scheduleNextPoll = () => {
+        scheduledPolls += 1
+      }
+      ;(daemon as any).agentLoopUpgrade = {
         enabled: true,
         repo: 'JamesWuHK/agent-loop',
         channel: 'master',
-        checkIntervalMs: 60_000,
-        reminderIntervalMs: 3_600_000,
-        autoApply: true,
-      },
+        checkedAt: '2026-04-11T11:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T10:59:30.000Z',
+        safeToUpgradeNow: true,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      }
+
+      await (daemon as any).pollCycle()
+
+      expect(autoUpgradeAttempts).toBe(1)
+      expect(scheduledPolls).toBe(0)
     })
+  })
 
-    let scheduledPolls = 0
-    let autoUpgradeAttempts = 0
+  test('keeps direct-mode upgrades in reminder-only mode', async () => {
+    await withRuntimeSupervisor('direct', async () => {
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      }) as any
 
-    ;(daemon as any).running = true
-    ;(daemon as any).startupRecoveryPending = false
-    ;(daemon as any).maybeStartResumableIssue = async () => false
-    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
-    ;(daemon as any).maybeRequeueFailedIssue = async () => false
-    ;(daemon as any).maybeStartClaimedIssue = async () => false
-    ;(daemon as any).maybeStartStandalonePrReview = async () => false
-    ;(daemon as any).maybeRefreshAgentLoopUpgradeStatus = async () => {}
-    ;(daemon as any).performAutomaticAgentLoopUpgrade = async () => {
-      autoUpgradeAttempts += 1
-      return true
-    }
-    ;(daemon as any).scheduleNextPoll = () => {
-      scheduledPolls += 1
-    }
-    ;(daemon as any).agentLoopUpgrade = {
-      enabled: true,
-      repo: 'JamesWuHK/agent-loop',
-      channel: 'master',
-      checkedAt: '2026-04-11T11:00:00.000Z',
-      status: 'upgrade-available',
-      latestVersion: '0.1.2',
-      latestRevision: '2222222222222222222222222222222222222222',
-      latestCommitAt: '2026-04-11T10:59:30.000Z',
-      safeToUpgradeNow: true,
-      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
-    }
+      let autoUpgradeAttempts = 0
 
-    await (daemon as any).pollCycle()
+      daemon.running = true
+      daemon.startupRecoveryPending = false
+      daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
+      daemon.performAutomaticAgentLoopUpgrade = async () => {
+        autoUpgradeAttempts += 1
+        return true
+      }
+      daemon.agentLoopUpgrade = {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkedAt: '2026-04-11T11:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T10:59:30.000Z',
+        safeToUpgradeNow: true,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      }
 
-    expect(autoUpgradeAttempts).toBe(1)
-    expect(scheduledPolls).toBe(0)
+      expect(await daemon.maybeAutoApplyAgentLoopUpgrade()).toBe(false)
+      expect(autoUpgradeAttempts).toBe(0)
+      expect(daemon.autoUpgradeState.attemptCount).toBe(0)
+      expect(daemon.readPresenceRuntimeState().upgradeAutoApplyEnabled).toBe(false)
+    })
   })
 
   test('pauses repeated automatic self-upgrade retries for the same target after a failure', async () => {
-    const daemon = createTestDaemon({
-      upgrade: {
+    await withRuntimeSupervisor('detached', async () => {
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      }) as any
+
+      let autoUpgradeAttempts = 0
+
+      daemon.running = true
+      daemon.startupRecoveryPending = false
+      daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
+      daemon.performAutomaticAgentLoopUpgrade = async () => {
+        autoUpgradeAttempts += 1
+        return true
+      }
+      daemon.agentLoopUpgrade = {
         enabled: true,
         repo: 'JamesWuHK/agent-loop',
         channel: 'master',
-        checkIntervalMs: 60_000,
-        reminderIntervalMs: 3_600_000,
-        autoApply: true,
-      },
-    }) as any
+        checkedAt: '2026-04-11T11:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T10:59:30.000Z',
+        safeToUpgradeNow: true,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      }
+      daemon.autoUpgradeState = {
+        attemptCount: 1,
+        successCount: 0,
+        failureCount: 1,
+        noChangeCount: 0,
+        consecutiveFailureCount: 1,
+        lastAttemptAt: '2026-04-11T11:30:00.000Z',
+        lastSuccessAt: null,
+        lastOutcome: 'failed',
+        lastTargetVersion: '0.1.2',
+        lastTargetRevision: '2222222222222222222222222222222222222222',
+        lastError: 'git pull failed',
+        pausedUntil: '2099-04-11T12:00:00.000Z',
+      }
 
-    let autoUpgradeAttempts = 0
+      await daemon.maybeAutoApplyAgentLoopUpgrade()
 
-    daemon.running = true
-    daemon.startupRecoveryPending = false
-    daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
-    daemon.performAutomaticAgentLoopUpgrade = async () => {
-      autoUpgradeAttempts += 1
-      return true
-    }
-    daemon.agentLoopUpgrade = {
-      enabled: true,
-      repo: 'JamesWuHK/agent-loop',
-      channel: 'master',
-      checkedAt: '2026-04-11T11:00:00.000Z',
-      status: 'upgrade-available',
-      latestVersion: '0.1.2',
-      latestRevision: '2222222222222222222222222222222222222222',
-      latestCommitAt: '2026-04-11T10:59:30.000Z',
-      safeToUpgradeNow: true,
-      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
-    }
-    daemon.autoUpgradeState = {
-      attemptCount: 1,
-      successCount: 0,
-      failureCount: 1,
-      noChangeCount: 0,
-      consecutiveFailureCount: 1,
-      lastAttemptAt: '2026-04-11T11:30:00.000Z',
-      lastSuccessAt: null,
-      lastOutcome: 'failed',
-      lastTargetVersion: '0.1.2',
-      lastTargetRevision: '2222222222222222222222222222222222222222',
-      lastError: 'git pull failed',
-      pausedUntil: '2099-04-11T12:00:00.000Z',
-    }
+      expect(autoUpgradeAttempts).toBe(0)
 
-    await daemon.maybeAutoApplyAgentLoopUpgrade()
+      daemon.agentLoopUpgrade = {
+        ...daemon.agentLoopUpgrade,
+        latestVersion: '0.1.3',
+        latestRevision: '3333333333333333333333333333333333333333',
+        message: 'channel master is newer: local v0.1.0, latest v0.1.3',
+      }
 
-    expect(autoUpgradeAttempts).toBe(0)
+      await daemon.maybeAutoApplyAgentLoopUpgrade()
 
-    daemon.agentLoopUpgrade = {
-      ...daemon.agentLoopUpgrade,
-      latestVersion: '0.1.3',
-      latestRevision: '3333333333333333333333333333333333333333',
-      message: 'channel master is newer: local v0.1.0, latest v0.1.3',
-    }
-
-    await daemon.maybeAutoApplyAgentLoopUpgrade()
-
-    expect(autoUpgradeAttempts).toBe(1)
+      expect(autoUpgradeAttempts).toBe(1)
+    })
   })
 
   test('logs a fresh upgrade notice when the announced target changes inside the reminder cooldown', () => {
-    const warnings: string[] = []
-    const daemon = createTestDaemon({
-      upgrade: {
+    return withRuntimeSupervisor('detached', () => {
+      const warnings: string[] = []
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      }) as any
+
+      daemon.logger = {
+        log() {},
+        warn(message: string) {
+          warnings.push(message)
+        },
+        error() {},
+      }
+      daemon.lastUpgradeReminderAt = Date.now()
+      daemon.lastUpgradeReminderTargetKey = 'master:0.1.1:1111111111111111111111111111111111111111'
+
+      daemon.maybeLogAgentLoopUpgradeNotice({
         enabled: true,
         repo: 'JamesWuHK/agent-loop',
         channel: 'master',
-        checkIntervalMs: 60_000,
-        reminderIntervalMs: 3_600_000,
-        autoApply: true,
-      },
-    }) as any
+        checkedAt: '2026-04-11T12:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T11:59:50.000Z',
+        safeToUpgradeNow: false,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      })
 
-    daemon.logger = {
-      log() {},
-      warn(message: string) {
-        warnings.push(message)
-      },
-      error() {},
-    }
-    daemon.lastUpgradeReminderAt = Date.now()
-    daemon.lastUpgradeReminderTargetKey = 'master:0.1.1:1111111111111111111111111111111111111111'
-
-    daemon.maybeLogAgentLoopUpgradeNotice({
-      enabled: true,
-      repo: 'JamesWuHK/agent-loop',
-      channel: 'master',
-      checkedAt: '2026-04-11T12:00:00.000Z',
-      status: 'upgrade-available',
-      latestVersion: '0.1.2',
-      latestRevision: '2222222222222222222222222222222222222222',
-      latestCommitAt: '2026-04-11T11:59:50.000Z',
-      safeToUpgradeNow: false,
-      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('auto-apply is enabled; this daemon will restart into the latest build once it goes idle')
     })
+  })
 
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain('auto-apply is enabled; this daemon will restart into the latest build once it goes idle')
+  test('logs a manual-restart notice for direct-mode upgrade reminders', () => {
+    return withRuntimeSupervisor('direct', () => {
+      const warnings: string[] = []
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      }) as any
+
+      daemon.logger = {
+        log() {},
+        warn(message: string) {
+          warnings.push(message)
+        },
+        error() {},
+      }
+
+      daemon.maybeLogAgentLoopUpgradeNotice({
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkedAt: '2026-04-11T12:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T11:59:50.000Z',
+        safeToUpgradeNow: true,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      })
+
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('direct mode; manual restart is required')
+    })
   })
 
   test('publishes a deduplicated GitHub alert comment after repeated auto-upgrade failures', async () => {
