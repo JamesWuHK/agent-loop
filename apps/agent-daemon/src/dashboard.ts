@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  type AgentLoopAutoUpgradeRuntimeState,
   type AgentLoopUpgradeStatusKind,
   PR_REVIEW_LABELS,
   getActiveManagedLease,
@@ -51,6 +52,7 @@ export interface DashboardSummary {
   upgradeBlockedMachineCount: number
   upgradeManualMachineCount: number
   upgradeErrorMachineCount: number
+  upgradeFailedMachineCount: number
 }
 
 export interface DashboardLeaseView {
@@ -131,6 +133,7 @@ export interface DashboardPresenceView {
   latestRevision: string | null
   upgradeCheckedAt: string | null
   upgradeMessage: string | null
+  autoUpgrade: AgentLoopAutoUpgradeRuntimeState | null
   source: 'github'
 }
 
@@ -382,6 +385,7 @@ export function buildDashboardSummary(
   let upgradeBlockedMachineCount = 0
   let upgradeManualMachineCount = 0
   let upgradeErrorMachineCount = 0
+  let upgradeFailedMachineCount = 0
 
   for (const machine of machines) {
     localRuntimeCount += machine.localRuntimes.length
@@ -404,6 +408,9 @@ export function buildDashboardSummary(
       if (machine.presence.upgradeStatus === 'error') {
         upgradeErrorMachineCount += 1
       }
+      if (machine.presence.autoUpgrade?.lastOutcome === 'failed') {
+        upgradeFailedMachineCount += 1
+      }
     }
   }
 
@@ -421,6 +428,7 @@ export function buildDashboardSummary(
     upgradeBlockedMachineCount,
     upgradeManualMachineCount,
     upgradeErrorMachineCount,
+    upgradeFailedMachineCount,
   }
 }
 
@@ -884,27 +892,35 @@ function buildPresenceUpgradeWarnings(machine: DashboardMachineCard): string[] {
   }
 
   const presence = machine.presence
+  const warnings: string[] = []
+
+  if (presence.autoUpgrade?.lastOutcome === 'failed') {
+    warnings.push(
+      `automatic agent-loop upgrade last failed on ${presence.machineId}${presence.autoUpgrade.lastError ? `: ${presence.autoUpgrade.lastError}` : ''}`,
+    )
+  }
+
   if (presence.upgradeStatus === 'upgrade-available') {
-    return [
+    warnings.push(
       !presence.upgradeAutoApplyEnabled
         ? `agent-loop upgrade available on ${presence.machineId}, but auto-apply is disabled on this machine; manual restart is required`
         : presence.safeToUpgradeNow
           ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
           : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
-    ]
+    )
   }
   if (presence.upgradeStatus === 'error') {
-    return [
+    warnings.push(
       `agent-loop upgrade check is failing on ${presence.machineId}${presence.upgradeMessage ? `: ${presence.upgradeMessage}` : ''}; inspect this daemon before relying on auto-upgrade`,
-    ]
+    )
   }
   if (presence.upgradeStatus === 'ahead-of-channel') {
-    return [
+    warnings.push(
       `agent-loop build on ${presence.machineId} is ahead of the tracked channel; verify this machine is pinned intentionally`,
-    ]
+    )
   }
 
-  return []
+  return warnings
 }
 
 function preferLocalLease(
@@ -1047,6 +1063,7 @@ function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): Dash
     latestRevision: comment.presence.latestRevision,
     upgradeCheckedAt: comment.presence.upgradeCheckedAt,
     upgradeMessage: comment.presence.upgradeMessage ?? null,
+    autoUpgrade: comment.presence.autoUpgrade ?? null,
     source: 'github',
   }
 }
@@ -1718,6 +1735,7 @@ function renderSummary(snapshot) {
     { label: '升级被阻塞', value: snapshot.summary.upgradeBlockedMachineCount, tone: snapshot.summary.upgradeBlockedMachineCount > 0 ? 'gold' : '' },
     { label: '手动升级机器', value: snapshot.summary.upgradeManualMachineCount, tone: snapshot.summary.upgradeManualMachineCount > 0 ? 'gold' : '' },
     { label: '升级检查错误', value: snapshot.summary.upgradeErrorMachineCount, tone: snapshot.summary.upgradeErrorMachineCount > 0 ? 'error' : '' },
+    { label: '升级执行失败', value: snapshot.summary.upgradeFailedMachineCount, tone: snapshot.summary.upgradeFailedMachineCount > 0 ? 'error' : '' },
     { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
     { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
     { label: '失败 Issue', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },
@@ -1917,10 +1935,33 @@ function renderPresenceItem(presence) {
     presence.heartbeatAgeSeconds === null ? null : '心跳 ' + presence.heartbeatAgeSeconds + ' 秒',
     presence.expiresInSeconds === null ? null : 'TTL ' + presence.expiresInSeconds + ' 秒',
   ].filter(Boolean).join(' | ');
+  const autoUpgrade = presence.autoUpgrade;
   const upgradeHint = presence.upgradeStatus === 'upgrade-available'
     ? (!presence.upgradeAutoApplyEnabled
       ? '自动升级已关闭'
       : (presence.safeToUpgradeNow ? '可安全升级' : '待空闲后升级'))
+    : null;
+  const autoUpgradeOutcome = autoUpgrade && autoUpgrade.lastOutcome
+    ? localizeAutoUpgradeOutcome(autoUpgrade.lastOutcome)
+    : null;
+  const autoUpgradeOutcomeTone = autoUpgrade && autoUpgrade.lastOutcome === 'failed'
+    ? 'error'
+    : autoUpgrade && autoUpgrade.lastOutcome === 'succeeded'
+      ? 'accent'
+      : autoUpgrade && autoUpgrade.lastOutcome === 'attempting'
+        ? 'gold'
+        : '';
+  const autoUpgradeSummary = autoUpgrade
+    ? '自动升级 ' + (autoUpgradeOutcome || '未知') + ' | 尝试 ' + autoUpgrade.attemptCount + ' | 成功 ' + autoUpgrade.successCount + ' | 失败 ' + autoUpgrade.failureCount + ' | 无变化 ' + autoUpgrade.noChangeCount
+    : null;
+  const autoUpgradeMeta = autoUpgrade && (autoUpgrade.lastAttemptAt || autoUpgrade.lastSuccessAt || autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision)
+    ? [
+      autoUpgrade.lastAttemptAt ? '上次尝试 ' + formatTimestamp(autoUpgrade.lastAttemptAt) : null,
+      autoUpgrade.lastSuccessAt ? '上次成功 ' + formatTimestamp(autoUpgrade.lastSuccessAt) : null,
+      (autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision)
+        ? '目标 v' + (autoUpgrade.lastTargetVersion || 'unknown') + '@' + shortDaemonId(autoUpgrade.lastTargetRevision || 'unknown')
+        : null,
+    ].filter(Boolean).join(' | ')
     : null;
 
   return [
@@ -1931,6 +1972,7 @@ function renderPresenceItem(presence) {
     renderChip(shortDaemonId(presence.daemonInstanceId), ''),
     renderChip('v' + presence.agentLoopVersion, ''),
     renderChip(presence.upgradeStatus, presence.upgradeStatus === 'upgrade-available' ? 'danger' : ''),
+    autoUpgradeOutcome ? renderChip('自动升级' + autoUpgradeOutcome, autoUpgradeOutcomeTone) : '',
     renderChip(presence.upgradeAutoApplyEnabled ? '自动升级开' : '自动升级关', presence.upgradeAutoApplyEnabled ? 'accent' : 'gold'),
     renderChip('工作树 ' + presence.activeWorktreeCount, ''),
     renderChip('租约 ' + presence.activeLeaseCount, ''),
@@ -1938,7 +1980,10 @@ function renderPresenceItem(presence) {
     '<div class="muted" style="margin-top:8px">启动于 ' + escapeHtml(formatTimestamp(presence.startedAt)) + '</div>',
     '<div class="muted" style="margin-top:6px">revision ' + escapeHtml(shortDaemonId(presence.agentLoopRevision || 'unknown')) + (presence.latestVersion ? ' | latest v' + escapeHtml(String(presence.latestVersion)) : '') + '</div>',
     upgradeHint ? '<div class="muted" style="margin-top:6px">' + escapeHtml(upgradeHint) + '</div>' : '',
+    autoUpgradeSummary ? '<div class="muted" style="margin-top:6px">' + escapeHtml(autoUpgradeSummary) + '</div>' : '',
+    autoUpgradeMeta ? '<div class="muted" style="margin-top:6px">' + escapeHtml(autoUpgradeMeta) + '</div>' : '',
     presence.upgradeMessage ? '<div class="muted" style="margin-top:6px">' + escapeHtml(presence.upgradeMessage) + '</div>' : '',
+    autoUpgrade && autoUpgrade.lastError ? '<div class="muted" style="margin-top:6px">错误：' + escapeHtml(autoUpgrade.lastError) + '</div>' : '',
     timing ? '<div class="muted" style="margin-top:6px">' + escapeHtml(timing) + '</div>' : '',
     '</div>',
   ].join('');
@@ -2021,6 +2066,21 @@ function localizePresenceStatus(status) {
       return '已停止'
     default:
       return status || '未知'
+  }
+}
+
+function localizeAutoUpgradeOutcome(outcome) {
+  switch (outcome) {
+    case 'attempting':
+      return '进行中'
+    case 'succeeded':
+      return '成功'
+    case 'failed':
+      return '失败'
+    case 'no_change':
+      return '无变化'
+    default:
+      return outcome || '未知'
   }
 }
 

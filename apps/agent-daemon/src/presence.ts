@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import {
   runBoundedGhCommand,
   type AgentConfig,
+  type AgentLoopAutoUpgradeOutcome,
+  type AgentLoopAutoUpgradeRuntimeState,
   type GitHubApiOutcome,
   type AgentLoopUpgradeStatusKind,
   type IssueComment,
@@ -40,6 +42,7 @@ export interface ManagedDaemonPresence {
   latestRevision: string | null
   upgradeCheckedAt: string | null
   upgradeMessage: string | null
+  autoUpgrade: AgentLoopAutoUpgradeRuntimeState | null
 }
 
 export interface ManagedDaemonPresenceComment extends IssueComment {
@@ -59,6 +62,7 @@ export interface ManagedDaemonPresenceRuntimeState {
   latestRevision: string | null
   upgradeCheckedAt: string | null
   upgradeMessage: string | null
+  autoUpgrade: AgentLoopAutoUpgradeRuntimeState | null
 }
 
 export interface ManagedDaemonUpgradeAnnouncement {
@@ -307,6 +311,14 @@ export function extractManagedDaemonPresenceIssueNumber(
 }
 
 export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresence): string {
+  const autoUpgrade = presence.autoUpgrade
+  const autoUpgradeCounts = autoUpgrade
+    ? `attempt ${autoUpgrade.attemptCount} / success ${autoUpgrade.successCount} / failed ${autoUpgrade.failureCount} / no-change ${autoUpgrade.noChangeCount}`
+    : 'unavailable'
+  const autoUpgradeTarget = autoUpgrade && (autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision)
+    ? `v${autoUpgrade.lastTargetVersion ?? 'unknown'} (${autoUpgrade.lastTargetRevision ?? 'unknown'})`
+    : 'unknown'
+
   return `${MANAGED_DAEMON_PRESENCE_COMMENT_PREFIX}${JSON.stringify(presence)} -->
 ## Managed daemon presence
 
@@ -327,7 +339,13 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Safe to upgrade now: ${presence.safeToUpgradeNow ? 'yes' : 'no'}
 - Latest known version: ${presence.latestVersion ?? 'unknown'}
 - Latest known revision: ${presence.latestRevision ?? 'unknown'}
-- Upgrade message: ${presence.upgradeMessage ?? 'none'}`
+- Upgrade message: ${presence.upgradeMessage ?? 'none'}
+- Auto-upgrade outcome: ${autoUpgrade?.lastOutcome ?? 'unknown'}
+- Auto-upgrade counts: ${autoUpgradeCounts}
+- Auto-upgrade last attempt: ${autoUpgrade?.lastAttemptAt ?? 'never'}
+- Auto-upgrade last success: ${autoUpgrade?.lastSuccessAt ?? 'never'}
+- Auto-upgrade target: ${autoUpgradeTarget}
+- Auto-upgrade last error: ${autoUpgrade?.lastError ?? 'none'}`
 }
 
 export function buildManagedDaemonUpgradeAnnouncementComment(
@@ -394,6 +412,7 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
     const upgradeMessage = typeof parsed.upgradeMessage === 'string' && parsed.upgradeMessage.trim().length > 0
       ? parsed.upgradeMessage
       : null
+    const autoUpgrade = normalizeManagedAutoUpgradeRuntimeState(parsed.autoUpgrade)
 
     return {
       repo: parsed.repo,
@@ -417,10 +436,53 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       latestRevision,
       upgradeCheckedAt,
       upgradeMessage,
+      autoUpgrade,
     }
   } catch {
     return null
   }
+}
+
+function normalizeManagedAutoUpgradeRuntimeState(value: unknown): AgentLoopAutoUpgradeRuntimeState | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+
+  const parsed = value as Record<string, unknown>
+
+  return {
+    attemptCount: normalizeNonNegativeInteger(parsed.attemptCount),
+    successCount: normalizeNonNegativeInteger(parsed.successCount),
+    failureCount: normalizeNonNegativeInteger(parsed.failureCount),
+    noChangeCount: normalizeNonNegativeInteger(parsed.noChangeCount),
+    lastAttemptAt: normalizeOptionalString(parsed.lastAttemptAt),
+    lastSuccessAt: normalizeOptionalString(parsed.lastSuccessAt),
+    lastOutcome: normalizeAutoUpgradeOutcome(parsed.lastOutcome),
+    lastTargetVersion: normalizeOptionalString(parsed.lastTargetVersion),
+    lastTargetRevision: normalizeOptionalString(parsed.lastTargetRevision),
+    lastError: normalizeOptionalString(parsed.lastError),
+  }
+}
+
+function normalizeAutoUpgradeOutcome(value: unknown): AgentLoopAutoUpgradeOutcome | null {
+  return value === 'attempting'
+    || value === 'succeeded'
+    || value === 'failed'
+    || value === 'no_change'
+    ? value
+    : null
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : null
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0
 }
 
 export function extractManagedDaemonUpgradeAnnouncementComment(
@@ -773,6 +835,7 @@ export class ManagedDaemonPresencePublisher {
       latestRevision: runtime.latestRevision,
       upgradeCheckedAt: runtime.upgradeCheckedAt,
       upgradeMessage: runtime.upgradeMessage,
+      autoUpgrade: runtime.autoUpgrade,
     }
   }
 
