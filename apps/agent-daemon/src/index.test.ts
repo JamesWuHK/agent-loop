@@ -7,6 +7,7 @@ import {
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeBootstrapGateCommand,
   executeAuditIssuesCommand,
   executeIssueApplyCommand,
   executeIssueLintCommand,
@@ -17,6 +18,7 @@ import {
   executeWakeCommand,
   executeWakeRequest,
   formatAuditIssuesOutput,
+  formatBootstrapGateOutput,
   formatIssueApplyOutput,
   formatIssueLintOutput,
   formatIssueRepairOutput,
@@ -556,6 +558,111 @@ describe('index helpers', () => {
         repo: 'JamesWuHK/agent-loop',
       },
     })
+  })
+
+  test('executes bootstrap gate with repo-aware config and supports json output', async () => {
+    const report = await executeBootstrapGateCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      buildBootstrapGateReportForRepo: async ({ config }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          version: 'v0.2',
+          ready: false,
+          blockers: [
+            {
+              issueNumber: 37,
+              state: 'working',
+              labels: ['agent:working'],
+              title: '[AL-7] repo grounded context',
+            },
+          ],
+          requiredEvidence: [
+            {
+              code: 'self_bootstrap_suite_green',
+              satisfied: false,
+              sourceIssueNumber: 69,
+              summary: 'awaiting the deterministic self-bootstrap scenario suite tracked by #69',
+            },
+          ],
+          blockingReasons: [
+            'issue #37 is not done (state=working, labels=agent:working)',
+            'missing required evidence: self_bootstrap_suite_green',
+          ],
+        }
+      },
+    })
+
+    expect(report.ready).toBe(false)
+    expect(JSON.parse(formatBootstrapGateOutput(report, true))).toMatchObject({
+      version: 'v0.2',
+      ready: false,
+      blockers: [
+        {
+          issueNumber: 37,
+          state: 'working',
+        },
+      ],
+      requiredEvidence: [
+        {
+          code: 'self_bootstrap_suite_green',
+          satisfied: false,
+        },
+      ],
+    })
+    expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
   })
 
   test('resolves rewrite file paths and rejects empty values', () => {
