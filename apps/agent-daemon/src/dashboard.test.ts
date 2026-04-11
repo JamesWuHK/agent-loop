@@ -106,12 +106,14 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
       successCount: 1,
       failureCount: 0,
       noChangeCount: 0,
+      consecutiveFailureCount: 0,
       lastAttemptAt: '2026-04-05T09:09:10.000Z',
       lastSuccessAt: '2026-04-05T09:09:12.000Z',
       lastOutcome: 'succeeded',
       lastTargetVersion: '0.1.0',
       lastTargetRevision: 'abcdef1234567890',
       lastError: null,
+      pausedUntil: null,
     },
     source: 'github',
     ...overrides,
@@ -318,17 +320,20 @@ describe('dashboard machine aggregation', () => {
           upgradeStatus: 'upgrade-available',
           safeToUpgradeNow: false,
           latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
           autoUpgrade: {
             attemptCount: 2,
             successCount: 0,
             failureCount: 1,
             noChangeCount: 1,
+            consecutiveFailureCount: 1,
             lastAttemptAt: '2026-04-05T09:10:20.000Z',
             lastSuccessAt: null,
             lastOutcome: 'failed',
             lastTargetVersion: '0.1.2',
             lastTargetRevision: 'fedcba9876543210',
             lastError: 'git pull failed',
+            pausedUntil: '2026-04-05T09:25:20.000Z',
           },
         }),
         buildPresence({
@@ -375,7 +380,7 @@ describe('dashboard machine aggregation', () => {
       'agent-loop upgrade available on machine-busy; wait for the machine to go idle before restarting',
     )
     expect(machines.find((machine) => machine.machineId === 'machine-busy')?.warnings).toContain(
-      'automatic agent-loop upgrade last failed on machine-busy: git pull failed',
+      'automatic agent-loop upgrades paused on machine-busy until 2026-04-05T09:25:20.000Z after 1 consecutive failure(s): git pull failed',
     )
     expect(machines.find((machine) => machine.machineId === 'machine-manual')?.warnings).toContain(
       'agent-loop upgrade available on machine-manual, but auto-apply is disabled on this machine; manual restart is required',

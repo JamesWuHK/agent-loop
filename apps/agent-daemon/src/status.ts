@@ -22,6 +22,7 @@ import {
   canResumeHumanNeededPrReview,
   extractLatestAutomatedPrReviewBlockerSummary,
 } from './pr-reviewer'
+import { isAutoUpgradePauseActiveForTarget } from './auto-upgrade-state'
 import type { BackgroundRuntimeSnapshot } from './background'
 import {
   buildLaunchdServicePaths,
@@ -1017,6 +1018,14 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
       `last automatic agent-loop upgrade failed${snapshot.health.runtime.autoUpgrade.lastError ? `: ${snapshot.health.runtime.autoUpgrade.lastError}` : ''}`,
     )
   }
+  if (snapshot.health.runtime.autoUpgrade && isAutoUpgradePauseActiveForTarget(snapshot.health.runtime.autoUpgrade, {
+    targetVersion: snapshot.health.upgrade?.latestVersion ?? null,
+    targetRevision: snapshot.health.upgrade?.latestRevision ?? null,
+  })) {
+    warnings.push(
+      `automatic agent-loop upgrades paused until ${snapshot.health.runtime.autoUpgrade.pausedUntil} after ${snapshot.health.runtime.autoUpgrade.consecutiveFailureCount} consecutive failure(s)`,
+    )
+  }
   if (snapshot.health.runtime.supervisor === 'direct') {
     warnings.push('daemon is running in direct mode; closing the current terminal/session will stop it')
   }
@@ -1511,9 +1520,11 @@ function formatAutoUpgradeRuntimeSummary(autoUpgrade: DaemonHealthPayload['runti
     `success ${autoUpgrade.successCount}`,
     `failed ${autoUpgrade.failureCount}`,
     `no-change ${autoUpgrade.noChangeCount}`,
+    `failure streak ${autoUpgrade.consecutiveFailureCount}`,
     `last outcome ${autoUpgrade.lastOutcome ?? 'never'}`,
     `last attempt ${autoUpgrade.lastAttemptAt ?? 'never'}`,
     `last success ${autoUpgrade.lastSuccessAt ?? 'never'}`,
+    `paused until ${autoUpgrade.pausedUntil ?? 'none'}`,
     target,
   ].join(' | ') + lastError
 }

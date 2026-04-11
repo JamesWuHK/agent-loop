@@ -72,6 +72,8 @@ import {
   type MetricsServer,
 } from './metrics'
 import {
+  computeAutoUpgradePauseUntil,
+  isAutoUpgradePauseActiveForTarget,
   readAutoUpgradeRuntimeState,
   recordAutoUpgradeAttemptCompleted,
   recordAutoUpgradeAttemptStarted,
@@ -3692,6 +3694,13 @@ export class AgentDaemon {
     }
 
     const attemptTarget = this.getUpgradeAnnouncementKey(upgrade)
+    if (isAutoUpgradePauseActiveForTarget(this.autoUpgradeState, {
+      targetVersion: upgrade.latestVersion,
+      targetRevision: upgrade.latestRevision,
+    })) {
+      return false
+    }
+
     if (
       attemptTarget
       && this.lastAutoUpgradeAttemptTarget === attemptTarget
@@ -3916,6 +3925,9 @@ export class AgentDaemon {
     error?: string,
   ): void {
     const completedAt = new Date().toISOString()
+    const nextFailureCount = outcome === 'failed'
+      ? this.autoUpgradeState.consecutiveFailureCount + 1
+      : 0
     this.autoUpgradeState = writeAutoUpgradeRuntimeState(
       this.autoUpgradeStatePath,
       recordAutoUpgradeAttemptCompleted(this.autoUpgradeState, {
@@ -3924,6 +3936,13 @@ export class AgentDaemon {
         targetVersion: upgrade.latestVersion,
         targetRevision: upgrade.latestRevision,
         error,
+        pausedUntil: outcome === 'failed'
+          ? computeAutoUpgradePauseUntil(
+            completedAt,
+            resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild).checkIntervalMs,
+            nextFailureCount,
+          )
+          : null,
       }),
     )
     this.syncRuntimeMetrics()

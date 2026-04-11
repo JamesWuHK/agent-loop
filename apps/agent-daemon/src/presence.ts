@@ -342,8 +342,10 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Upgrade message: ${presence.upgradeMessage ?? 'none'}
 - Auto-upgrade outcome: ${autoUpgrade?.lastOutcome ?? 'unknown'}
 - Auto-upgrade counts: ${autoUpgradeCounts}
+- Auto-upgrade failure streak: ${autoUpgrade?.consecutiveFailureCount ?? 0}
 - Auto-upgrade last attempt: ${autoUpgrade?.lastAttemptAt ?? 'never'}
 - Auto-upgrade last success: ${autoUpgrade?.lastSuccessAt ?? 'never'}
+- Auto-upgrade paused until: ${autoUpgrade?.pausedUntil ?? 'none'}
 - Auto-upgrade target: ${autoUpgradeTarget}
 - Auto-upgrade last error: ${autoUpgrade?.lastError ?? 'none'}`
 }
@@ -455,12 +457,14 @@ function normalizeManagedAutoUpgradeRuntimeState(value: unknown): AgentLoopAutoU
     successCount: normalizeNonNegativeInteger(parsed.successCount),
     failureCount: normalizeNonNegativeInteger(parsed.failureCount),
     noChangeCount: normalizeNonNegativeInteger(parsed.noChangeCount),
+    consecutiveFailureCount: normalizeNonNegativeInteger(parsed.consecutiveFailureCount),
     lastAttemptAt: normalizeOptionalString(parsed.lastAttemptAt),
     lastSuccessAt: normalizeOptionalString(parsed.lastSuccessAt),
     lastOutcome: normalizeAutoUpgradeOutcome(parsed.lastOutcome),
     lastTargetVersion: normalizeOptionalString(parsed.lastTargetVersion),
     lastTargetRevision: normalizeOptionalString(parsed.lastTargetRevision),
     lastError: normalizeOptionalString(parsed.lastError),
+    pausedUntil: normalizeOptionalString(parsed.pausedUntil),
   }
 }
 

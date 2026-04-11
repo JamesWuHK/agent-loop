@@ -3,7 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  computeAutoUpgradePauseUntil,
   createInitialAutoUpgradeRuntimeState,
+  isAutoUpgradePauseActiveForTarget,
   readAutoUpgradeRuntimeState,
   recordAutoUpgradeAttemptCompleted,
   recordAutoUpgradeAttemptStarted,
@@ -43,12 +45,14 @@ describe('auto-upgrade state helpers', () => {
       successCount: 1,
       failureCount: 0,
       noChangeCount: 0,
+      consecutiveFailureCount: 0,
       lastAttemptAt: '2026-04-11T12:00:00.000Z',
       lastSuccessAt: '2026-04-11T12:00:05.000Z',
       lastOutcome: 'succeeded',
       lastTargetVersion: '0.1.2',
       lastTargetRevision: '2222222222222222222222222222222222222222',
       lastError: null,
+      pausedUntil: null,
     })
   })
 
@@ -81,6 +85,7 @@ describe('auto-upgrade state helpers', () => {
       targetVersion: '0.1.2',
       targetRevision: '2222222222222222222222222222222222222222',
       error: 'git pull failed',
+      pausedUntil: '2026-04-11T12:25:02.000Z',
     })
     state = recordAutoUpgradeAttemptStarted(state, {
       attemptedAt: '2026-04-11T12:11:00.000Z',
@@ -98,8 +103,34 @@ describe('auto-upgrade state helpers', () => {
       attemptCount: 2,
       failureCount: 1,
       noChangeCount: 1,
+      consecutiveFailureCount: 0,
       lastOutcome: 'no_change',
       lastError: null,
+      pausedUntil: null,
     })
+  })
+
+  test('computes exponential pause windows for repeated failures and only applies them to the same target', () => {
+    expect(computeAutoUpgradePauseUntil('2026-04-11T12:00:00.000Z', 900_000, 1)).toBe('2026-04-11T12:15:00.000Z')
+    expect(computeAutoUpgradePauseUntil('2026-04-11T12:00:00.000Z', 900_000, 3)).toBe('2026-04-11T13:00:00.000Z')
+
+    const pausedState = {
+      ...createInitialAutoUpgradeRuntimeState(),
+      lastTargetVersion: '0.1.2',
+      lastTargetRevision: '2222222222222222222222222222222222222222',
+      pausedUntil: '2026-04-11T12:15:00.000Z',
+      consecutiveFailureCount: 1,
+      lastOutcome: 'failed' as const,
+    }
+
+    expect(isAutoUpgradePauseActiveForTarget(pausedState, {
+      targetVersion: '0.1.2',
+      targetRevision: '2222222222222222222222222222222222222222',
+    }, Date.parse('2026-04-11T12:05:00.000Z'))).toBe(true)
+
+    expect(isAutoUpgradePauseActiveForTarget(pausedState, {
+      targetVersion: '0.1.3',
+      targetRevision: '3333333333333333333333333333333333333333',
+    }, Date.parse('2026-04-11T12:05:00.000Z'))).toBe(false)
   })
 })

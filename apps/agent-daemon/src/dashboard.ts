@@ -893,10 +893,15 @@ function buildPresenceUpgradeWarnings(machine: DashboardMachineCard): string[] {
 
   const presence = machine.presence
   const warnings: string[] = []
+  const pauseActive = presence.autoUpgrade?.pausedUntil
+    && presence.autoUpgrade.lastTargetVersion === (presence.latestVersion ?? null)
+    && presence.autoUpgrade.lastTargetRevision === (presence.latestRevision ?? null)
 
   if (presence.autoUpgrade?.lastOutcome === 'failed') {
     warnings.push(
-      `automatic agent-loop upgrade last failed on ${presence.machineId}${presence.autoUpgrade.lastError ? `: ${presence.autoUpgrade.lastError}` : ''}`,
+      pauseActive
+        ? `automatic agent-loop upgrades paused on ${presence.machineId} until ${presence.autoUpgrade.pausedUntil} after ${presence.autoUpgrade.consecutiveFailureCount} consecutive failure(s)${presence.autoUpgrade.lastError ? `: ${presence.autoUpgrade.lastError}` : ''}`
+        : `automatic agent-loop upgrade last failed on ${presence.machineId}${presence.autoUpgrade.lastError ? `: ${presence.autoUpgrade.lastError}` : ''}`,
     )
   }
 
@@ -1936,6 +1941,9 @@ function renderPresenceItem(presence) {
     presence.expiresInSeconds === null ? null : 'TTL ' + presence.expiresInSeconds + ' 秒',
   ].filter(Boolean).join(' | ');
   const autoUpgrade = presence.autoUpgrade;
+  const pauseActive = autoUpgrade && autoUpgrade.pausedUntil
+    && autoUpgrade.lastTargetVersion === (presence.latestVersion || null)
+    && autoUpgrade.lastTargetRevision === (presence.latestRevision || null);
   const upgradeHint = presence.upgradeStatus === 'upgrade-available'
     ? (!presence.upgradeAutoApplyEnabled
       ? '自动升级已关闭'
@@ -1952,12 +1960,13 @@ function renderPresenceItem(presence) {
         ? 'gold'
         : '';
   const autoUpgradeSummary = autoUpgrade
-    ? '自动升级 ' + (autoUpgradeOutcome || '未知') + ' | 尝试 ' + autoUpgrade.attemptCount + ' | 成功 ' + autoUpgrade.successCount + ' | 失败 ' + autoUpgrade.failureCount + ' | 无变化 ' + autoUpgrade.noChangeCount
+    ? '自动升级 ' + (autoUpgradeOutcome || '未知') + ' | 尝试 ' + autoUpgrade.attemptCount + ' | 成功 ' + autoUpgrade.successCount + ' | 失败 ' + autoUpgrade.failureCount + ' | 无变化 ' + autoUpgrade.noChangeCount + ' | 连续失败 ' + autoUpgrade.consecutiveFailureCount
     : null;
-  const autoUpgradeMeta = autoUpgrade && (autoUpgrade.lastAttemptAt || autoUpgrade.lastSuccessAt || autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision)
+  const autoUpgradeMeta = autoUpgrade && (autoUpgrade.lastAttemptAt || autoUpgrade.lastSuccessAt || autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision || pauseActive)
     ? [
       autoUpgrade.lastAttemptAt ? '上次尝试 ' + formatTimestamp(autoUpgrade.lastAttemptAt) : null,
       autoUpgrade.lastSuccessAt ? '上次成功 ' + formatTimestamp(autoUpgrade.lastSuccessAt) : null,
+      pauseActive ? '暂停到 ' + formatTimestamp(autoUpgrade.pausedUntil) : null,
       (autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision)
         ? '目标 v' + (autoUpgrade.lastTargetVersion || 'unknown') + '@' + shortDaemonId(autoUpgrade.lastTargetRevision || 'unknown')
         : null,
