@@ -148,6 +148,44 @@ throw new Error('red')
     })
   })
 
+  it('does not warn on exact allowed file paths even when segments use broad words', () => {
+    const body = [
+      '## 用户故事',
+      '作为用户，我希望精确文件路径不会被误判为模糊范围。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### AllowedFiles',
+      '- README.md',
+      '- package.json',
+      '- packages/ui/button.ts',
+      '### RequiredSemantics',
+      '- warning 与 error 语义分离',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-quality.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      "expect(report.warnings).not.toContain('AllowedFiles should use exact paths or tightly scoped directories: README.md')",
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 收紧启发式',
+      '',
+      '## 验收',
+      '- 精确路径不误报 warning',
+    ].join('\n')
+
+    const report = buildIssueQualityReport(parseIssueContract(body))
+
+    expect(report.valid).toBe(true)
+    expect(report.errors).toEqual([])
+    expect(report.warnings).toEqual([])
+  })
+
   it('preserves hard validation errors while still surfacing warnings', () => {
     const body = [
       '## 用户故事',
