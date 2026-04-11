@@ -1,8 +1,10 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { dirname, posix, relative, resolve } from 'node:path'
-import type {
+import {
   BuildRepoAuthoringContextInput,
   RepoAuthoringContext,
+  getProjectIssueAuthoringRules,
+  type ProjectProfileConfig,
 } from '../../../packages/agent-shared/src'
 
 interface PackageScriptRecord {
@@ -42,33 +44,67 @@ export async function buildRepoAuthoringContext(
   input: BuildRepoAuthoringContextInput,
 ): Promise<RepoAuthoringContext> {
   const repoRoot = resolve(input.repoRoot)
-  const repoFiles = await listRepoFiles(repoRoot)
+  const repoFiles = input.repoRelativeFilePaths
+    ? [...input.repoRelativeFilePaths].sort((left, right) => left.localeCompare(right))
+    : await listRepoFiles(repoRoot)
+  const project = await resolveProjectProfileConfig(repoRoot, input.project)
+  const projectIssueRules = getProjectIssueAuthoringRules(project)
   const issueTokens = tokenize(input.issueText)
-  const candidateAllowedFiles = collectCandidateAllowedFiles({
+  const scannedAllowedFiles = collectCandidateAllowedFiles({
     issueText: input.issueText,
     issueTokens,
     repoFiles,
     limit: input.maxAllowedFiles ?? 8,
   })
-  const candidateValidationCommands = await collectCandidateValidationCommands({
+  const candidateAllowedFiles = uniqueStrings([
+    ...projectIssueRules.preferredAllowedFiles,
+    ...scannedAllowedFiles,
+  ]).slice(0, input.maxAllowedFiles ?? 8)
+  const scannedValidationCommands = await collectCandidateValidationCommands({
     repoRoot,
     repoFiles,
     issueTokens,
     candidateAllowedFiles,
     limit: input.maxValidationCommands ?? 8,
   })
-  const candidateForbiddenFiles = collectCandidateForbiddenFiles({
+  const candidateValidationCommands = uniqueStrings([
+    ...projectIssueRules.preferredValidationCommands,
+    ...scannedValidationCommands,
+  ]).slice(0, input.maxValidationCommands ?? 8)
+  const scannedForbiddenFiles = collectCandidateForbiddenFiles({
     issueText: input.issueText,
     repoFiles,
     candidateAllowedFiles,
     limit: input.maxForbiddenFiles ?? 5,
   })
+  const candidateForbiddenFiles = uniqueStrings([
+    ...projectIssueRules.forbiddenPaths,
+    ...scannedForbiddenFiles,
+  ]).slice(0, input.maxForbiddenFiles ?? 5)
 
   return {
     candidateValidationCommands,
     candidateAllowedFiles,
     candidateForbiddenFiles,
+    candidateReviewHints: [...projectIssueRules.reviewHints],
+    projectIssueRules,
   }
+}
+
+async function resolveProjectProfileConfig(
+  repoRoot: string,
+  explicitProject: ProjectProfileConfig | undefined,
+): Promise<ProjectProfileConfig | undefined> {
+  if (explicitProject) {
+    return explicitProject
+  }
+
+  const repoConfig = await readJsonFile(resolve(repoRoot, '.agent-loop', 'project.json'))
+  const project = (repoConfig as { project?: ProjectProfileConfig } | null)?.project
+
+  return project && typeof project === 'object'
+    ? project
+    : undefined
 }
 
 async function collectCandidateValidationCommands(input: {
@@ -463,6 +499,20 @@ function readStringMap(value: unknown): Record<string, string> {
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
       .sort((left, right) => left[0].localeCompare(right[0])),
   )
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const deduped: string[] = []
+
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    deduped.push(trimmed)
+  }
+
+  return deduped
 }
 
 async function readJsonFile(filePath: string): Promise<unknown | null> {

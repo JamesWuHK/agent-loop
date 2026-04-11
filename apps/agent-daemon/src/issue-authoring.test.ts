@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rewriteIssueDraft } from './issue-authoring'
+import {
+  buildIssueRewritePrompt,
+  rewriteIssueDraft,
+} from './issue-authoring'
 
 describe('rewriteIssueDraft', () => {
   test('returns canonical executable contract markdown validated against local rules', async () => {
@@ -120,5 +123,62 @@ throw new Error('red')
 - frontend files`,
       }),
     })).rejects.toThrow('Rewritten issue contract failed local validation')
+  })
+
+  test('includes project issue rules in rewrite prompts without adding empty noise when unset', () => {
+    const prompt = buildIssueRewritePrompt({
+      issueText: '增加 issue repair CLI',
+      authoringContext: {
+        candidateValidationCommands: [
+          'bun test apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        candidateAllowedFiles: [
+          'apps/agent-daemon/src/issue-repair.ts',
+          'apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        candidateForbiddenFiles: [
+          'apps/agent-daemon/src/dashboard.ts',
+        ],
+        candidateReviewHints: [
+          '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+        ],
+        projectIssueRules: {
+          preferredValidationCommands: [
+            'bun test apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          preferredAllowedFiles: [
+            'apps/agent-daemon/src/issue-repair.ts',
+            'apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          forbiddenPaths: [
+            'apps/agent-daemon/src/dashboard.ts',
+          ],
+          reviewHints: [
+            '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+          ],
+        },
+      },
+    })
+
+    expect(prompt).toContain('Project Issue Rules:')
+    expect(prompt).toContain('优先检查 repair 流程是否保留合法的 Dependencies JSON')
+
+    const promptWithoutRules = buildIssueRewritePrompt({
+      issueText: '增加 issue repair CLI',
+      authoringContext: {
+        candidateValidationCommands: [],
+        candidateAllowedFiles: [],
+        candidateForbiddenFiles: [],
+        candidateReviewHints: [],
+        projectIssueRules: {
+          preferredValidationCommands: [],
+          preferredAllowedFiles: [],
+          forbiddenPaths: [],
+          reviewHints: [],
+        },
+      },
+    })
+
+    expect(promptWithoutRules).not.toContain('Project Issue Rules:')
   })
 })

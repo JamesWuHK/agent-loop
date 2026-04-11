@@ -75,11 +75,12 @@ export async function rewriteIssueDraft(
   }
 }
 
-function buildIssueRewritePrompt(input: {
+export function buildIssueRewritePrompt(input: {
   issueText: string
   authoringContext: RepoAuthoringContext
-  draftQuality: ReturnType<typeof buildIssueQualityReport>
+  draftQuality?: ReturnType<typeof buildIssueQualityReport>
 }): string {
+  const draftQuality = input.draftQuality ?? buildIssueQualityReport(parseIssueContract(input.issueText))
   const candidateAllowedFiles = input.authoringContext.candidateAllowedFiles.length > 0
     ? input.authoringContext.candidateAllowedFiles.map((value) => `- ${value}`).join('\n')
     : '- none'
@@ -89,12 +90,13 @@ function buildIssueRewritePrompt(input: {
   const candidateValidationCommands = input.authoringContext.candidateValidationCommands.length > 0
     ? input.authoringContext.candidateValidationCommands.map((value) => `- \`${value}\``).join('\n')
     : '- none'
-  const currentErrors = input.draftQuality.errors.length > 0
-    ? input.draftQuality.errors.map((value) => `- ${value}`).join('\n')
+  const currentErrors = draftQuality.errors.length > 0
+    ? draftQuality.errors.map((value) => `- ${value}`).join('\n')
     : '- none'
-  const currentWarnings = input.draftQuality.warnings.length > 0
-    ? input.draftQuality.warnings.map((value) => `- ${value}`).join('\n')
+  const currentWarnings = draftQuality.warnings.length > 0
+    ? draftQuality.warnings.map((value) => `- ${value}`).join('\n')
     : '- none'
+  const projectIssueRules = formatProjectIssueRules(input.authoringContext)
 
   return `你正在把一条模糊或不完整的 issue 草稿重写成 agent-loop 可直接消费的 canonical executable contract。
 
@@ -131,14 +133,16 @@ throw new Error('red')
 - 如果当前草稿缺少信息，可以补齐最小可执行 contract，但不要夹带额外说明 prose
 
 当前草稿质量：
-- valid: ${input.draftQuality.valid}
-- score: ${input.draftQuality.score}
+- valid: ${draftQuality.valid}
+- score: ${draftQuality.score}
 
 当前草稿 errors:
 ${currentErrors}
 
 当前草稿 warnings:
 ${currentWarnings}
+
+${projectIssueRules}
 
 Repo-grounded candidate AllowedFiles:
 ${candidateAllowedFiles}
@@ -152,6 +156,39 @@ ${candidateValidationCommands}
 原始草稿：
 ${input.issueText.trim() || '(empty draft)'}
 `
+}
+
+function formatProjectIssueRules(authoringContext: RepoAuthoringContext): string {
+  const rules = authoringContext.projectIssueRules ?? {
+    preferredValidationCommands: [],
+    preferredAllowedFiles: [],
+    forbiddenPaths: [],
+    reviewHints: [],
+  }
+  if (
+    rules.preferredValidationCommands.length === 0
+    && rules.preferredAllowedFiles.length === 0
+    && rules.forbiddenPaths.length === 0
+    && rules.reviewHints.length === 0
+  ) {
+    return ''
+  }
+
+  return [
+    'Project Issue Rules:',
+    rules.preferredAllowedFiles.length > 0
+      ? `Preferred AllowedFiles:\n${rules.preferredAllowedFiles.map((value) => `- ${value}`).join('\n')}`
+      : null,
+    rules.forbiddenPaths.length > 0
+      ? `Forbidden paths:\n${rules.forbiddenPaths.map((value) => `- ${value}`).join('\n')}`
+      : null,
+    rules.preferredValidationCommands.length > 0
+      ? `Preferred Validation commands:\n${rules.preferredValidationCommands.map((value) => `- \`${value}\``).join('\n')}`
+      : null,
+    rules.reviewHints.length > 0
+      ? `Review hints:\n${rules.reviewHints.map((value) => `- ${value}`).join('\n')}`
+      : null,
+  ].filter((value): value is string => value !== null).join('\n\n')
 }
 
 function normalizeRewrittenIssueMarkdown(responseText: string): string {

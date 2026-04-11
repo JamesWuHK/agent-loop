@@ -1,4 +1,5 @@
 import type {
+  ProjectIssueAuthoringRules,
   ProjectProfileConfig,
   ProjectProfileName,
   ProjectPromptContext,
@@ -45,3 +46,27 @@ export function getProjectPromptGuidance(
   return [...builtin, ...overrides]
 }
 
+export function getProjectIssueAuthoringRules(
+  project: ProjectProfileConfig | undefined,
+): Required<ProjectIssueAuthoringRules> {
+  return {
+    preferredValidationCommands: uniqueStrings(project?.issueAuthoring?.preferredValidationCommands ?? []),
+    preferredAllowedFiles: uniqueStrings(project?.issueAuthoring?.preferredAllowedFiles ?? []),
+    forbiddenPaths: uniqueStrings(project?.issueAuthoring?.forbiddenPaths ?? []),
+    reviewHints: uniqueStrings(project?.issueAuthoring?.reviewHints ?? []),
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    normalized.push(trimmed)
+  }
+
+  return normalized
+}

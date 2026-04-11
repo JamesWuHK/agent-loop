@@ -101,8 +101,12 @@ export async function splitTrackingIssue(
   input: SplitTrackingIssueInput,
   deps: SplitTrackingIssueDependencies,
 ): Promise<SplitTrackingIssueResult> {
+  const parentAuthoringContext = await (deps.buildRepoAuthoringContext ?? buildRepoAuthoringContext)({
+    repoRoot: input.repoRoot,
+    issueText: [input.title, input.body].filter(Boolean).join('\n'),
+  })
   const response = await deps.runAgent({
-    prompt: buildSplitTrackingIssuePrompt(input.title, input.body),
+    prompt: buildSplitTrackingIssuePrompt(input.title, input.body, parentAuthoringContext),
     repoRoot: input.repoRoot,
   })
   const childTitles = parseChildIssueTitles(response.responseText)
@@ -226,7 +230,10 @@ export function formatSplitTrackingIssueResult(
 function buildSplitTrackingIssuePrompt(
   title: string,
   body: string,
+  authoringContext: RepoAuthoringContext,
 ): string {
+  const projectIssueRules = formatProjectIssueRules(authoringContext)
+
   return `你正在把一个 tracking parent issue 拆成 execution-sized child issues。
 
 只返回有序编号列表，每行一条 child issue 标题，不要输出解释，不要输出 markdown section，不要输出 dependsOn JSON。
@@ -238,6 +245,8 @@ function buildSplitTrackingIssuePrompt(
 
 Tracking parent title:
 ${title}
+
+${projectIssueRules}
 
 Tracking parent body:
 ${body.trim() || '(empty body)'}
@@ -318,6 +327,11 @@ function buildChildIssueBody(input: {
   const outOfScope = input.laterTitles.length > 0
     ? input.laterTitles.map(title => `后续 child issue: ${title}`)
     : ['自动创建 GitHub issue / label / assignee']
+  const reviewHints = uniqueStrings([
+    ...(input.authoringContext.candidateReviewHints ?? []),
+    '优先检查本 child issue 是否偷混入后续 sibling 工作',
+    '优先检查变更文件是否仍落在 `AllowedFiles` 边界内',
+  ])
 
   return `## 用户故事
 
@@ -352,8 +366,7 @@ ${outOfScope.map(value => `- ${value}`).join('\n')}
 - \`AllowedFiles\`、\`Validation\` 与本切片实际实现路径保持一致
 
 ### ReviewHints
-- 优先检查本 child issue 是否偷混入后续 sibling 工作
-- 优先检查变更文件是否仍落在 \`AllowedFiles\` 边界内
+${reviewHints.map(value => `- ${value}`).join('\n')}
 
 ### Validation
 ${validationCommands.map(value => `- \`${value}\``).join('\n')}
@@ -456,4 +469,37 @@ function buildSlugFallbackFiles(title: string): string[] {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))]
+}
+
+function formatProjectIssueRules(authoringContext: RepoAuthoringContext): string {
+  const rules = authoringContext.projectIssueRules ?? {
+    preferredValidationCommands: [],
+    preferredAllowedFiles: [],
+    forbiddenPaths: [],
+    reviewHints: [],
+  }
+  if (
+    rules.preferredValidationCommands.length === 0
+    && rules.preferredAllowedFiles.length === 0
+    && rules.forbiddenPaths.length === 0
+    && rules.reviewHints.length === 0
+  ) {
+    return ''
+  }
+
+  return [
+    'Project Issue Rules:',
+    rules.preferredAllowedFiles.length > 0
+      ? `Preferred AllowedFiles:\n${rules.preferredAllowedFiles.map((value) => `- ${value}`).join('\n')}`
+      : null,
+    rules.forbiddenPaths.length > 0
+      ? `Forbidden paths:\n${rules.forbiddenPaths.map((value) => `- ${value}`).join('\n')}`
+      : null,
+    rules.preferredValidationCommands.length > 0
+      ? `Preferred Validation commands:\n${rules.preferredValidationCommands.map((value) => `- \`${value}\``).join('\n')}`
+      : null,
+    rules.reviewHints.length > 0
+      ? `Review hints:\n${rules.reviewHints.map((value) => `- ${value}`).join('\n')}`
+      : null,
+  ].filter((value): value is string => value !== null).join('\n\n')
 }

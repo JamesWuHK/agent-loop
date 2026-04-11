@@ -63,4 +63,46 @@ describe('buildRepoAuthoringContext', () => {
     expect(context.candidateForbiddenFiles).toContain('tsconfig.json')
     expect(context.candidateForbiddenFiles.some((value) => value.startsWith(root))).toBe(false)
   })
+
+  test('merges project issue authoring rules ahead of repo-grounded candidates', async () => {
+    const context = await buildRepoAuthoringContext({
+      repoRoot: '/repo',
+      issueText: '增加 issue repair CLI',
+      repoRelativeFilePaths: [
+        'apps/agent-daemon/src/issue-repair.ts',
+        'apps/agent-daemon/src/issue-repair.test.ts',
+        'apps/agent-daemon/src/dashboard.ts',
+      ],
+      project: {
+        profile: 'generic',
+        issueAuthoring: {
+          preferredValidationCommands: [
+            'bun test apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          preferredAllowedFiles: [
+            'apps/agent-daemon/src/issue-repair.ts',
+            'apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          forbiddenPaths: [
+            'apps/agent-daemon/src/dashboard.ts',
+          ],
+          reviewHints: [
+            '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+          ],
+        },
+      },
+    })
+
+    expect(context.candidateValidationCommands).toContain(
+      'bun test apps/agent-daemon/src/issue-repair.test.ts',
+    )
+    expect(context.candidateAllowedFiles.slice(0, 2)).toEqual([
+      'apps/agent-daemon/src/issue-repair.ts',
+      'apps/agent-daemon/src/issue-repair.test.ts',
+    ])
+    expect(context.candidateForbiddenFiles).toContain('apps/agent-daemon/src/dashboard.ts')
+    expect(context.candidateReviewHints).toContain(
+      '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+    )
+  })
 })
