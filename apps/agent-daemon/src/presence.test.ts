@@ -4,14 +4,18 @@ import {
   buildManagedDaemonPresenceComment,
   buildManagedDaemonUpgradeAnnouncementComment,
   buildManagedDaemonUpgradeFailureAlertComment,
+  buildManagedDaemonUpgradeSuccessComment,
   extractManagedDaemonPresenceIssueNumber,
   extractManagedDaemonPresenceComment,
   extractManagedDaemonUpgradeAnnouncementComment,
   extractManagedDaemonUpgradeFailureAlertComment,
+  extractManagedDaemonUpgradeSuccessComment,
   getLatestManagedDaemonUpgradeAnnouncement,
   getLatestManagedDaemonUpgradeFailureAlert,
+  getLatestManagedDaemonUpgradeSuccess,
   listActiveManagedDaemonPresenceComments,
   listActiveManagedDaemonUpgradeFailureAlertComments,
+  listRecentManagedDaemonUpgradeSuccessComments,
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresence,
   type PresenceApiAdapter,
@@ -250,6 +254,51 @@ describe('managed daemon presence helpers', () => {
 
     expect(getLatestManagedDaemonUpgradeFailureAlert(comments, TEST_CONFIG.repo, 'machine-a')?.alert.pausedUntil).toBe(newer.pausedUntil)
     expect(listActiveManagedDaemonUpgradeFailureAlertComments(comments, TEST_CONFIG.repo, Date.parse('2026-04-11T09:40:00.000Z'))).toHaveLength(1)
+  })
+
+  test('round-trips managed daemon upgrade success acknowledgements and filters recent latest comments', () => {
+    const older = {
+      repo: TEST_CONFIG.repo,
+      machineId: 'machine-a',
+      daemonInstanceId: 'daemon-a',
+      channel: 'master',
+      targetVersion: '0.1.2',
+      targetRevision: '2222222222222222222222222222222222222222',
+      succeededAt: '2026-04-11T09:00:20.000Z',
+      acknowledgedAt: '2026-04-11T09:00:30.000Z',
+    }
+    const newer = {
+      ...older,
+      daemonInstanceId: 'daemon-b',
+      succeededAt: '2026-04-11T09:30:20.000Z',
+      acknowledgedAt: '2026-04-11T09:30:30.000Z',
+    }
+
+    expect(extractManagedDaemonUpgradeSuccessComment(
+      buildManagedDaemonUpgradeSuccessComment(newer),
+    )).toEqual(newer)
+
+    const comments = [
+      {
+        commentId: 31,
+        body: buildManagedDaemonUpgradeSuccessComment(older),
+        createdAt: older.acknowledgedAt,
+        updatedAt: older.acknowledgedAt,
+      },
+      {
+        commentId: 32,
+        body: buildManagedDaemonUpgradeSuccessComment(newer),
+        createdAt: newer.acknowledgedAt,
+        updatedAt: newer.acknowledgedAt,
+      },
+    ]
+
+    expect(getLatestManagedDaemonUpgradeSuccess(comments, TEST_CONFIG.repo, 'machine-a')?.success.succeededAt).toBe(newer.succeededAt)
+    expect(listRecentManagedDaemonUpgradeSuccessComments(
+      comments,
+      TEST_CONFIG.repo,
+      Date.parse('2026-04-11T09:40:00.000Z'),
+    )).toHaveLength(1)
   })
 
   test('filters active managed daemon presence comments by repo and expiry', () => {

@@ -3,6 +3,7 @@ import {
   buildDashboardMachineCards,
   buildDashboardSummary,
   buildDashboardUpgradeFailureAlertMessages,
+  buildDashboardUpgradeSuccessNoteMessages,
   type DashboardIssueView,
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
@@ -11,7 +12,10 @@ import {
   renderDashboardAppScript,
   renderDashboardHtml,
 } from './dashboard'
-import type { ManagedDaemonUpgradeFailureAlertComment } from './presence'
+import type {
+  ManagedDaemonUpgradeFailureAlertComment,
+  ManagedDaemonUpgradeSuccessComment,
+} from './presence'
 
 function buildLease(overrides: Partial<DashboardLeaseView> = {}): DashboardLeaseView {
   return {
@@ -494,6 +498,59 @@ describe('dashboard machine aggregation', () => {
 
     expect(messages).toEqual([
       'GitHub 升级告警：machine-busy 自动升级连续失败 2 次，暂停到 2026-04-05T09:25:20.000Z，最近错误：git pull failed',
+    ])
+  })
+
+  test('formats recent GitHub upgrade success notes confirmed by current presence state', () => {
+    const successes: ManagedDaemonUpgradeSuccessComment[] = [
+      {
+        commentId: 601,
+        body: 'ignored',
+        createdAt: '2026-04-05T09:12:21.000Z',
+        updatedAt: '2026-04-05T09:12:21.000Z',
+        success: {
+          repo: 'JamesWuHK/digital-employee',
+          machineId: 'machine-ready',
+          daemonInstanceId: 'daemon-ready-upgraded',
+          channel: 'master',
+          targetVersion: '0.1.2',
+          targetRevision: 'fedcba9876543210',
+          succeededAt: '2026-04-05T09:12:20.000Z',
+          acknowledgedAt: '2026-04-05T09:12:21.000Z',
+        },
+      },
+    ]
+
+    const messages = buildDashboardUpgradeSuccessNoteMessages(
+      successes,
+      [
+        buildPresence({
+          machineId: 'machine-ready',
+          daemonInstanceId: 'daemon-ready-upgraded',
+          upgradeStatus: 'up-to-date',
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+          autoUpgrade: {
+            attemptCount: 2,
+            successCount: 1,
+            failureCount: 1,
+            noChangeCount: 0,
+            consecutiveFailureCount: 0,
+            lastAttemptAt: '2026-04-05T09:12:10.000Z',
+            lastSuccessAt: '2026-04-05T09:12:20.000Z',
+            lastOutcome: 'succeeded',
+            lastTargetVersion: '0.1.2',
+            lastTargetRevision: 'fedcba9876543210',
+            lastError: null,
+            pausedUntil: null,
+          },
+        }),
+      ],
+      Date.parse('2026-04-05T09:13:00.000Z'),
+    )
+
+    expect(messages).toEqual([
+      'GitHub 升级完成：machine-ready 已切换到 v0.1.2@fedcba9876543210 并恢复在线',
     ])
   })
 })

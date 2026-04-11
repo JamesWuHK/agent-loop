@@ -28,8 +28,10 @@ import {
 import {
   listActiveManagedDaemonPresence,
   listActiveManagedDaemonUpgradeFailureAlerts,
+  listRecentManagedDaemonUpgradeSuccesses,
   type ManagedDaemonPresenceComment,
   type ManagedDaemonUpgradeFailureAlertComment,
+  type ManagedDaemonUpgradeSuccessComment,
 } from './presence'
 
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
@@ -302,6 +304,20 @@ export async function collectDashboardSnapshot(
     errors.push(`GitHub 升级告警不可用：${formatError(error)}`)
   }
 
+  try {
+    const successes = await listRecentManagedDaemonUpgradeSuccesses({
+      ...options.config,
+      repo,
+    }, Date.parse(generatedAt))
+    notes.push(...buildDashboardUpgradeSuccessNoteMessages(
+      successes,
+      remotePresences,
+      Date.parse(generatedAt),
+    ))
+  } catch (error) {
+    errors.push(`GitHub 升级完成记录不可用：${formatError(error)}`)
+  }
+
   const machines = buildDashboardMachineCards(localSnapshots, remoteLeases, remotePresences)
 
   return {
@@ -493,6 +509,50 @@ export function buildDashboardUpgradeFailureAlertMessages(
 
     messages.push(
       `GitHub 升级告警：${comment.alert.machineId} 自动升级连续失败 ${comment.alert.consecutiveFailureCount} 次，暂停到 ${comment.alert.pausedUntil}${comment.alert.lastError ? `，最近错误：${comment.alert.lastError}` : ''}`,
+    )
+  }
+
+  return [...new Set(messages)]
+}
+
+export function buildDashboardUpgradeSuccessNoteMessages(
+  successes: ManagedDaemonUpgradeSuccessComment[],
+  presences: DashboardPresenceView[],
+  now = Date.now(),
+): string[] {
+  const presenceByMachine = new Map<string, DashboardPresenceView>()
+  for (const presence of presences) {
+    const current = presenceByMachine.get(presence.machineId)
+    if (!current || (presence.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY) <= (current.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY)) {
+      presenceByMachine.set(presence.machineId, presence)
+    }
+  }
+
+  const messages: string[] = []
+  for (const comment of successes) {
+    const acknowledgedAtMs = Date.parse(comment.success.acknowledgedAt)
+    if (!Number.isFinite(acknowledgedAtMs) || acknowledgedAtMs > now) {
+      continue
+    }
+
+    const presence = presenceByMachine.get(comment.success.machineId)
+    const confirmedOnline = presence && (
+      presence.upgradeStatus === 'up-to-date'
+      || presence.upgradeStatus === 'ahead-of-channel'
+    ) && presence.autoUpgrade?.lastOutcome === 'succeeded'
+      && presence.autoUpgrade?.lastSuccessAt === comment.success.succeededAt
+      && presence.autoUpgrade?.lastTargetVersion === comment.success.targetVersion
+      && presence.autoUpgrade?.lastTargetRevision === comment.success.targetRevision
+    if (!confirmedOnline) {
+      continue
+    }
+
+    const targetRevision = comment.success.targetRevision ?? presence.agentLoopRevision ?? 'unknown'
+    const shortRevision = targetRevision.length <= 18
+      ? targetRevision
+      : `${targetRevision.slice(0, 18)}...`
+    messages.push(
+      `GitHub 升级完成：${comment.success.machineId} 已切换到 v${comment.success.targetVersion ?? presence.agentLoopVersion}@${shortRevision} 并恢复在线`,
     )
   }
 
