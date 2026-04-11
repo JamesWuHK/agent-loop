@@ -116,39 +116,6 @@ export interface ProjectProfileConfig {
   maxConcurrency?: number
 }
 
-export type RepoAuthoringContextCommandSource = 'root-package-json' | 'workspace-package-json'
-
-export interface RepoAuthoringContextCommandCandidate {
-  command: string
-  scriptName: string
-  source: RepoAuthoringContextCommandSource
-  packageJsonPath: string
-}
-
-export type RepoAuthoringContextFileCandidateKind = 'allowed' | 'forbidden'
-
-export interface RepoAuthoringContextFileCandidate {
-  path: string
-  kind: RepoAuthoringContextFileCandidateKind
-  reason: string
-}
-
-export interface BuildRepoAuthoringContextInput {
-  repoRoot: string
-  issueText: string
-  issueTitle?: string
-  issueBody?: string
-  repoRelativeFilePaths?: string[]
-  rootPackageJsonPath?: string
-  workspacePackageJsonPaths?: string[]
-}
-
-export interface RepoAuthoringContext {
-  candidateValidationCommands: string[]
-  candidateAllowedFiles: string[]
-  candidateForbiddenFiles: string[]
-}
-
 export interface AgentSchedulingConfig {
   concurrencyByRepo: Record<string, number>
   concurrencyByProfile: Partial<Record<ProjectProfileName, number>>

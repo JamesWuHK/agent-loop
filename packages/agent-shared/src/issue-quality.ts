@@ -52,6 +52,18 @@ function isTightlyScopedAllowedFileEntry(entry: string): boolean {
   return segments.length >= 2
 }
 
+function isExactAllowedFilePath(entry: string): boolean {
+  const trimmed = entry.trim()
+  if (!trimmed || trimmed.endsWith('/') || trimmed.includes('*') || /\s/.test(trimmed)) {
+    return false
+  }
+
+  const segments = trimmed.split('/').filter(Boolean)
+  const basename = segments.at(-1)
+
+  return Boolean(basename?.includes('.'))
+}
+
 function isBroadAllowedFileEntry(entry: string): boolean {
   const trimmed = entry.trim()
   if (!trimmed) {
@@ -74,7 +86,11 @@ function collectIssueQualityWarnings(contract: IssueContract): string[] {
   const warnings: string[] = []
 
   for (const entry of contract.allowedFiles) {
-    if (!isTightlyScopedAllowedFileEntry(entry) || isBroadAllowedFileEntry(entry)) {
+    if (isExactAllowedFilePath(entry) || isTightlyScopedAllowedFileEntry(entry)) {
+      continue
+    }
+
+    if (isBroadAllowedFileEntry(entry) || !isTightlyScopedAllowedFileEntry(entry)) {
       warnings.push(`AllowedFiles should use exact paths or tightly scoped directories: ${entry}`)
     }
   }
