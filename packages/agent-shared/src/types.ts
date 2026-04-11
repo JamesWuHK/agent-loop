@@ -126,6 +126,20 @@ export interface ProjectProfileConfig {
   maxConcurrency?: number
 }
 
+export interface BuildRepoAuthoringContextInput {
+  repoRoot: string
+  issueText: string
+  maxValidationCommands?: number
+  maxAllowedFiles?: number
+  maxForbiddenFiles?: number
+}
+
+export interface RepoAuthoringContext {
+  candidateValidationCommands: string[]
+  candidateAllowedFiles: string[]
+  candidateForbiddenFiles: string[]
+}
+
 export interface AgentSchedulingConfig {
   concurrencyByRepo: Record<string, number>
   concurrencyByProfile: Partial<Record<ProjectProfileName, number>>
