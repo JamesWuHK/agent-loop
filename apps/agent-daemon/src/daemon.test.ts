@@ -1633,6 +1633,28 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(true)
   })
 
+  test('pauses working-issue resume while a lineage-block cooldown is active', () => {
+    const now = Date.now()
+
+    expect(shouldResumeManagedIssue(
+      { state: 'working' },
+      true,
+      1,
+      now + 60_000,
+      now,
+      2,
+    )).toBe(false)
+
+    expect(shouldResumeManagedIssue(
+      { state: 'working' },
+      true,
+      1,
+      now - 1,
+      now,
+      2,
+    )).toBe(true)
+  })
+
   test('resumes stale issues with a preserved local worktree after daemon restart', () => {
     expect(shouldResumeManagedIssue(
       { state: 'stale' },
@@ -1780,6 +1802,7 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(true)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('blocked')).toBe(false)
   })
 
   test('resets linked PR labels back to retry when issue recovery resumes', () => {

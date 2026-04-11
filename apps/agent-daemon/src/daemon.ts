@@ -9,6 +9,7 @@ import type {
   AgentLoopBuildMetadata,
   AgentLoopUpgradeMetadata,
   AgentIssue,
+  BranchPullRequestRecord,
   BlockedIssueResumeRuntimeDetail,
   ClaimEvent,
   DaemonStatus,
@@ -21,7 +22,7 @@ import type {
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
 } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber, setGitHubApiRequestObserver } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber, listBranchPullRequests, parseIssueContract, setGitHubApiRequestObserver } from '@agent/shared'
 import { claimSpecificIssue, pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
@@ -109,6 +110,13 @@ import {
   resolveAgentLoopBuildMetadata,
   resolveAgentLoopUpgradePolicy,
 } from './version'
+import { parsePrLineageMetadata } from './pr-lineage'
+import {
+  PrLineagePreflightError,
+  collectPrLineagePreflightActualState,
+  evaluatePrLineagePreflight,
+  isCommitAncestorInWorktree,
+} from './pr-lineage-preflight'
 
 export interface HealthServerConfig {
   host: string
@@ -619,6 +627,83 @@ export class AgentDaemon {
       buildIssueWorkingTransitionEvent('recoverable', this.config.machineId, reason),
       this.config,
     )
+  }
+
+  private async runPrLineagePreflightOrThrow(input: {
+    stage: string
+    worktreePath: string
+    branch: string
+    issueNumber: number | null
+    issueBody?: string | null
+    prNumber?: number | null
+    detachedHead?: boolean
+  }): Promise<void> {
+    const branchPullRequest = input.prNumber === undefined || input.prNumber === null
+      ? null
+      : await this.resolveBranchPullRequestRecord(input.branch, input.prNumber)
+    const expectedBaseBranch = branchPullRequest?.baseRefName ?? this.config.git.defaultBranch
+    const actual = await collectPrLineagePreflightActualState({
+      worktreePath: input.worktreePath,
+      expectedBaseBranch,
+      actualHeadBranch: input.detachedHead ? input.branch : undefined,
+      actualBaseBranch: branchPullRequest?.baseRefName ?? null,
+    })
+    const contract = parseIssueContract(input.issueBody ?? '')
+
+    let expected = {
+      issueNumber: input.issueNumber ?? 0,
+      headBranch: input.branch,
+      baseBranch: expectedBaseBranch,
+      baseSha: actual.baseSha,
+      allowedChangedFiles: contract.allowedFiles,
+    }
+
+    if (branchPullRequest?.body) {
+      try {
+        const metadata = parsePrLineageMetadata(branchPullRequest.body)
+        expected = {
+          issueNumber: metadata.issue,
+          headBranch: metadata.headBranch,
+          baseBranch: metadata.baseBranch,
+          baseSha: metadata.baseSha,
+          allowedChangedFiles: contract.allowedFiles,
+        }
+
+        if (metadata.baseSha !== actual.baseSha) {
+          const forwardCompatibleBaseSha = await isCommitAncestorInWorktree(
+            input.worktreePath,
+            metadata.baseSha,
+            actual.baseSha,
+          )
+          if (forwardCompatibleBaseSha) {
+            expected = {
+              ...expected,
+              baseSha: actual.baseSha,
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.warn(
+          `[daemon] ignoring invalid PR lineage metadata for ${input.branch}: ${formatDaemonError(error)}`,
+        )
+      }
+    }
+
+    const result = evaluatePrLineagePreflight({
+      expected,
+      actual,
+    })
+    if (!result.ok) {
+      throw new PrLineagePreflightError(input.stage, result)
+    }
+  }
+
+  private async resolveBranchPullRequestRecord(
+    branch: string,
+    prNumber: number,
+  ): Promise<BranchPullRequestRecord | null> {
+    const pullRequests = await listBranchPullRequests(branch, this.config)
+    return pullRequests.find(pullRequest => pullRequest.number === prNumber) ?? null
   }
 
   private enqueueWakeRequests(requests: WakeRequest[]): void {
@@ -2090,19 +2175,6 @@ export class AgentDaemon {
     const reviewLabels = new Set(pr.labels)
     const issueNumber = extractIssueNumberFromPrTitle(pr.title)
     const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
-    if (
-      issueNumber !== null
-      && linkedIssue
-      && linkedIssue.state !== 'working'
-      && linkedIssue.state !== 'done'
-    ) {
-      await this.transitionStandaloneIssue(
-        issueNumber,
-        ISSUE_LABELS.WORKING,
-        `Standalone PR review running for PR #${pr.number}`,
-        pr.number,
-      )
-    }
     const resumableHumanNeededReview = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
       && canResumeHumanNeededPrReview(
         priorComments,
@@ -2126,6 +2198,40 @@ export class AgentDaemon {
     let leaseReason: string | undefined
     let leaseRecoveryKind: string | undefined
     try {
+      try {
+        await this.runPrLineagePreflightOrThrow({
+          stage: 'PR review',
+          worktreePath: detached.worktreePath,
+          branch: pr.headRefName,
+          issueNumber,
+          issueBody: linkedIssue?.body ?? null,
+          prNumber: pr.number,
+          detachedHead: true,
+        })
+      } catch (error) {
+        if (error instanceof PrLineagePreflightError) {
+          this.logger.warn(`[pr-review-subagent] blocked PR #${pr.number} by lineage preflight: ${error.message}`)
+          leaseReason = error.message
+          leaseRecoveryKind = 'pr-review-lineage-blocked'
+          return
+        }
+        throw error
+      }
+
+      if (
+        issueNumber !== null
+        && linkedIssue
+        && linkedIssue.state !== 'working'
+        && linkedIssue.state !== 'done'
+      ) {
+        await this.transitionStandaloneIssue(
+          issueNumber,
+          ISSUE_LABELS.WORKING,
+          `Standalone PR review running for PR #${pr.number}`,
+          pr.number,
+        )
+      }
+
       const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
       let currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
       const worktreeBaseSyncState = await readWorktreeBaseSyncState(
@@ -2436,6 +2542,8 @@ export class AgentDaemon {
 
   private async processStandaloneApprovedPrMerge(pr: ManagedPullRequest): Promise<void> {
     this.logger.log(`[pr-merge-subagent] attempting merge for approved PR #${pr.number}: "${pr.title}"`)
+    const issueNumber = extractIssueNumberFromPrTitle(pr.title)
+    const linkedIssue = issueNumber === null ? null : await getAgentIssueByNumber(issueNumber, this.config)
     const lease = await this.acquireLeaseForScope({
       targetNumber: pr.number,
       scope: 'pr-merge',
@@ -2443,7 +2551,7 @@ export class AgentDaemon {
       worktreeId: `pr-merge-${pr.number}`,
       phase: 'pr-merge',
       prNumber: pr.number,
-      issueNumber: extractIssueNumberFromPrTitle(pr.title) ?? undefined,
+      issueNumber: issueNumber ?? undefined,
     })
     if (!lease) return
 
@@ -2452,6 +2560,26 @@ export class AgentDaemon {
     let leaseReason: string | undefined
     let leaseRecoveryKind: string | undefined
     try {
+      try {
+        await this.runPrLineagePreflightOrThrow({
+          stage: 'PR merge',
+          worktreePath: detached.worktreePath,
+          branch: pr.headRefName,
+          issueNumber,
+          issueBody: linkedIssue?.body ?? null,
+          prNumber: pr.number,
+          detachedHead: true,
+        })
+      } catch (error) {
+        if (error instanceof PrLineagePreflightError) {
+          this.logger.warn(`[pr-merge-subagent] blocked PR #${pr.number} by lineage preflight: ${error.message}`)
+          leaseReason = error.message
+          leaseRecoveryKind = 'pr-merge-lineage-blocked'
+          return
+        }
+        throw error
+      }
+
       const mergeResult = await this.attemptApprovedPrMergeWithRecovery(
         pr.number,
         pr.url,
@@ -2487,7 +2615,6 @@ export class AgentDaemon {
         return
       }
 
-      const issueNumber = extractIssueNumberFromPrTitle(pr.title)
       if (issueNumber !== null) {
         await this.transitionStandaloneIssue(
           issueNumber,
@@ -2607,32 +2734,6 @@ export class AgentDaemon {
       worktreePath = ensured.worktreePath
       worktreeId = ensured.worktreeId
 
-      if (issue.state === 'failed') {
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          ISSUE_LABELS.FAILED,
-          buildIssueWorkingTransitionEvent(
-            'resume',
-            this.config.machineId,
-            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          ),
-          this.config,
-        )
-      } else {
-        await transitionIssueState(
-          issueNumber,
-          ISSUE_LABELS.WORKING,
-          ISSUE_LABELS.WORKING,
-          buildIssueWorkingTransitionEvent(
-            'resume',
-            this.config.machineId,
-            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
-          ),
-          this.config,
-        )
-      }
-
       const wt: WorktreeInfo = {
         path: worktreePath,
         issueNumber,
@@ -2666,6 +2767,61 @@ export class AgentDaemon {
       const linkedOpenPr = hasReusableOpenPr(prCheck)
         ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
         : null
+      try {
+        await this.runPrLineagePreflightOrThrow({
+          stage: 'issue recovery',
+          worktreePath,
+          branch,
+          issueNumber,
+          issueBody: issue.body,
+          prNumber: linkedOpenPr?.number ?? null,
+        })
+      } catch (error) {
+        if (error instanceof PrLineagePreflightError) {
+          this.logger.warn(`[daemon] issue #${issueNumber} blocked by PR lineage preflight: ${error.message}`)
+          this.registerFailedIssueResume(issueNumber)
+          await this.completeManagedLease(
+            'issue-process',
+            issueNumber,
+            leaseHandle,
+            'completed',
+            error.message,
+            'issue-process-pr-lineage-blocked',
+          )
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+          recordIssueProcessingDuration(Date.now() - processingStartTime)
+          return
+        }
+        throw error
+      }
+
+      if (issue.state === 'failed') {
+        await transitionIssueState(
+          issueNumber,
+          ISSUE_LABELS.WORKING,
+          ISSUE_LABELS.FAILED,
+          buildIssueWorkingTransitionEvent(
+            'resume',
+            this.config.machineId,
+            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          ),
+          this.config,
+        )
+      } else {
+        await transitionIssueState(
+          issueNumber,
+          ISSUE_LABELS.WORKING,
+          ISSUE_LABELS.WORKING,
+          buildIssueWorkingTransitionEvent(
+            'resume',
+            this.config.machineId,
+            candidate.requiresRemoteAdoption ? 'resume-expired-lease' : 'resume-existing-worktree',
+          ),
+          this.config,
+        )
+      }
+
       if (prCheck.prNumber !== null && prCheck.prState !== 'open') {
         this.logger.warn(
           `[daemon] skipping terminal linked PR #${prCheck.prNumber} (${prCheck.prState}) during issue #${issueNumber} recovery`,
@@ -2766,6 +2922,18 @@ export class AgentDaemon {
         this.failedIssueResumeAttempts.delete(issueNumber)
         this.failedIssueResumeCooldownUntil.delete(issueNumber)
         await this.completeManagedLease('issue-process', issueNumber, leaseHandle, 'completed')
+        this.syncRuntimeMetrics()
+      } else if (finalized.status === 'blocked') {
+        this.registerFailedIssueResume(issueNumber)
+        await this.completeManagedLease(
+          'issue-process',
+          issueNumber,
+          leaseHandle,
+          'completed',
+          finalized.reason,
+          'issue-process-pr-lineage-blocked',
+        )
+        this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       } else if (finalized.status === 'recoverable') {
         await this.markIssueRecoverable(issueNumber, finalized.reason ?? 'recoverable resume handoff')
@@ -3101,7 +3269,7 @@ export class AgentDaemon {
     issue: AgentIssue,
     worktreePath: string,
     branch: string,
-  ): Promise<{ status: 'completed' | 'failed' | 'recoverable'; reason?: string }> {
+  ): Promise<{ status: 'completed' | 'failed' | 'recoverable' | 'blocked'; reason?: string }> {
     let activeBranch = branch
 
     const preflight = await runIssueBranchPreflight(worktreePath, issue.body, this.config, this.logger)
@@ -3135,7 +3303,28 @@ export class AgentDaemon {
       }
     }
 
-    const pr = await createOrFindPr(worktreePath, activeBranch, issue.number, issue.title, this.config, this.logger)
+    let pr: Awaited<ReturnType<typeof createOrFindPr>>
+    try {
+      pr = await createOrFindPr(
+        worktreePath,
+        activeBranch,
+        issue.number,
+        issue.title,
+        this.config,
+        this.logger,
+        {},
+        issue.body,
+      )
+    } catch (error) {
+      if (error instanceof PrLineagePreflightError) {
+        this.logger.warn(`[daemon] issue #${issue.number} blocked by PR lineage preflight: ${error.message}`)
+        return {
+          status: 'blocked',
+          reason: error.message,
+        }
+      }
+      throw error
+    }
     if (pr.branch !== activeBranch) {
       activeBranch = pr.branch
       const activeWorktree = this.activeWorktrees.get(issue.number)
@@ -3172,6 +3361,26 @@ export class AgentDaemon {
         status: 'failed',
         reason,
       }
+    }
+
+    try {
+      await this.runPrLineagePreflightOrThrow({
+        stage: 'PR review',
+        worktreePath,
+        branch: activeBranch,
+        issueNumber: issue.number,
+        issueBody: issue.body,
+        prNumber: pr.prNumber,
+      })
+    } catch (error) {
+      if (error instanceof PrLineagePreflightError) {
+        this.logger.warn(`[daemon] issue #${issue.number} blocked before PR review: ${error.message}`)
+        return {
+          status: 'blocked',
+          reason: error.message,
+        }
+      }
+      throw error
     }
 
     const reviewLease = await this.acquireLeaseForScope({
@@ -3218,6 +3427,26 @@ export class AgentDaemon {
     await this.completeManagedLease('pr-review', pr.prNumber, reviewLease.handle, 'completed')
 
     if (reviewOutcome.approved) {
+      try {
+        await this.runPrLineagePreflightOrThrow({
+          stage: 'PR merge',
+          worktreePath,
+          branch: activeBranch,
+          issueNumber: issue.number,
+          issueBody: issue.body,
+          prNumber: pr.prNumber,
+        })
+      } catch (error) {
+        if (error instanceof PrLineagePreflightError) {
+          this.logger.warn(`[daemon] issue #${issue.number} blocked before PR merge: ${error.message}`)
+          return {
+            status: 'blocked',
+            reason: error.message,
+          }
+        }
+        throw error
+      }
+
       const mergeLease = await this.acquireLeaseForScope({
         targetNumber: pr.prNumber,
         scope: 'pr-merge',
@@ -3418,7 +3647,19 @@ export class AgentDaemon {
 
       if (result.success) {
         const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch)
-        if (finalized.status === 'recoverable') {
+        if (finalized.status === 'blocked') {
+          this.registerFailedIssueResume(issueNumber)
+          await this.completeManagedLease(
+            'issue-process',
+            issueNumber,
+            leaseHandle,
+            'completed',
+            finalized.reason,
+            'issue-process-pr-lineage-blocked',
+          )
+          this.activeWorktrees.delete(issueNumber)
+          this.syncRuntimeMetrics()
+        } else if (finalized.status === 'recoverable') {
           await this.markIssueRecoverable(issueNumber, finalized.reason ?? 'recoverable issue handoff')
           await this.completeManagedLease(
             'issue-process',
@@ -4456,7 +4697,7 @@ export function getFailedIssueResumeBlock(
 }
 
 export function shouldClearFailedIssueResumeTrackingAfterFinalize(
-  status: 'completed' | 'failed' | 'recoverable',
+  status: 'completed' | 'failed' | 'recoverable' | 'blocked',
 ): boolean {
   return status === 'failed'
 }
@@ -4883,6 +5124,9 @@ export function shouldResumeManagedIssue(
   if (!hasLocalWorktree) return false
 
   if (issue.state === 'working' || issue.state === 'stale') {
+    if (attempts > 0 && cooldownUntil > now) {
+      return false
+    }
     return true
   }
 

@@ -232,6 +232,7 @@ describe('createOrFindPr', () => {
         pushBranch: async () => {
           pushCalls += 1
         },
+        runPrLineagePreflight: async () => {},
         prepareReplacementBranch: async (_worktreePath, branch) => {
           preparedBranch = branch
         },
@@ -296,6 +297,7 @@ describe('createOrFindPr', () => {
         pushBranch: async () => {
           pushCalls += 1
         },
+        runPrLineagePreflight: async () => {},
         createPr: async () => {
           createCalls += 1
           return { number: 99, url: 'https://example.test/pr/99' }
@@ -335,6 +337,7 @@ describe('createOrFindPr', () => {
       {
         listBranchPullRequests: async () => [],
         pushBranch: async () => {},
+        runPrLineagePreflight: async () => {},
         resolvePrLineageContext: async () => ({
           baseBranch: 'master',
           baseSha: '11fc78e',
@@ -410,6 +413,7 @@ describe('createOrFindPr', () => {
           baseBranch: 'master',
           baseSha: '11fc78e',
         }),
+        runPrLineagePreflight: async () => {},
         prepareReplacementBranch: async () => {},
         pushBranch: async () => {},
         commentOnPr: async () => {},
@@ -430,5 +434,39 @@ describe('createOrFindPr', () => {
       'agent/37/codex-dev',
       'agent/37-rebuild/codex-dev',
     ])
+  })
+
+  test('fails fast when PR creation preflight reports polluted lineage state', async () => {
+    let pushCalls = 0
+    let createCalls = 0
+
+    await expect(createOrFindPr(
+      '/tmp/agent-loop-preflight-block',
+      'agent/37/codex-dev',
+      37,
+      'block polluted lineage push',
+      TEST_CONFIG,
+      console,
+      {
+        listBranchPullRequests: async () => [],
+        resolvePrLineageContext: async () => ({
+          baseBranch: 'master',
+          baseSha: '11fc78e',
+        }),
+        runPrLineagePreflight: async () => {
+          throw new Error('PR lineage preflight failed before PR creation: base sha mismatch: expected 11fc78e but found 0176283')
+        },
+        pushBranch: async () => {
+          pushCalls += 1
+        },
+        createPr: async () => {
+          createCalls += 1
+          return { number: 99, url: 'https://example.test/pr/99' }
+        },
+      },
+    )).rejects.toThrow('PR lineage preflight failed before PR creation')
+
+    expect(pushCalls).toBe(0)
+    expect(createCalls).toBe(0)
   })
 })

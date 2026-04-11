@@ -1,11 +1,17 @@
 import type { AgentConfig, BranchPullRequestRecord, PrCheckResult, PrLineageMetadata } from '@agent/shared'
 import { checkPrExists, closePullRequest, commentOnPr, createPr, listBranchPullRequests } from '@agent/shared'
+import { parseIssueContract } from '@agent/shared'
 import {
   buildPrLineageMetadata,
   buildSupersededPrComment,
   choosePrLifecycleAction,
   renderPrLineageMetadataComment,
 } from './pr-lineage'
+import {
+  PrLineagePreflightError,
+  collectPrLineagePreflightActualState,
+  evaluatePrLineagePreflight,
+} from './pr-lineage-preflight'
 
 interface GitCommandResult {
   exitCode: number
@@ -41,6 +47,14 @@ interface CreateOrFindPrDependencies {
   commentOnPr?: typeof commentOnPr
   closePullRequest?: typeof closePullRequest
   prepareReplacementBranch?: typeof prepareReplacementBranch
+  runPrLineagePreflight?: (input: {
+    worktreePath: string
+    branch: string
+    issueNumber: number
+    issueBody?: string
+    lineageContext: ResolvedPrLineageContext
+    strictBaseSha: boolean
+  }) => Promise<void>
 }
 
 export type CreateOrFindPrResult =
@@ -305,6 +319,35 @@ async function markSupersededPullRequest(
   }
 }
 
+async function runCreateOrFindPrLineagePreflight(input: {
+  worktreePath: string
+  branch: string
+  issueNumber: number
+  issueBody?: string
+  lineageContext: ResolvedPrLineageContext
+  strictBaseSha: boolean
+}): Promise<void> {
+  const actual = await collectPrLineagePreflightActualState({
+    worktreePath: input.worktreePath,
+    expectedBaseBranch: input.lineageContext.baseBranch,
+  })
+  const contract = parseIssueContract(input.issueBody ?? '')
+  const result = evaluatePrLineagePreflight({
+    expected: {
+      issueNumber: input.issueNumber,
+      headBranch: input.branch,
+      baseBranch: input.lineageContext.baseBranch,
+      baseSha: input.strictBaseSha ? input.lineageContext.baseSha : actual.baseSha,
+      allowedChangedFiles: contract.allowedFiles,
+    },
+    actual,
+  })
+
+  if (!result.ok) {
+    throw new PrLineagePreflightError('PR creation', result)
+  }
+}
+
 /**
  * Create a PR for the given branch (idempotent).
  * Checks if PR already exists before creating.
@@ -317,12 +360,14 @@ export async function createOrFindPr(
   config: AgentConfig,
   logger = console,
   dependencies: CreateOrFindPrDependencies = {},
+  issueBody?: string,
 ): Promise<CreateOrFindPrResult> {
   const createPullRequest = dependencies.createPr ?? createPr
   const pushManagedBranch = dependencies.pushBranch ?? pushBranch
   const resolveLineageContext = dependencies.resolvePrLineageContext ?? resolvePrLineageContext
   const listBranchPrs = dependencies.listBranchPullRequests ?? listBranchPullRequests
   const switchToReplacementBranch = dependencies.prepareReplacementBranch ?? prepareReplacementBranch
+  const runLineagePreflight = dependencies.runPrLineagePreflight ?? runCreateOrFindPrLineagePreflight
 
   const lineageContext = await resolveLineageContext(worktreePath, config)
   let currentBranch = branch
@@ -354,6 +399,14 @@ export async function createOrFindPr(
     }
 
     if (lifecycle.kind === 'reuse-open-lineage') {
+      await runLineagePreflight({
+        worktreePath,
+        branch: currentBranch,
+        issueNumber,
+        issueBody,
+        lineageContext,
+        strictBaseSha: true,
+      })
       await pushManagedBranch(worktreePath, currentBranch, logger)
       for (const target of supersedeTargets) {
         await markSupersededPullRequest(target.pullRequest, {
@@ -367,6 +420,14 @@ export async function createOrFindPr(
     }
 
     if (lifecycle.kind === 'create-new-pr') {
+      await runLineagePreflight({
+        worktreePath,
+        branch: currentBranch,
+        issueNumber,
+        issueBody,
+        lineageContext,
+        strictBaseSha: supersedeTargets.length > 0 || candidates.length > 0,
+      })
       await pushManagedBranch(worktreePath, currentBranch, logger)
       const lineageMetadata = await resolvePrLineageMetadata(
         currentBranch,
