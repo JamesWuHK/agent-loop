@@ -156,6 +156,31 @@ describe('issue-splitter helpers', () => {
     expect(prompt).toContain('strict JSON object')
     expect(prompt).toContain('Candidate Allowed Files')
     expect(prompt).toContain('apps/agent-daemon/src/issue-splitter.ts')
+    expect(prompt).not.toContain('Preferred Allowed Files')
+  })
+
+  test('buildTrackingIssueSplitPrompt renders project issue rules when configured', () => {
+    const prompt = buildTrackingIssueSplitPrompt({
+      title: '[AL-EPIC] issue repair pipeline',
+      body: '父 issue 负责串起 repair authoring 子线。',
+      issueText: '父 issue 负责串起 repair authoring 子线。',
+      authoringContext: {
+        candidateValidationCommands: ['bun test apps/agent-daemon/src/issue-repair.test.ts'],
+        candidateAllowedFiles: ['apps/agent-daemon/src/issue-repair.ts'],
+        candidateForbiddenFiles: ['apps/agent-daemon/src/dashboard.ts'],
+        projectIssueRules: {
+          preferredValidationCommands: ['bun test apps/agent-daemon/src/issue-repair.test.ts'],
+          preferredAllowedFiles: ['apps/agent-daemon/src/issue-repair.ts'],
+          forbiddenPaths: ['apps/agent-daemon/src/dashboard.ts'],
+          reviewHints: ['优先检查 repair 流程是否保留合法的 Dependencies JSON'],
+        },
+      },
+    })
+
+    expect(prompt).toContain('Project Issue Rules')
+    expect(prompt).toContain('Preferred Allowed Files')
+    expect(prompt).toContain('Forbidden Paths')
+    expect(prompt).toContain('优先检查 repair 流程是否保留合法的 Dependencies JSON')
   })
 
   test('parseTrackingIssueSplitPlan falls back to numbered-list parsing', () => {

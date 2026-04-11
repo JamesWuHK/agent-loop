@@ -110,9 +110,24 @@ export interface ProjectPromptGuidanceOverrides {
   recovery?: string[]
 }
 
+export interface ProjectIssueAuthoringRules {
+  preferredValidationCommands?: string[]
+  preferredAllowedFiles?: string[]
+  forbiddenPaths?: string[]
+  reviewHints?: string[]
+}
+
+export interface ResolvedProjectIssueAuthoringRules {
+  preferredValidationCommands: string[]
+  preferredAllowedFiles: string[]
+  forbiddenPaths: string[]
+  reviewHints: string[]
+}
+
 export interface ProjectProfileConfig {
   profile: ProjectProfileName
   promptGuidance?: ProjectPromptGuidanceOverrides
+  issueAuthoring?: ProjectIssueAuthoringRules
   maxConcurrency?: number
 }
 
@@ -138,6 +153,7 @@ export interface BuildRepoAuthoringContextInput {
   issueText: string
   issueTitle?: string
   issueBody?: string
+  project?: ProjectProfileConfig
   repoRelativeFilePaths?: string[]
   rootPackageJsonPath?: string
   workspacePackageJsonPaths?: string[]
@@ -147,6 +163,7 @@ export interface RepoAuthoringContext {
   candidateValidationCommands: string[]
   candidateAllowedFiles: string[]
   candidateForbiddenFiles: string[]
+  projectIssueRules?: ResolvedProjectIssueAuthoringRules
 }
 
 export interface AgentSchedulingConfig {

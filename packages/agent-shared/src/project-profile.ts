@@ -1,7 +1,9 @@
 import type {
+  ProjectIssueAuthoringRules,
   ProjectProfileConfig,
   ProjectProfileName,
   ProjectPromptContext,
+  ResolvedProjectIssueAuthoringRules,
 } from './types'
 
 const BUILTIN_GUIDANCE: Record<ProjectProfileName, Partial<Record<ProjectPromptContext, string[]>>> = {
@@ -45,3 +47,55 @@ export function getProjectPromptGuidance(
   return [...builtin, ...overrides]
 }
 
+export function getProjectIssueAuthoringRules(
+  project: ProjectProfileConfig | undefined,
+): ResolvedProjectIssueAuthoringRules {
+  const configuredRules = project?.issueAuthoring
+
+  return {
+    preferredValidationCommands: normalizeProjectIssueAuthoringValues(
+      configuredRules?.preferredValidationCommands,
+    ),
+    preferredAllowedFiles: normalizeProjectIssueAuthoringValues(
+      configuredRules?.preferredAllowedFiles,
+    ),
+    forbiddenPaths: normalizeProjectIssueAuthoringValues(
+      configuredRules?.forbiddenPaths,
+    ),
+    reviewHints: normalizeProjectIssueAuthoringValues(
+      configuredRules?.reviewHints,
+    ),
+  }
+}
+
+export function hasProjectIssueAuthoringRules(
+  rules: ProjectIssueAuthoringRules | ResolvedProjectIssueAuthoringRules | undefined,
+): boolean {
+  if (!rules) {
+    return false
+  }
+
+  return (
+    (rules.preferredValidationCommands?.length ?? 0) > 0
+    || (rules.preferredAllowedFiles?.length ?? 0) > 0
+    || (rules.forbiddenPaths?.length ?? 0) > 0
+    || (rules.reviewHints?.length ?? 0) > 0
+  )
+}
+
+function normalizeProjectIssueAuthoringValues(values: string[] | undefined): string[] {
+  const normalizedValues: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values ?? []) {
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) {
+      continue
+    }
+
+    seen.add(normalized)
+    normalizedValues.push(normalized)
+  }
+
+  return normalizedValues
+}

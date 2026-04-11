@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import { getProjectPromptGuidance } from './project-profile'
+import {
+  getProjectIssueAuthoringRules,
+  getProjectPromptGuidance,
+  hasProjectIssueAuthoringRules,
+} from './project-profile'
 
 describe('getProjectPromptGuidance', () => {
   it('defaults to generic guidance when no project profile is configured', () => {
@@ -25,5 +29,74 @@ describe('getProjectPromptGuidance', () => {
     }, 'implementation')
 
     expect(guidance.at(-1)).toBe('Run `pytest` instead of inventing a JS harness.')
+  })
+
+  it('normalizes project issue authoring rules without changing prompt guidance order', () => {
+    const guidance = getProjectPromptGuidance({
+      profile: 'desktop-vite',
+      promptGuidance: {
+        implementation: ['Keep desktop validation commands explicit.'],
+      },
+      issueAuthoring: {
+        preferredValidationCommands: [
+          '  bun test apps/agent-daemon/src/issue-repair.test.ts  ',
+          'bun test apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        preferredAllowedFiles: [
+          'apps/agent-daemon/src/issue-repair.ts',
+          '',
+          'apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        forbiddenPaths: [
+          'apps/agent-daemon/src/dashboard.ts',
+          'apps/agent-daemon/src/dashboard.ts',
+        ],
+        reviewHints: [
+          '  优先检查 repair 流程是否保留合法的 Dependencies JSON  ',
+        ],
+      },
+    }, 'implementation')
+
+    const rules = getProjectIssueAuthoringRules({
+      profile: 'desktop-vite',
+      issueAuthoring: {
+        preferredValidationCommands: [
+          '  bun test apps/agent-daemon/src/issue-repair.test.ts  ',
+          'bun test apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        preferredAllowedFiles: [
+          'apps/agent-daemon/src/issue-repair.ts',
+          '',
+          'apps/agent-daemon/src/issue-repair.test.ts',
+        ],
+        forbiddenPaths: [
+          'apps/agent-daemon/src/dashboard.ts',
+          'apps/agent-daemon/src/dashboard.ts',
+        ],
+        reviewHints: [
+          '  优先检查 repair 流程是否保留合法的 Dependencies JSON  ',
+        ],
+      },
+    })
+
+    expect(guidance[0]).toContain('existing Vitest/jsdom setup')
+    expect(guidance.at(-1)).toBe('Keep desktop validation commands explicit.')
+    expect(rules).toEqual({
+      preferredValidationCommands: [
+        'bun test apps/agent-daemon/src/issue-repair.test.ts',
+      ],
+      preferredAllowedFiles: [
+        'apps/agent-daemon/src/issue-repair.ts',
+        'apps/agent-daemon/src/issue-repair.test.ts',
+      ],
+      forbiddenPaths: [
+        'apps/agent-daemon/src/dashboard.ts',
+      ],
+      reviewHints: [
+        '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+      ],
+    })
+    expect(hasProjectIssueAuthoringRules(rules)).toBe(true)
+    expect(hasProjectIssueAuthoringRules(undefined)).toBe(false)
   })
 })

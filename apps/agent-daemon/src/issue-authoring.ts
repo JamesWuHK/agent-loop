@@ -1,8 +1,10 @@
 import {
   buildIssueQualityReport,
+  hasProjectIssueAuthoringRules,
   parseIssueContract,
   type AgentConfig,
   type IssueQualityReport,
+  type ProjectProfileConfig,
   type RepoAuthoringContext,
 } from '@agent/shared'
 import { runConfiguredAgent } from './cli-agent'
@@ -25,6 +27,7 @@ export interface RewriteIssueDraftInput {
   buildAuthoringContext?: (input: {
     repoRoot: string
     issueText: string
+    project?: ProjectProfileConfig
   }) => Promise<RepoAuthoringContext>
   runAgent?: (
     input: IssueAuthoringAgentRunInput,
@@ -44,6 +47,7 @@ export async function rewriteIssueDraft(
   const authoringContext = await buildContext({
     repoRoot: input.repoRoot,
     issueText: input.issueText,
+    project: input.config?.project,
   })
   const prompt = buildIssueRewritePrompt({
     issueText: input.issueText,
@@ -84,6 +88,7 @@ export function buildIssueRewritePrompt(input: {
     '- 必须使用现有 canonical section 结构，并保留 `### Dependencies` 的 fenced JSON。',
     '- `### Validation` 必须只包含可执行命令。',
     '- 优先使用 repo-grounded authoring context 提供的候选路径和命令，不要猜宽泛 scope。',
+    '- 如果提供了 Project Issue Rules，必须优先遵守其中的 preferred paths、validation commands 与 review concerns。',
     'Canonical section order:',
     '1. `## 用户故事`',
     '2. `## Context`',
@@ -99,6 +104,7 @@ export function buildIssueRewritePrompt(input: {
     '12. `## RED 测试`',
     '13. `## 实现步骤`',
     '14. `## 验收`',
+    renderProjectIssueRulesBlock(input.authoringContext),
     renderSuggestionBlock('Candidate Validation Commands', input.authoringContext.candidateValidationCommands),
     renderSuggestionBlock('Candidate Allowed Files', input.authoringContext.candidateAllowedFiles),
     renderSuggestionBlock('Candidate Forbidden Files', input.authoringContext.candidateForbiddenFiles),
@@ -125,13 +131,34 @@ function renderSuggestionBlock(title: string, values: string[]): string {
   return `${title}:\n${values.map((value) => `- ${value}`).join('\n')}`
 }
 
+function renderProjectIssueRulesBlock(authoringContext: RepoAuthoringContext): string | null {
+  const projectIssueRules = authoringContext.projectIssueRules
+  if (!projectIssueRules || !hasProjectIssueAuthoringRules(projectIssueRules)) {
+    return null
+  }
+
+  const sections = [
+    renderSuggestionBlock('Preferred Validation Commands', projectIssueRules.preferredValidationCommands),
+    renderSuggestionBlock('Preferred Allowed Files', projectIssueRules.preferredAllowedFiles),
+    renderSuggestionBlock('Forbidden Paths', projectIssueRules.forbiddenPaths),
+    renderSuggestionBlock('Review Hints', projectIssueRules.reviewHints),
+  ]
+
+  return [
+    'Project Issue Rules:',
+    ...sections,
+  ].join('\n\n')
+}
+
 async function defaultBuildAuthoringContext(input: {
   repoRoot: string
   issueText: string
+  project?: ProjectProfileConfig
 }): Promise<RepoAuthoringContext> {
   return buildRepoAuthoringContext({
     repoRoot: input.repoRoot,
     issueText: input.issueText,
+    project: input.project,
   })
 }
 

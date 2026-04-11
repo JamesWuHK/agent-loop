@@ -1,6 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
-import type { BuildRepoAuthoringContextInput, RepoAuthoringContext } from '@agent/shared'
+import {
+  getProjectIssueAuthoringRules,
+  hasProjectIssueAuthoringRules,
+  type BuildRepoAuthoringContextInput,
+  type RepoAuthoringContext,
+} from '@agent/shared'
 
 interface PackageManifestRecord {
   scripts?: Record<string, unknown>
@@ -57,17 +62,35 @@ export async function buildRepoAuthoringContext(
   const repoFiles = input.repoRelativeFilePaths
     ? sanitizeRepoRelativeFilePaths(repoRoot, input.repoRelativeFilePaths)
     : collectRepoFiles(repoRoot)
-  const candidateAllowedFiles = collectCandidateAllowedFiles(resolveIssueText(input), repoFiles)
-
-  return {
-    candidateValidationCommands: collectCandidateValidationCommands(repoRoot, packageManifests),
-    candidateAllowedFiles,
-    candidateForbiddenFiles: collectCandidateForbiddenFiles(
+  const projectIssueRules = getProjectIssueAuthoringRules(input.project)
+  const scannedValidationCommands = collectCandidateValidationCommands(repoRoot, packageManifests)
+  const scannedAllowedFiles = collectCandidateAllowedFiles(resolveIssueText(input), repoFiles)
+  const candidateAllowedFiles = mergeOrderedAuthoringValues(
+    sanitizeRepoRelativeFilePaths(repoRoot, projectIssueRules.preferredAllowedFiles, true),
+    scannedAllowedFiles,
+  )
+  const candidateForbiddenFiles = mergeOrderedAuthoringValues(
+    sanitizeRepoRelativeFilePaths(repoRoot, projectIssueRules.forbiddenPaths, true),
+    collectCandidateForbiddenFiles(
       repoFiles,
-      candidateAllowedFiles,
+      scannedAllowedFiles,
       packageManifests.map((manifest) => manifest.dir),
     ),
+  )
+  const context: RepoAuthoringContext = {
+    candidateValidationCommands: mergeOrderedAuthoringValues(
+      projectIssueRules.preferredValidationCommands,
+      scannedValidationCommands,
+    ),
+    candidateAllowedFiles,
+    candidateForbiddenFiles,
   }
+
+  if (hasProjectIssueAuthoringRules(projectIssueRules)) {
+    context.projectIssueRules = projectIssueRules
+  }
+
+  return context
 }
 
 function collectCandidateValidationCommands(
@@ -419,9 +442,30 @@ function resolveIssueText(input: BuildRepoAuthoringContextInput): string {
     .join('\n')
 }
 
+function mergeOrderedAuthoringValues(
+  preferredValues: string[],
+  scannedValues: string[],
+): string[] {
+  const mergedValues: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of [...preferredValues, ...scannedValues]) {
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) {
+      continue
+    }
+
+    seen.add(normalized)
+    mergedValues.push(normalized)
+  }
+
+  return mergedValues
+}
+
 function sanitizeRepoRelativeFilePaths(
   repoRoot: string,
   repoRelativeFilePaths: string[],
+  preserveInputOrder = false,
 ): string[] {
   const seen = new Set<string>()
   const sanitized: string[] = []
@@ -446,7 +490,9 @@ function sanitizeRepoRelativeFilePaths(
     sanitized.push(repoRelativePath)
   }
 
-  return sanitized.sort((left, right) => left.localeCompare(right))
+  return preserveInputOrder
+    ? sanitized
+    : sanitized.sort((left, right) => left.localeCompare(right))
 }
 
 function collectPackageManifests(

@@ -194,6 +194,29 @@ describe('issue-authoring helpers', () => {
     expect(prompt).toContain('Candidate Validation Commands')
     expect(prompt).toContain('apps/agent-daemon/src/ready-gate.ts')
     expect(prompt).toContain('### Dependencies')
+    expect(prompt).not.toContain('Preferred Allowed Files')
+  })
+
+  test('buildIssueRewritePrompt renders project issue rules when configured', () => {
+    const prompt = buildIssueRewritePrompt({
+      issueText: '增加 issue repair CLI',
+      authoringContext: {
+        candidateValidationCommands: ['bun test apps/agent-daemon/src/issue-repair.test.ts'],
+        candidateAllowedFiles: ['apps/agent-daemon/src/issue-repair.ts'],
+        candidateForbiddenFiles: ['apps/agent-daemon/src/dashboard.ts'],
+        projectIssueRules: {
+          preferredValidationCommands: ['bun test apps/agent-daemon/src/issue-repair.test.ts'],
+          preferredAllowedFiles: ['apps/agent-daemon/src/issue-repair.ts'],
+          forbiddenPaths: ['apps/agent-daemon/src/dashboard.ts'],
+          reviewHints: ['优先检查 repair 流程是否保留合法的 Dependencies JSON'],
+        },
+      },
+    })
+
+    expect(prompt).toContain('Project Issue Rules')
+    expect(prompt).toContain('Preferred Validation Commands')
+    expect(prompt).toContain('Forbidden Paths')
+    expect(prompt).toContain('优先检查 repair 流程是否保留合法的 Dependencies JSON')
   })
 
   test('normalizeIssueRewriteMarkdown removes one outer fence and trims whitespace', () => {

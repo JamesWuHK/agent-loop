@@ -1,10 +1,12 @@
 import { existsSync } from 'node:fs'
 import {
   buildIssueQualityReport,
+  hasProjectIssueAuthoringRules,
   parseIssueContract,
   renderIssueContractForPrompt,
   type AgentConfig,
   type IssueQualityReport,
+  type ProjectProfileConfig,
   type RepoAuthoringContext,
 } from '@agent/shared'
 import { runConfiguredAgent } from './cli-agent'
@@ -56,6 +58,7 @@ export interface SplitTrackingIssueInput {
     issueText: string
     issueTitle?: string
     issueBody?: string
+    project?: ProjectProfileConfig
   }) => Promise<RepoAuthoringContext>
   runAgent?: (
     input: IssueSplitterAgentRunInput,
@@ -93,6 +96,7 @@ export async function splitTrackingIssue(
     issueText: source.issueText,
     issueTitle: source.title,
     issueBody: source.body,
+    project: input.config?.project,
   })
   const parentContract = parseIssueContract(source.body)
   const planPrompt = buildTrackingIssueSplitPrompt({
@@ -185,6 +189,7 @@ export function buildTrackingIssueSplitPrompt(input: {
     '- `children` 必须保持执行顺序；每个 child 都必须是 code-producing slice，而不是 investigation-only task。',
     '- `dependsOn` 只能引用更早的 sibling child，优先使用 child `id`；没有依赖就输出 `[]`。',
     '- `allowedFiles`、`outOfScope`、`requiredSemantics` 要尽量具体，能支撑 reviewer 和 auto-fix。',
+    '- 如果提供了 Project Issue Rules，必须显式遵守其中的 preferred paths、validation commands 与 review concerns。',
     '- parent issue 仍然是 tracking-only，不进入 `agent:ready`。',
     'JSON schema:',
     '```json',
@@ -204,6 +209,7 @@ export function buildTrackingIssueSplitPrompt(input: {
       ],
     }, null, 2),
     '```',
+    renderProjectIssueRulesBlock(input.authoringContext),
     renderSuggestionBlock('Candidate Validation Commands', input.authoringContext.candidateValidationCommands),
     renderSuggestionBlock('Candidate Allowed Files', input.authoringContext.candidateAllowedFiles),
     renderSuggestionBlock('Candidate Forbidden Files', input.authoringContext.candidateForbiddenFiles),
@@ -621,11 +627,31 @@ function renderSuggestionBlock(title: string, values: string[]): string {
   return `${title}:\n${values.map((value) => `- ${value}`).join('\n')}`
 }
 
+function renderProjectIssueRulesBlock(authoringContext: RepoAuthoringContext): string | null {
+  const projectIssueRules = authoringContext.projectIssueRules
+  if (!projectIssueRules || !hasProjectIssueAuthoringRules(projectIssueRules)) {
+    return null
+  }
+
+  const sections = [
+    renderSuggestionBlock('Preferred Validation Commands', projectIssueRules.preferredValidationCommands),
+    renderSuggestionBlock('Preferred Allowed Files', projectIssueRules.preferredAllowedFiles),
+    renderSuggestionBlock('Forbidden Paths', projectIssueRules.forbiddenPaths),
+    renderSuggestionBlock('Review Hints', projectIssueRules.reviewHints),
+  ]
+
+  return [
+    'Project Issue Rules:',
+    ...sections,
+  ].join('\n\n')
+}
+
 async function defaultBuildAuthoringContext(input: {
   repoRoot: string
   issueText: string
   issueTitle?: string
   issueBody?: string
+  project?: ProjectProfileConfig
 }): Promise<RepoAuthoringContext> {
   if (!existsSync(input.repoRoot)) {
     return {
@@ -640,6 +666,7 @@ async function defaultBuildAuthoringContext(input: {
     issueText: input.issueText,
     issueTitle: input.issueTitle,
     issueBody: input.issueBody,
+    project: input.project,
   })
 }
 
@@ -714,6 +741,7 @@ function renderDeterministicChildIssue(input: {
   const reviewHints = uniqueStrings([
     '优先检查 AllowedFiles 与 OutOfScope 是否仍然足够具体',
     '优先检查 dependsOn 是否只引用更早 child issues',
+    ...(input.authoringContext.projectIssueRules?.reviewHints ?? []),
     ...input.parentContract.reviewHints,
   ]).slice(0, 8)
   const validationCommands = selectValidationCommands(

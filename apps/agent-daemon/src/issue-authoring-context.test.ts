@@ -49,8 +49,8 @@ describe('buildRepoAuthoringContext', () => {
       'apps/example/src/App.tsx',
       'apps/example/src/main.tsx',
     ])
-    expect(context.candidateAllowedFiles.some((value) => value.startsWith(root))).toBe(false)
-    expect(context.candidateValidationCommands.some((value) => value.startsWith(root))).toBe(false)
+    expect(context.candidateAllowedFiles.some((value: string) => value.startsWith(root))).toBe(false)
+    expect(context.candidateValidationCommands.some((value: string) => value.startsWith(root))).toBe(false)
   })
 
   test('keeps validation command ordering stable across root and workspace manifests', async () => {
@@ -131,7 +131,7 @@ describe('buildRepoAuthoringContext', () => {
       'packages/agent-shared/src/project-profile.ts',
       'packages/agent-shared/src/project-profile.test.ts',
     ])
-    expect(context.candidateAllowedFiles.some((value) => value.startsWith('/'))).toBe(false)
+    expect(context.candidateAllowedFiles.some((value: string) => value.startsWith('/'))).toBe(false)
   })
 
   test('keeps allowed and forbidden file ordering stable for unsorted repo-relative inputs', async () => {
@@ -195,6 +195,60 @@ describe('buildRepoAuthoringContext', () => {
         'apps/web/src/router.tsx',
       ],
     })
-    expect(firstContext.candidateForbiddenFiles.some((value) => value.startsWith('/'))).toBe(false)
+    expect(firstContext.candidateForbiddenFiles.some((value: string) => value.startsWith('/'))).toBe(false)
+  })
+
+  test('merges project issue rules into authoring context without dropping repo-grounded candidates', async () => {
+    const context = await buildRepoAuthoringContext({
+      repoRoot: '/repo',
+      issueText: '增加 issue repair CLI',
+      repoRelativeFilePaths: [
+        'apps/agent-daemon/src/issue-repair.ts',
+        'apps/agent-daemon/src/issue-repair.test.ts',
+        'apps/agent-daemon/src/dashboard.ts',
+      ],
+      project: {
+        profile: 'generic',
+        issueAuthoring: {
+          preferredValidationCommands: [
+            'bun test apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          preferredAllowedFiles: [
+            'apps/agent-daemon/src/issue-repair.ts',
+            'apps/agent-daemon/src/issue-repair.test.ts',
+          ],
+          forbiddenPaths: [
+            'apps/agent-daemon/src/dashboard.ts',
+          ],
+          reviewHints: [
+            '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+          ],
+        },
+      },
+    })
+
+    expect(context.candidateValidationCommands).toContain(
+      'bun test apps/agent-daemon/src/issue-repair.test.ts',
+    )
+    expect(context.candidateAllowedFiles.slice(0, 2)).toEqual([
+      'apps/agent-daemon/src/issue-repair.ts',
+      'apps/agent-daemon/src/issue-repair.test.ts',
+    ])
+    expect(context.candidateForbiddenFiles).toContain('apps/agent-daemon/src/dashboard.ts')
+    expect(context.projectIssueRules).toEqual({
+      preferredValidationCommands: [
+        'bun test apps/agent-daemon/src/issue-repair.test.ts',
+      ],
+      preferredAllowedFiles: [
+        'apps/agent-daemon/src/issue-repair.ts',
+        'apps/agent-daemon/src/issue-repair.test.ts',
+      ],
+      forbiddenPaths: [
+        'apps/agent-daemon/src/dashboard.ts',
+      ],
+      reviewHints: [
+        '优先检查 repair 流程是否保留合法的 Dependencies JSON',
+      ],
+    })
   })
 })
