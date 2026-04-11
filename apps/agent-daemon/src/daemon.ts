@@ -4883,11 +4883,17 @@ export function shouldResetLinkedPrToRetryOnIssueResume(prLabels: string[]): boo
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) || labels.has(PR_REVIEW_LABELS.FAILED)
 }
 
+export function shouldUseOpenPrCheckForRecovery(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState'>,
+): prCheck is Pick<PrCheckResult, 'prState'> & { prNumber: number; prState: 'open' } {
+  return prCheck.prNumber !== null && prCheck.prState === 'open'
+}
+
 export function getIssueRecoveryLinkedPrContext(
   prCheck: Pick<PrCheckResult, 'prNumber' | 'prState' | 'prUrl'>,
   branch: string,
 ): { number: number; url: string; branch: string } | null {
-  if (prCheck.prNumber === null || prCheck.prState !== 'open' || !prCheck.prUrl) {
+  if (!shouldUseOpenPrCheckForRecovery(prCheck) || !prCheck.prUrl) {
     return null
   }
 
