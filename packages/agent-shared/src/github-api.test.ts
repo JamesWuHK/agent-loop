@@ -25,6 +25,7 @@ import {
   parseMergePrResponse,
   qualifyGhApiArgs,
   ghApiRaw,
+  setGitHubApiRequestObserver,
   sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
 } from './github-api'
@@ -147,9 +148,15 @@ describe('buildDirectGitHubApiRequest', () => {
 })
 
 describe('ghApiRaw', () => {
-  test('uses direct fetch for PAT-backed paginated REST requests', async () => {
+  test('uses direct fetch for PAT-backed paginated REST requests and emits request observations', async () => {
     const originalFetch = globalThis.fetch
     const seen: string[] = []
+    const observations: Array<{
+      transport: string
+      mode: string
+      outcome: string
+      durationMs: number
+    }> = []
     const config = {
       repo: 'JamesWuHK/digital-employee',
       pat: 'ghp_test',
@@ -186,6 +193,9 @@ describe('ghApiRaw', () => {
     }) as typeof fetch
 
     try {
+      setGitHubApiRequestObserver((observation) => {
+        observations.push(observation)
+      })
       const result = await ghApiRaw(
         ['repos/JamesWuHK/digital-employee/issues/334/comments', '--paginate'],
         config,
@@ -200,7 +210,15 @@ describe('ghApiRaw', () => {
         { id: 11, body: 'page-1', created_at: '2026-04-11T10:00:00.000Z', updated_at: '2026-04-11T10:00:00.000Z' },
         { id: 12, body: 'page-2', created_at: '2026-04-11T10:00:01.000Z', updated_at: '2026-04-11T10:00:01.000Z' },
       ])
+      expect(observations).toHaveLength(1)
+      expect(observations[0]).toMatchObject({
+        transport: 'rest',
+        mode: 'direct',
+        outcome: 'success',
+      })
+      expect((observations[0]?.durationMs ?? 0) >= 0).toBe(true)
     } finally {
+      setGitHubApiRequestObserver(null)
       globalThis.fetch = originalFetch
     }
   })

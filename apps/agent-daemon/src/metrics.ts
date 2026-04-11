@@ -24,6 +24,7 @@
  * - agent_loop_lease_heartbeat_age_seconds: Gauge of oldest held lease heartbeat age
  * - agent_loop_stalled_workers: Gauge of stalled workers tracked by the daemon
  * - agent_loop_transient_loop_errors_total: Counter of transient loop-level GitHub/network errors
+ * - agent_loop_github_api_requests_total: Counter of GitHub API requests (labels: transport, mode, outcome)
  * - agent_loop_wake_requests_total: Counter of wake requests queued/handled (labels: kind, outcome)
  * - agent_loop_last_transient_loop_error_age_seconds: Gauge of the most recent transient loop error age
  * - agent_loop_pending_wake_requests: Gauge of queued wake requests waiting in memory
@@ -32,6 +33,7 @@
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
+ * - agent_loop_github_api_request_duration_seconds: Histogram of GitHub API request durations
  * - agent_loop_wake_request_age_seconds: Histogram of wake request queue age when handled
  */
 
@@ -42,7 +44,12 @@ import {
   Registry,
   collectDefaultMetrics,
 } from 'prom-client'
-import type { ConcurrencyPolicy } from '@agent/shared'
+import type {
+  ConcurrencyPolicy,
+  GitHubApiMode,
+  GitHubApiOutcome,
+  GitHubApiTransport,
+} from '@agent/shared'
 
 export const METRICS_PORT_DEFAULT = 9090
 export const METRICS_PATH = '/metrics'
@@ -226,6 +233,20 @@ export const transientLoopErrorsTotal = new Counter({
   name: 'agent_loop_transient_loop_errors_total',
   help: 'Total number of transient loop-level GitHub or network errors that were deferred for retry',
   labelNames: ['kind'] as const,
+  registers: [registry],
+})
+
+/**
+ * Total number of GitHub API requests issued by the daemon.
+ * Labels:
+ *   - transport: "graphql" | "rest"
+ *   - mode: "direct" | "gh_cli"
+ *   - outcome: "success" | "error" | "timeout" | "rate_limited"
+ */
+export const githubApiRequestsTotal = new Counter({
+  name: 'agent_loop_github_api_requests_total',
+  help: 'Total number of GitHub API requests issued by the daemon',
+  labelNames: ['transport', 'mode', 'outcome'] as const,
   registers: [registry],
 })
 
@@ -469,6 +490,17 @@ export const worktreeCreationDurationSeconds = new Histogram({
 })
 
 /**
+ * Duration of GitHub API requests in seconds.
+ */
+export const githubApiRequestDurationSeconds = new Histogram({
+  name: 'agent_loop_github_api_request_duration_seconds',
+  help: 'Duration of GitHub API requests in seconds',
+  labelNames: ['transport', 'mode', 'outcome'] as const,
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
+  registers: [registry],
+})
+
+/**
  * Age of wake requests in seconds when they are handled.
  */
 export const wakeRequestAgeSeconds = new Histogram({
@@ -601,6 +633,19 @@ export function recordTransientLoopError(
   kind: 'startup-recovery' | 'poll-cycle',
 ): void {
   transientLoopErrorsTotal.inc({ kind })
+}
+
+/**
+ * Record a GitHub API request outcome and duration.
+ */
+export function recordGitHubApiRequest(
+  transport: GitHubApiTransport,
+  mode: GitHubApiMode,
+  outcome: GitHubApiOutcome,
+  durationMs: number,
+): void {
+  githubApiRequestsTotal.inc({ transport, mode, outcome })
+  githubApiRequestDurationSeconds.observe({ transport, mode, outcome }, durationMs / 1000)
 }
 
 /**

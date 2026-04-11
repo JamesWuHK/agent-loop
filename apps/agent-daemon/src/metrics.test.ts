@@ -10,6 +10,7 @@ import {
   recordLeaseConflict,
   recordRecoveryAction,
   recordTransientLoopError,
+  recordGitHubApiRequest,
   recordWorkerIdleTimeout,
   recordQueuedWakeRequest,
   recordHandledWakeRequest,
@@ -184,6 +185,21 @@ describe('metrics', () => {
       expect(metrics).toContain('kind="startup-recovery"')
       expect(metrics).toContain('agent_loop_worker_idle_timeouts_total')
       expect(metrics).toContain('scope="pr-review"')
+    })
+
+    test('tracks github api request outcomes and durations', async () => {
+      recordGitHubApiRequest('graphql', 'direct', 'success', 250)
+      recordGitHubApiRequest('rest', 'gh_cli', 'rate_limited', 500)
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_github_api_requests_total')
+      expect(metrics).toContain('transport="graphql"')
+      expect(metrics).toContain('transport="rest"')
+      expect(metrics).toContain('mode="direct"')
+      expect(metrics).toContain('mode="gh_cli"')
+      expect(metrics).toContain('outcome="success"')
+      expect(metrics).toContain('outcome="rate_limited"')
+      expect(metrics).toContain('agent_loop_github_api_request_duration_seconds')
     })
 
     test('tracks wake queue and handling outcomes', async () => {

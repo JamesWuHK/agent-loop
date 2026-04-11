@@ -164,6 +164,8 @@ Recommended behavior:
 
 This design should materially reduce GraphQL pressure because idle discovery moves from periodic full scans to targeted wakeups. It does not remove GraphQL usage completely, because startup recovery, fallback polling, and some coordination flows still need GitHub reads.
 
+This repo now exposes GitHub API request metrics that separate `graphql` vs `rest`, `direct` vs `gh_cli`, plus `success/error/timeout/rate_limited` outcomes, so the effect of wake delivery and slower idle polling can be measured directly.
+
 In practice, this should help with rate limits, but it is not a full replacement for timeout handling, REST fallbacks, and scoped recovery reads.
 
 ## Rollout
@@ -172,7 +174,7 @@ In practice, this should help with rate limits, but it is not a full replacement
 2. Done: add a loopback wake endpoint in the daemon.
 3. Done: add GitHub Actions workflows that route events to self-hosted runners.
 4. Done: reduce idle poll frequency after wake delivery is stable on a machine, while preserving immediate wake-triggered reconcile.
-5. Pending: add end-to-end wake latency, missed-event recovery, and GraphQL consumption measurement.
+5. Pending: add end-to-end wake latency and missed-event recovery measurement on top of the existing GitHub API consumption metrics.
 
 ## Acceptance
 
