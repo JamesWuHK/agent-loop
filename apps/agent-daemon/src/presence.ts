@@ -16,6 +16,7 @@ const MANAGED_DAEMON_PRESENCE_ISSUE_TITLE = 'Agent Loop Presence'
 const MANAGED_DAEMON_PRESENCE_ISSUE_MARKER = '<!-- agent-loop:presence-registry -->'
 const MANAGED_DAEMON_PRESENCE_COMMENT_PREFIX = '<!-- agent-loop:presence '
 const MANAGED_DAEMON_UPGRADE_ANNOUNCEMENT_COMMENT_PREFIX = '<!-- agent-loop:upgrade-announcement '
+const MANAGED_DAEMON_UPGRADE_FAILURE_ALERT_COMMENT_PREFIX = '<!-- agent-loop:upgrade-failure-alert '
 const GITHUB_REST_TIMEOUT_MS = 180_000
 
 export type ManagedDaemonPresenceStatus = 'idle' | 'busy' | 'stopped'
@@ -78,6 +79,24 @@ export interface ManagedDaemonUpgradeAnnouncement {
 
 export interface ManagedDaemonUpgradeAnnouncementComment extends IssueComment {
   announcement: ManagedDaemonUpgradeAnnouncement
+}
+
+export interface ManagedDaemonUpgradeFailureAlert {
+  repo: string
+  machineId: string
+  daemonInstanceId: string
+  channel: string | null
+  targetVersion: string | null
+  targetRevision: string | null
+  consecutiveFailureCount: number
+  pausedUntil: string | null
+  lastAttemptAt: string | null
+  lastError: string | null
+  alertedAt: string
+}
+
+export interface ManagedDaemonUpgradeFailureAlertComment extends IssueComment {
+  alert: ManagedDaemonUpgradeFailureAlert
 }
 
 export interface PresenceApiAdapter {
@@ -367,6 +386,27 @@ A managed daemon detected a newer agent-loop build and is broadcasting it to oth
 - Announced by: ${announcement.announcedByMachineId} (${announcement.announcedByDaemonInstanceId})`
 }
 
+export function buildManagedDaemonUpgradeFailureAlertComment(
+  alert: ManagedDaemonUpgradeFailureAlert,
+): string {
+  return `${MANAGED_DAEMON_UPGRADE_FAILURE_ALERT_COMMENT_PREFIX}${JSON.stringify(alert)} -->
+## Agent Loop auto-upgrade failure alert
+
+A managed daemon is backing off repeated self-upgrade retries after consecutive failures.
+
+- Repo: ${alert.repo}
+- Machine: ${alert.machineId}
+- Daemon: ${alert.daemonInstanceId}
+- Channel: ${alert.channel ?? 'default'}
+- Target version: ${alert.targetVersion ?? 'unknown'}
+- Target revision: ${alert.targetRevision ?? 'unknown'}
+- Consecutive failures: ${alert.consecutiveFailureCount}
+- Paused until: ${alert.pausedUntil ?? 'none'}
+- Last attempt: ${alert.lastAttemptAt ?? 'never'}
+- Last error: ${alert.lastError ?? 'none'}
+- Alerted at: ${alert.alertedAt}`
+}
+
 export function extractManagedDaemonPresenceComment(body: string): ManagedDaemonPresence | null {
   const match = body.match(/<!-- agent-loop:presence (\{.*\}) -->/)
   if (!match?.[1]) return null
@@ -516,6 +556,36 @@ export function extractManagedDaemonUpgradeAnnouncementComment(
   }
 }
 
+export function extractManagedDaemonUpgradeFailureAlertComment(
+  body: string,
+): ManagedDaemonUpgradeFailureAlert | null {
+  const match = body.match(/<!-- agent-loop:upgrade-failure-alert (\{.*\}) -->/)
+  if (!match?.[1]) return null
+
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<ManagedDaemonUpgradeFailureAlert>
+    if (!parsed || typeof parsed !== 'object') return null
+    if (typeof parsed.repo !== 'string' || typeof parsed.machineId !== 'string' || typeof parsed.daemonInstanceId !== 'string') return null
+    if (typeof parsed.alertedAt !== 'string') return null
+
+    return {
+      repo: parsed.repo,
+      machineId: parsed.machineId,
+      daemonInstanceId: parsed.daemonInstanceId,
+      channel: typeof parsed.channel === 'string' && parsed.channel.trim().length > 0 ? parsed.channel : null,
+      targetVersion: typeof parsed.targetVersion === 'string' && parsed.targetVersion.trim().length > 0 ? parsed.targetVersion : null,
+      targetRevision: typeof parsed.targetRevision === 'string' && parsed.targetRevision.trim().length > 0 ? parsed.targetRevision : null,
+      consecutiveFailureCount: normalizeNonNegativeInteger(parsed.consecutiveFailureCount),
+      pausedUntil: typeof parsed.pausedUntil === 'string' && parsed.pausedUntil.trim().length > 0 ? parsed.pausedUntil : null,
+      lastAttemptAt: typeof parsed.lastAttemptAt === 'string' && parsed.lastAttemptAt.trim().length > 0 ? parsed.lastAttemptAt : null,
+      lastError: typeof parsed.lastError === 'string' && parsed.lastError.trim().length > 0 ? parsed.lastError : null,
+      alertedAt: parsed.alertedAt,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function parseManagedDaemonPresenceComments(
   comments: IssueComment[],
 ): ManagedDaemonPresenceComment[] {
@@ -547,6 +617,22 @@ export function parseManagedDaemonUpgradeAnnouncementComments(
     .filter((comment): comment is ManagedDaemonUpgradeAnnouncementComment => comment !== null)
 }
 
+export function parseManagedDaemonUpgradeFailureAlertComments(
+  comments: IssueComment[],
+): ManagedDaemonUpgradeFailureAlertComment[] {
+  return comments
+    .map((comment) => {
+      const alert = extractManagedDaemonUpgradeFailureAlertComment(comment.body)
+      if (!alert) return null
+
+      return {
+        ...comment,
+        alert,
+      } satisfies ManagedDaemonUpgradeFailureAlertComment
+    })
+    .filter((comment): comment is ManagedDaemonUpgradeFailureAlertComment => comment !== null)
+}
+
 export function getLatestManagedDaemonUpgradeAnnouncement(
   comments: IssueComment[],
   repo: string,
@@ -558,6 +644,47 @@ export function getLatestManagedDaemonUpgradeAnnouncement(
       if (announcedDiff !== 0) return announcedDiff
       return right.commentId - left.commentId
     })[0] ?? null
+}
+
+export function getLatestManagedDaemonUpgradeFailureAlert(
+  comments: IssueComment[],
+  repo: string,
+  machineId: string,
+): ManagedDaemonUpgradeFailureAlertComment | null {
+  return parseManagedDaemonUpgradeFailureAlertComments(comments)
+    .filter((comment) => comment.alert.repo === repo && comment.alert.machineId === machineId)
+    .sort((left, right) => {
+      const alertedDiff = Date.parse(right.alert.alertedAt) - Date.parse(left.alert.alertedAt)
+      if (alertedDiff !== 0) return alertedDiff
+      return right.commentId - left.commentId
+    })[0] ?? null
+}
+
+export function listActiveManagedDaemonUpgradeFailureAlertComments(
+  comments: IssueComment[],
+  repo: string,
+  now = Date.now(),
+): ManagedDaemonUpgradeFailureAlertComment[] {
+  const deduped = new Map<string, ManagedDaemonUpgradeFailureAlertComment>()
+  const matches = parseManagedDaemonUpgradeFailureAlertComments(comments)
+    .filter((comment) => comment.alert.repo === repo)
+    .filter((comment) => {
+      const pausedUntil = Date.parse(comment.alert.pausedUntil ?? '')
+      return Number.isFinite(pausedUntil) && pausedUntil > now
+    })
+    .sort((left, right) => {
+      const alertedDiff = Date.parse(right.alert.alertedAt) - Date.parse(left.alert.alertedAt)
+      if (alertedDiff !== 0) return alertedDiff
+      return right.commentId - left.commentId
+    })
+
+  for (const comment of matches) {
+    if (!deduped.has(comment.alert.machineId)) {
+      deduped.set(comment.alert.machineId, comment)
+    }
+  }
+
+  return [...deduped.values()]
 }
 
 export function isManagedDaemonPresenceExpired(
@@ -738,6 +865,17 @@ export async function listActiveManagedDaemonPresence(
   if (issueNumber === null) return []
   const comments = await api.listIssueComments(issueNumber, config)
   return listActiveManagedDaemonPresenceComments(comments, config.repo, now)
+}
+
+export async function listActiveManagedDaemonUpgradeFailureAlerts(
+  config: AgentConfig,
+  now = Date.now(),
+  api: PresenceApiAdapter = defaultPresenceApi,
+): Promise<ManagedDaemonUpgradeFailureAlertComment[]> {
+  const issueNumber = await findManagedDaemonPresenceIssue(config)
+  if (issueNumber === null) return []
+  const comments = await api.listIssueComments(issueNumber, config)
+  return listActiveManagedDaemonUpgradeFailureAlertComments(comments, config.repo, now)
 }
 
 export class ManagedDaemonPresencePublisher {

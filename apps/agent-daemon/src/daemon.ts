@@ -91,9 +91,11 @@ import {
 import {
   ManagedDaemonPresencePublisher,
   buildManagedDaemonUpgradeAnnouncementComment,
+  buildManagedDaemonUpgradeFailureAlertComment,
   commentOnIssue as commentOnPresenceIssue,
   ensureManagedDaemonPresenceIssue,
   getLatestManagedDaemonUpgradeAnnouncement,
+  getLatestManagedDaemonUpgradeFailureAlert,
   listIssueComments as listPresenceIssueComments,
   type ManagedDaemonPresenceRuntimeState,
 } from './presence'
@@ -305,6 +307,7 @@ export class AgentDaemon {
   private lastAutoUpgradeAttemptAt: number | null = null
   private lastAutoUpgradeAttemptTarget: string | null = null
   private lastPublishedUpgradeAnnouncementKey: string | null = null
+  private lastPublishedUpgradeFailureAlertKey: string | null = null
   private lastObservedUpgradeAnnouncementKey: string | null = null
   private upgradeAnnouncementCheckPromise: Promise<void> | null = null
 
@@ -3657,6 +3660,67 @@ export class AgentDaemon {
     )
   }
 
+  private async maybePublishAutoUpgradeFailureAlert(
+    upgrade: Pick<AgentLoopUpgradeMetadata, 'channel' | 'latestVersion' | 'latestRevision'>,
+  ): Promise<void> {
+    if (
+      this.autoUpgradeState.lastOutcome !== 'failed'
+      || !this.autoUpgradeState.pausedUntil
+      || this.autoUpgradeState.consecutiveFailureCount < 2
+    ) {
+      return
+    }
+
+    const key = this.getAutoUpgradeFailureAlertKey({
+      channel: upgrade.channel,
+      targetVersion: upgrade.latestVersion,
+      targetRevision: upgrade.latestRevision,
+      consecutiveFailureCount: this.autoUpgradeState.consecutiveFailureCount,
+      pausedUntil: this.autoUpgradeState.pausedUntil,
+    })
+    if (!key || key === this.lastPublishedUpgradeFailureAlertKey) {
+      return
+    }
+
+    const issueNumber = await this.ensurePresenceIssueNumber()
+    const comments = await this.listPresenceRegistryComments(issueNumber)
+    const latest = getLatestManagedDaemonUpgradeFailureAlert(comments, this.config.repo, this.config.machineId)
+    const latestKey = latest
+      ? this.getAutoUpgradeFailureAlertKey({
+          channel: latest.alert.channel,
+          targetVersion: latest.alert.targetVersion,
+          targetRevision: latest.alert.targetRevision,
+          consecutiveFailureCount: latest.alert.consecutiveFailureCount,
+          pausedUntil: latest.alert.pausedUntil,
+        })
+      : null
+    if (latestKey === key) {
+      this.lastPublishedUpgradeFailureAlertKey = key
+      return
+    }
+
+    await this.commentOnPresenceRegistryIssue(
+      issueNumber,
+      buildManagedDaemonUpgradeFailureAlertComment({
+        repo: this.config.repo,
+        machineId: this.config.machineId,
+        daemonInstanceId: this.daemonInstanceId,
+        channel: upgrade.channel,
+        targetVersion: upgrade.latestVersion,
+        targetRevision: upgrade.latestRevision,
+        consecutiveFailureCount: this.autoUpgradeState.consecutiveFailureCount,
+        pausedUntil: this.autoUpgradeState.pausedUntil,
+        lastAttemptAt: this.autoUpgradeState.lastAttemptAt,
+        lastError: this.autoUpgradeState.lastError,
+        alertedAt: new Date().toISOString(),
+      }),
+    )
+    this.lastPublishedUpgradeFailureAlertKey = key
+    this.logger.warn(
+      `[daemon] published agent-loop auto-upgrade failure alert for ${upgrade.channel ?? 'default'} -> v${upgrade.latestVersion ?? 'unknown'}@${abbreviateRevision(upgrade.latestRevision)} after ${this.autoUpgradeState.consecutiveFailureCount} consecutive failures`,
+    )
+  }
+
   private shouldRefreshFromUpgradeAnnouncement(
     announcedAt: string,
     key: string,
@@ -3807,6 +3871,26 @@ export class AgentDaemon {
     return `${input.channel ?? 'default'}:${input.latestVersion ?? 'unknown'}:${input.latestRevision ?? 'unknown'}`
   }
 
+  private getAutoUpgradeFailureAlertKey(input: {
+    channel: string | null
+    targetVersion: string | null
+    targetRevision: string | null
+    consecutiveFailureCount: number
+    pausedUntil: string | null
+  }): string | null {
+    if (!input.targetVersion && !input.targetRevision) {
+      return null
+    }
+
+    return [
+      input.channel ?? 'default',
+      input.targetVersion ?? 'unknown',
+      input.targetRevision ?? 'unknown',
+      String(input.consecutiveFailureCount),
+      input.pausedUntil ?? 'none',
+    ].join(':')
+  }
+
   private assertDetachedUpgradeRestartReady(): void {
     if (!process.env.AGENT_LOOP_RUNTIME_FILE || !process.env.AGENT_LOOP_LOG_FILE || !process.argv[1]) {
       throw new Error('managed detached auto-upgrade restart requires runtime file, log path, and script path')
@@ -3921,7 +4005,7 @@ export class AgentDaemon {
 
   private noteAutoUpgradeAttemptCompleted(
     outcome: 'succeeded' | 'failed' | 'no_change',
-    upgrade: Pick<AgentLoopUpgradeMetadata, 'latestVersion' | 'latestRevision'>,
+    upgrade: Pick<AgentLoopUpgradeMetadata, 'channel' | 'latestVersion' | 'latestRevision'>,
     error?: string,
   ): void {
     const completedAt = new Date().toISOString()
@@ -3946,6 +4030,11 @@ export class AgentDaemon {
       }),
     )
     this.syncRuntimeMetrics()
+    if (outcome === 'failed') {
+      void this.maybePublishAutoUpgradeFailureAlert(upgrade).catch((publishError) => {
+        this.logger.warn(`[daemon] failed to publish agent-loop auto-upgrade failure alert: ${formatDaemonError(publishError)}`)
+      })
+    }
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {

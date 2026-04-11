@@ -3,11 +3,15 @@ import type { AgentConfig, IssueComment } from '@agent/shared'
 import {
   buildManagedDaemonPresenceComment,
   buildManagedDaemonUpgradeAnnouncementComment,
+  buildManagedDaemonUpgradeFailureAlertComment,
   extractManagedDaemonPresenceIssueNumber,
   extractManagedDaemonPresenceComment,
   extractManagedDaemonUpgradeAnnouncementComment,
+  extractManagedDaemonUpgradeFailureAlertComment,
   getLatestManagedDaemonUpgradeAnnouncement,
+  getLatestManagedDaemonUpgradeFailureAlert,
   listActiveManagedDaemonPresenceComments,
+  listActiveManagedDaemonUpgradeFailureAlertComments,
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresence,
   type PresenceApiAdapter,
@@ -202,6 +206,50 @@ describe('managed daemon presence helpers', () => {
     ], TEST_CONFIG.repo)
 
     expect(latest?.announcement.latestRevision).toBe(newer.latestRevision)
+  })
+
+  test('round-trips managed daemon upgrade failure alerts and filters active latest comments', () => {
+    const older = {
+      repo: TEST_CONFIG.repo,
+      machineId: 'machine-a',
+      daemonInstanceId: 'daemon-a',
+      channel: 'master',
+      targetVersion: '0.1.2',
+      targetRevision: '2222222222222222222222222222222222222222',
+      consecutiveFailureCount: 2,
+      pausedUntil: '2026-04-11T09:20:00.000Z',
+      lastAttemptAt: '2026-04-11T09:00:10.000Z',
+      lastError: 'git pull failed',
+      alertedAt: '2026-04-11T09:00:20.000Z',
+    }
+    const newer = {
+      ...older,
+      consecutiveFailureCount: 3,
+      pausedUntil: '2026-04-11T10:00:00.000Z',
+      alertedAt: '2026-04-11T09:30:20.000Z',
+    }
+
+    expect(extractManagedDaemonUpgradeFailureAlertComment(
+      buildManagedDaemonUpgradeFailureAlertComment(newer),
+    )).toEqual(newer)
+
+    const comments = [
+      {
+        commentId: 21,
+        body: buildManagedDaemonUpgradeFailureAlertComment(older),
+        createdAt: older.alertedAt,
+        updatedAt: older.alertedAt,
+      },
+      {
+        commentId: 22,
+        body: buildManagedDaemonUpgradeFailureAlertComment(newer),
+        createdAt: newer.alertedAt,
+        updatedAt: newer.alertedAt,
+      },
+    ]
+
+    expect(getLatestManagedDaemonUpgradeFailureAlert(comments, TEST_CONFIG.repo, 'machine-a')?.alert.pausedUntil).toBe(newer.pausedUntil)
+    expect(listActiveManagedDaemonUpgradeFailureAlertComments(comments, TEST_CONFIG.repo, Date.parse('2026-04-11T09:40:00.000Z'))).toHaveLength(1)
   })
 
   test('filters active managed daemon presence comments by repo and expiry', () => {

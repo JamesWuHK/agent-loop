@@ -46,7 +46,10 @@ import {
   shouldResumeManagedIssue,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
-import { buildManagedDaemonUpgradeAnnouncementComment } from './presence'
+import {
+  buildManagedDaemonUpgradeAnnouncementComment,
+  buildManagedDaemonUpgradeFailureAlertComment,
+} from './presence'
 import { getMetrics, registry } from './metrics'
 import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
 
@@ -650,6 +653,85 @@ describe('agent-loop upgrade coordination', () => {
 
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('auto-apply is enabled; this daemon will restart into the latest build once it goes idle')
+  })
+
+  test('publishes a deduplicated GitHub alert comment after repeated auto-upgrade failures', async () => {
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: true,
+      },
+    }) as any
+
+    const postedBodies: string[] = []
+
+    daemon.ensurePresenceIssueNumber = async () => 500
+    daemon.commentOnPresenceRegistryIssue = async (_issueNumber: number, body: string) => {
+      postedBodies.push(body)
+    }
+    daemon.listPresenceRegistryComments = async () => [{
+      commentId: 18,
+      body: buildManagedDaemonUpgradeFailureAlertComment({
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-dev',
+        daemonInstanceId: 'daemon-codex-dev-1',
+        channel: 'master',
+        targetVersion: '0.1.2',
+        targetRevision: '2222222222222222222222222222222222222222',
+        consecutiveFailureCount: 2,
+        pausedUntil: '2026-04-11T12:15:00.000Z',
+        lastAttemptAt: '2026-04-11T12:00:00.000Z',
+        lastError: 'git pull failed',
+        alertedAt: '2026-04-11T12:00:10.000Z',
+      }),
+      createdAt: '2026-04-11T12:00:10.000Z',
+      updatedAt: '2026-04-11T12:00:10.000Z',
+    }]
+
+    daemon.autoUpgradeState = {
+      attemptCount: 2,
+      successCount: 0,
+      failureCount: 2,
+      noChangeCount: 0,
+      consecutiveFailureCount: 2,
+      lastAttemptAt: '2026-04-11T12:00:00.000Z',
+      lastSuccessAt: null,
+      lastOutcome: 'failed',
+      lastTargetVersion: '0.1.2',
+      lastTargetRevision: '2222222222222222222222222222222222222222',
+      lastError: 'git pull failed',
+      pausedUntil: '2026-04-11T12:15:00.000Z',
+    }
+
+    await daemon.maybePublishAutoUpgradeFailureAlert({
+      channel: 'master',
+      latestVersion: '0.1.2',
+      latestRevision: '2222222222222222222222222222222222222222',
+    })
+
+    expect(postedBodies).toHaveLength(0)
+
+    daemon.autoUpgradeState = {
+      ...daemon.autoUpgradeState,
+      failureCount: 3,
+      consecutiveFailureCount: 3,
+      lastAttemptAt: '2026-04-11T12:15:10.000Z',
+      pausedUntil: '2026-04-11T12:45:10.000Z',
+    }
+
+    await daemon.maybePublishAutoUpgradeFailureAlert({
+      channel: 'master',
+      latestVersion: '0.1.2',
+      latestRevision: '2222222222222222222222222222222222222222',
+    })
+
+    expect(postedBodies).toHaveLength(1)
+    expect(postedBodies[0]).toContain('"consecutiveFailureCount":3')
+    expect(postedBodies[0]).toContain('"pausedUntil":"2026-04-11T12:45:10.000Z"')
   })
 })
 
