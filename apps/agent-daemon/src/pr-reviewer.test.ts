@@ -351,6 +351,7 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
         attempt: 1,
         approved: false,
         canMerge: false,
+        action: 'retrying',
         headRefOid: 'abc123',
       },
       feedback: {
@@ -392,17 +393,55 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     })
   })
 
-  test('allows standalone review to resume from a valid structured human-needed comment', () => {
+  test('reuses the latest structured review feedback when the latest comment is retrying and the PR head sha is unchanged', () => {
+    const issueBody = `## 用户故事
+- keep retry semantics stable`
     const comments = [
       {
-        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
-<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"First blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
-## Automated review found blocking issues — starting one auto-fix retry`,
+        body: buildPrReviewComment(
+          84,
+          {
+            approved: false,
+            canMerge: false,
+            reason: 'Second blocker',
+            findings: [{
+              severity: 'high',
+              file: 'apps/desktop/src/pages/MainPage.tsx',
+              summary: 'retry success regressed',
+              mustFix: ['restore success-list semantics'],
+              mustNotDo: ['do not add selection state'],
+              validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+              scopeRationale: 'issue #76 requires preserving success semantics',
+            }],
+          },
+          2,
+          'retrying',
+          'abc123',
+          issueBody,
+        ),
       },
     ]
 
     expect(canResumeAutomatedPrReview(comments, 3)).toBe(true)
-    expect(getNextAutomatedPrReviewAttempt(comments)).toBe(2)
+    expect(getReusableAutomatedPrReviewFeedback(comments, 'abc123', 3)).toEqual({
+      attempt: 2,
+      feedback: {
+        approved: false,
+        canMerge: false,
+        reason: 'Second blocker',
+        findings: [
+          {
+            severity: 'high',
+            file: 'apps/desktop/src/pages/MainPage.tsx',
+            summary: 'retry success regressed',
+            mustFix: ['restore success-list semantics'],
+            mustNotDo: ['do not add selection state'],
+            validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
+            scopeRationale: 'issue #76 requires preserving success semantics',
+          },
+        ],
+      },
+    })
   })
 
   test('does not resume standalone review when the latest automated comment lacks valid structured feedback', () => {
@@ -517,34 +556,38 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     expect(shouldRestartAutomatedPrReviewOnIssueUpdate(comments, '2026-04-05T08:10:01.000Z')).toBe(false)
   })
 
-  test('reuses the latest structured review feedback when the PR head sha is unchanged', () => {
+  test('does not reuse structured feedback from a terminal human-needed comment on an unchanged head', () => {
+    const issueBody = `## 用户故事
+- keep terminal human-needed terminal`
     const comments = [
       {
-        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
-<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Second blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
-## Automated review still failing — human intervention required`,
+        body: buildPrReviewComment(
+          84,
+          {
+            approved: false,
+            canMerge: false,
+            reason: 'Final blocker',
+            findings: [{
+              severity: 'high',
+              file: 'apps/desktop/src/pages/MainPage.tsx',
+              summary: 'manual fix required',
+              mustFix: ['wait for a human or a new head commit before retrying'],
+              mustNotDo: ['do not auto-fix again on the same head'],
+              validation: ['bun test apps/agent-daemon/src/pr-reviewer.test.ts'],
+              scopeRationale: 'terminal human-needed should not be resurrected by recovery on unchanged head',
+            }],
+          },
+          2,
+          'human-needed',
+          'abc123',
+          issueBody,
+        ),
       },
     ]
 
-    expect(getReusableAutomatedPrReviewFeedback(comments, 'abc123', 3)).toEqual({
-      attempt: 2,
-      feedback: {
-        approved: false,
-        canMerge: false,
-        reason: 'Second blocker',
-        findings: [
-          {
-            severity: 'high',
-            file: 'apps/desktop/src/pages/MainPage.tsx',
-            summary: 'retry success regressed',
-            mustFix: ['restore success-list semantics'],
-            mustNotDo: ['do not add selection state'],
-            validation: ['bun --cwd apps/desktop test src/pages/MainPage.test.tsx'],
-            scopeRationale: 'issue #76 requires preserving success semantics',
-          },
-        ],
-      },
-    })
+    expect(canResumeAutomatedPrReview(comments, 3)).toBe(false)
+    expect(canResumeHumanNeededPrReview(comments, 3, 'abc123', issueBody)).toBe(false)
+    expect(getReusableAutomatedPrReviewFeedback(comments, 'abc123', 3)).toBeNull()
     expect(getReusableAutomatedPrReviewFeedback(comments, 'def456', 3)).toBeNull()
   })
 
