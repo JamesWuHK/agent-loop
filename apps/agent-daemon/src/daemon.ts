@@ -2483,6 +2483,7 @@ export class AgentDaemon {
 
       const monitor = this.buildManagedLeaseMonitor('pr-review', pr.number, lease.handle)
       let currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+      let rerunAfterBlockedRefresh = false
       const worktreeBaseSyncState = await readWorktreeBaseSyncState(
         detached.worktreePath,
         this.config.git.defaultBranch,
@@ -2548,6 +2549,7 @@ export class AgentDaemon {
         }
 
         currentHeadRefOid = await readGitHeadRefOid(detached.worktreePath)
+        rerunAfterBlockedRefresh = true
       }
       const restartReviewOnUpdatedHead = reviewLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
         && shouldRestartAutomatedPrReviewOnNewHead(priorComments, currentHeadRefOid)
@@ -2632,7 +2634,12 @@ export class AgentDaemon {
           return
         }
 
-        if (firstReview.approved && firstReview.canMerge) {
+        const followup = classifyStandalonePrReviewFollowup(firstReview, {
+          issueNumber,
+          rerunAfterBlockedRefresh,
+        })
+
+        if (followup.nextReviewLabel === 'approved') {
           await commentOnPr(
             pr.number,
             buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid, linkedIssue?.body ?? null),
@@ -2643,17 +2650,23 @@ export class AgentDaemon {
           return
         }
 
-        if (firstReview.reviewFailed) {
+        if (followup.nextReviewLabel === 'human-needed') {
           await commentOnPr(
             pr.number,
             buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid, linkedIssue?.body ?? null),
             this.config,
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
-          if (issueNumber !== null) {
+          if (followup.shouldMarkIssueFailed && issueNumber !== null) {
             await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
           }
-          this.logger.warn(`[pr-review-subagent] PR #${pr.number} produced an invalid review payload; stopping before auto-fix`)
+          this.logger.warn(
+            firstReview.reviewFailed
+              ? `[pr-review-subagent] PR #${pr.number} produced an invalid review payload; stopping before auto-fix`
+              : rerunAfterBlockedRefresh
+                ? `[pr-review-subagent] PR #${pr.number} is still blocked after base refresh; stopping before auto-fix`
+                : `[pr-review-subagent] PR #${pr.number} rejected without auto-fix`,
+          )
           return
         }
 
@@ -2665,6 +2678,10 @@ export class AgentDaemon {
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
           this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
+          return
+        }
+
+        if (!followup.shouldRunAutoFix) {
           return
         }
 
@@ -4933,6 +4950,42 @@ export async function runRemoteUpgradeAnnouncementSafely(
     await run()
   } catch (error) {
     logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
+  }
+}
+
+export interface StandalonePrReviewFollowup {
+  nextReviewLabel: 'approved' | 'retry' | 'human-needed'
+  shouldRunAutoFix: boolean
+  shouldMarkIssueFailed: boolean
+}
+
+export function classifyStandalonePrReviewFollowup(
+  review: Pick<PrReviewResult, 'approved' | 'canMerge' | 'reviewFailed' | 'reason' | 'findings'>,
+  context: {
+    issueNumber: number | null
+    rerunAfterBlockedRefresh: boolean
+  },
+): StandalonePrReviewFollowup {
+  if (review.approved && review.canMerge) {
+    return {
+      nextReviewLabel: 'approved',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    }
+  }
+
+  if (review.reviewFailed || (context.rerunAfterBlockedRefresh && !review.approved && !review.canMerge)) {
+    return {
+      nextReviewLabel: 'human-needed',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: context.issueNumber !== null,
+    }
+  }
+
+  return {
+    nextReviewLabel: 'retry',
+    shouldRunAutoFix: true,
+    shouldMarkIssueFailed: false,
   }
 }
 

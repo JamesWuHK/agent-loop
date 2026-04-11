@@ -13,6 +13,7 @@ import {
   buildIssuePreflightFailureComment,
   buildPrReviewRefreshFailureComment,
   canResumeBlockedIssueFromResolution,
+  classifyStandalonePrReviewFollowup,
   canRetryPrReviewRefresh,
   canResumeIssueFromLease,
   getEffectiveActiveTaskCount,
@@ -2052,6 +2053,78 @@ describe('daemon merge recovery helpers', () => {
       true,
       true,
     )).toBe(false)
+  })
+
+  test('stops at human-needed when a blocked refresh rerun is still rejected', () => {
+    expect(classifyStandalonePrReviewFollowup(
+      {
+        approved: false,
+        canMerge: false,
+        reason: 'First blocker',
+        findings: [{
+          severity: 'high',
+          file: 'apps/agent-daemon/src/daemon.ts',
+          summary: 'still blocked after base refresh',
+          mustFix: ['stop after the rerun review and leave the PR in human-needed'],
+          mustNotDo: ['do not launch review auto-fix for the blocked refresh rerun'],
+          validation: ['bun test apps/agent-daemon/src/daemon.test.ts'],
+          scopeRationale: 'blocked refresh reruns should release the ready queue instead of consuming another auto-fix attempt',
+        }],
+      },
+      {
+        issueNumber: 40,
+        rerunAfterBlockedRefresh: true,
+      },
+    )).toEqual({
+      nextReviewLabel: 'human-needed',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: true,
+    })
+  })
+
+  test('still allows one auto-fix retry for a normal standalone rejection', () => {
+    expect(classifyStandalonePrReviewFollowup(
+      {
+        approved: false,
+        canMerge: false,
+        reason: 'First blocker',
+        findings: [{
+          severity: 'high',
+          file: 'apps/agent-daemon/src/daemon.ts',
+          summary: 'ordinary standalone rejection',
+          mustFix: ['keep the existing auto-fix retry path'],
+          mustNotDo: ['do not treat every rejection as terminal human-needed'],
+          validation: ['bun test apps/agent-daemon/src/daemon.test.ts'],
+          scopeRationale: 'only blocked refresh reruns should skip auto-fix',
+        }],
+      },
+      {
+        issueNumber: 40,
+        rerunAfterBlockedRefresh: false,
+      },
+    )).toEqual({
+      nextReviewLabel: 'retry',
+      shouldRunAutoFix: true,
+      shouldMarkIssueFailed: false,
+    })
+  })
+
+  test('keeps approved blocked refresh reruns on the approved path', () => {
+    expect(classifyStandalonePrReviewFollowup(
+      {
+        approved: true,
+        canMerge: true,
+        reason: 'Ready to merge',
+      },
+      {
+        issueNumber: 40,
+        rerunAfterBlockedRefresh: true,
+      },
+    )).toEqual({
+      nextReviewLabel: 'approved',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    })
   })
 
   test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {
