@@ -1337,7 +1337,7 @@ interface RawPullRequestListItem {
   labels?: Array<{ name: string }>
 }
 
-interface RawRestPullRequest {
+export interface RawRestPullRequest {
   number?: number
   title?: string
   html_url?: string
@@ -1432,6 +1432,45 @@ function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | nul
   }
 }
 
+export function mapOpenManagedPullRequest(
+  pr: RawRestPullRequest,
+): ManagedPullRequest | null {
+  if (derivePullRequestStateFromRaw(pr.state, pr.merged_at ?? null) !== 'open') {
+    return null
+  }
+
+  return mapRawRestPullRequest(pr)
+}
+
+function getBranchPullRequestReusePriority(
+  pr: Pick<RawRestPullRequest, 'state' | 'merged_at'>,
+): number {
+  const state = derivePullRequestStateFromRaw(pr.state, pr.merged_at ?? null)
+  if (state === 'open') return 0
+  if (state === 'closed') return 1
+  if (state === 'merged') return 2
+  return 3
+}
+
+export function selectPullRequestForBranchReuse(
+  pullRequests: RawRestPullRequest[],
+): RawRestPullRequest | null {
+  if (pullRequests.length === 0) {
+    return null
+  }
+
+  return [...pullRequests].sort((left, right) => {
+    const priorityDelta = getBranchPullRequestReusePriority(left) - getBranchPullRequestReusePriority(right)
+    if (priorityDelta !== 0) {
+      return priorityDelta
+    }
+
+    const leftNumber = typeof left.number === 'number' ? left.number : 0
+    const rightNumber = typeof right.number === 'number' ? right.number : 0
+    return rightNumber - leftNumber
+  })[0] ?? null
+}
+
 async function checkPrExistsRest(
   branch: string,
   config: AgentConfig,
@@ -1449,7 +1488,11 @@ async function checkPrExistsRest(
     return { prNumber: null, prUrl: null, prState: null }
   }
 
-  const pr = data[0]!
+  const pr = selectPullRequestForBranchReuse(data)
+  if (!pr) {
+    return { prNumber: null, prUrl: null, prState: null }
+  }
+
   return {
     prNumber: typeof pr.number === 'number' ? pr.number : null,
     prUrl: typeof pr.html_url === 'string' ? pr.html_url : null,
@@ -1478,7 +1521,7 @@ async function listOpenAgentPullRequestsRest(
     const pageItems = extractRestPullRequestListPage(JSON.parse(stdout))
     pullRequests.push(
       ...pageItems
-        .map(mapRawRestPullRequest)
+        .map(mapOpenManagedPullRequest)
         .filter((pr): pr is ManagedPullRequest => pr !== null)
         .filter((pr) => pr.headRefName.startsWith('agent/')),
     )
@@ -1512,7 +1555,7 @@ async function getManagedPullRequestByNumberRest(
     )
   }
 
-  const mapped = mapRawRestPullRequest(extractRestPullRequest(JSON.parse(stdout)) ?? {})
+  const mapped = mapOpenManagedPullRequest(extractRestPullRequest(JSON.parse(stdout)) ?? {})
   if (!mapped) return null
   if (!mapped.headRefName.startsWith('agent/')) return null
   return mapped
@@ -1752,6 +1795,37 @@ export async function createPr(
   const number = typeof created.number === 'number' ? created.number : 0
 
   return { number, url }
+}
+
+export async function reopenPullRequest(
+  prNumber: number,
+  config: AgentConfig,
+): Promise<{ number: number; url: string }> {
+  const response = await withTempJsonFile(
+    'agent-loop-pr-reopen',
+    { state: 'open' },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/pulls/${prNumber}`,
+      '-X',
+      'PATCH',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(`api pulls/${prNumber} reopen`, response.exitCode, parseGhApiErrorMessage(response.stdout, response.stderr))
+  }
+
+  const reopened = mapRawRestPullRequest(extractRestPullRequest(JSON.parse(response.stdout)) ?? {})
+  if (!reopened) {
+    throw new Error(`api pulls/${prNumber} reopen returned an invalid pull request payload`)
+  }
+
+  return {
+    number: reopened.number,
+    url: reopened.url,
+  }
 }
 
 // ─── Worktree: check PR status ────────────────────────────────────────────────

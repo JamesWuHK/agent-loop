@@ -2663,8 +2663,11 @@ export class AgentDaemon {
       })
 
       const prCheck = await checkPrExists(branch, this.config)
-      const linkedOpenPr = prCheck.prNumber !== null && prCheck.prState === 'open'
-        ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
+      const hasExistingOpenPr = shouldUseOpenPrCheckForRecovery(prCheck)
+      const existingOpenPrNumber = hasExistingOpenPr ? prCheck.prNumber as number : null
+      const existingOpenPrUrl = hasExistingOpenPr ? prCheck.prUrl : null
+      const linkedOpenPr = hasExistingOpenPr
+        ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === existingOpenPrNumber) ?? null
         : null
       if (linkedOpenPr && shouldResetLinkedPrToRetryOnIssueResume(linkedOpenPr.labels)) {
         await setManagedPrReviewLabels(linkedOpenPr.number, 'retry', this.config)
@@ -2674,8 +2677,8 @@ export class AgentDaemon {
       }
       const recentBlockingReasons = [
         ...extractAutomatedIssuePreflightReasons(await listIssueComments(issueNumber, this.config)),
-        ...(prCheck.prNumber !== null
-          ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
+        ...(existingOpenPrNumber !== null
+          ? extractAutomatedReviewReasons(await listIssueComments(existingOpenPrNumber, this.config))
           : []),
       ]
       const recoveryResult = await runIssueRecovery(
@@ -2685,8 +2688,8 @@ export class AgentDaemon {
         issue.body,
         this.config,
         this.logger,
-        prCheck.prNumber !== null && prCheck.prUrl
-          ? { number: prCheck.prNumber, url: prCheck.prUrl, branch }
+        existingOpenPrNumber !== null && existingOpenPrUrl
+          ? { number: existingOpenPrNumber, url: existingOpenPrUrl, branch }
           : null,
         recentBlockingReasons,
         monitor,
@@ -4881,6 +4884,12 @@ export function shouldApplyStandaloneIssueTransition(
 export function shouldResetLinkedPrToRetryOnIssueResume(prLabels: string[]): boolean {
   const labels = new Set(prLabels)
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) || labels.has(PR_REVIEW_LABELS.FAILED)
+}
+
+export function shouldUseOpenPrCheckForRecovery(
+  prCheck: Pick<Awaited<ReturnType<typeof checkPrExists>>, 'prNumber' | 'prState'>,
+): boolean {
+  return prCheck.prNumber !== null && prCheck.prState === 'open'
 }
 
 export function shouldCompleteIssueRecoveryOnRemoteClose(
