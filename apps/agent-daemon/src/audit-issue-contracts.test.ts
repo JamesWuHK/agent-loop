@@ -1,8 +1,107 @@
 import { describe, expect, test } from 'bun:test'
-import { formatAuditLine, formatInvalidReadySection } from './audit-issue-contracts'
+import {
+  buildGhIssueViewArgs,
+  buildIssueLintReport,
+  fetchRemoteIssueDocument,
+  formatAuditLine,
+  formatInvalidReadySection,
+  formatIssueLintReport,
+  formatIssueLintReportJson,
+} from './audit-issue-contracts'
 
 describe('audit-issue-contracts', () => {
-  test('formats claimability, blockers, and contract errors on one line', () => {
+  test('builds a lint report that keeps warnings separate from hard errors', () => {
+    const report = buildIssueLintReport([
+      '## 用户故事',
+      '作为维护者，我希望 issue lint 能发现模糊合同。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### AllowedFiles',
+      '- frontend files',
+      '### RequiredSemantics',
+      '- lint 输出 warning 与 error',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-quality.test.ts`',
+      '- run tests before merge',
+      '',
+      '## RED 测试',
+      '```ts',
+      'throw new Error("red")',
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 增加 lint 报告',
+      '',
+      '## 验收',
+      '- 输出 warning',
+    ].join('\n'), {
+      kind: 'file',
+      path: '/tmp/issue.md',
+    })
+
+    expect(report.valid).toBe(true)
+    expect(report.readyGateBlocked).toBe(false)
+    expect(report.warnings).toContain(
+      'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
+    )
+    expect(report.warnings).toContain(
+      'Validation should use concrete executable commands instead of generic guidance: run tests before merge',
+    )
+    expect(report.contract).toMatchObject({
+      allowedFiles: ['frontend files'],
+      hasRedTest: true,
+    })
+  })
+
+  test('formats blocked lint output with an explicit ready gate summary', () => {
+    const report = buildIssueLintReport([
+      '## 用户故事',
+      '作为维护者，我希望 ready gate 保持 hard error 语义。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### AllowedFiles',
+      '- frontend files',
+      '### Validation',
+      '- `git diff --stat origin/main...HEAD`',
+      '',
+      '## 实现步骤',
+      '1. 只新增 lint',
+      '',
+      '## 验收',
+      '- 保持 ready gate',
+    ].join('\n'), {
+      kind: 'issue',
+      issueNumber: 36,
+      repo: 'JamesWuHK/agent-loop',
+    })
+
+    expect(formatIssueLintReport(report)).toContain('readyGate=blocked')
+    expect(formatIssueLintReport(report)).toContain(
+      'readyGateSummary=ready gate would still block on hard validation errors',
+    )
+
+    const jsonReport = JSON.parse(formatIssueLintReportJson(report))
+    expect(jsonReport).toMatchObject({
+      valid: false,
+      readyGateBlocked: true,
+      readyGateStatus: 'blocked',
+      source: {
+        kind: 'issue',
+        issueNumber: 36,
+        repo: 'JamesWuHK/agent-loop',
+      },
+    })
+  })
+
+  test('formats claimability, quality score, and contract errors on one line', () => {
     expect(
       formatAuditLine({
         number: 51,
@@ -12,13 +111,15 @@ describe('audit-issue-contracts', () => {
         hasExecutableContract: false,
         claimBlockedBy: [49, 50],
         contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
+        qualityScore: 75,
+        contractWarnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
       }),
     ).toBe(
-      '#51 state=ready claimable=false contract=false blockedBy=49,50 errors=missing ## RED 测试 / RED Tests',
+      '#51 state=ready claimable=false contract=false score=75 warnings=1 blockedBy=49,50 errors=missing ## RED 测试 / RED Tests',
     )
   })
 
-  test('renders a dedicated section for invalid ready issues', () => {
+  test('renders invalid ready sections with both errors and warnings', () => {
     const section = formatInvalidReadySection([
       {
         number: 52,
@@ -31,11 +132,93 @@ describe('audit-issue-contracts', () => {
           'missing ### Dependencies JSON block',
           'missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)',
         ],
+        qualityScore: 40,
+        contractWarnings: [
+          'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
+        ],
       },
     ])
 
     expect(section).toContain('invalid ready issues:')
     expect(section).toContain('#52 [CI-A2] Sprint A 发布前最小检查清单')
     expect(section).toContain('- missing ### Dependencies JSON block')
+    expect(section).toContain('- warning: AllowedFiles should use exact paths or tightly scoped directories: frontend files')
+  })
+
+  test('fetches remote issue bodies through gh issue view', async () => {
+    expect(buildGhIssueViewArgs(36, 'JamesWuHK/agent-loop')).toEqual([
+      'issue',
+      'view',
+      '36',
+      '--repo',
+      'JamesWuHK/agent-loop',
+      '--json',
+      'number,title,body,url',
+    ])
+
+    const issue = await fetchRemoteIssueDocument({
+      issueNumber: 36,
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: '',
+        machineId: 'codex-dev',
+        concurrency: 1,
+        requestedConcurrency: 1,
+        concurrencyPolicy: {
+          requested: 1,
+          effective: 1,
+          repoCap: null,
+          profileCap: null,
+          projectCap: null,
+        },
+        scheduling: {
+          concurrencyByRepo: {},
+          concurrencyByProfile: {},
+        },
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        recovery: {
+          heartbeatIntervalMs: 30_000,
+          leaseTtlMs: 60_000,
+          workerIdleTimeoutMs: 300_000,
+          leaseAdoptionBackoffMs: 5_000,
+          leaseNoProgressTimeoutMs: 360_000,
+        },
+        worktreesBase: '/tmp/agent-worktrees',
+        project: {
+          profile: 'generic',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: 'claude',
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 300_000,
+        },
+        git: {
+          defaultBranch: 'main',
+          authorName: 'agent-loop',
+          authorEmail: 'agent-loop@example.com',
+        },
+      },
+    }, {
+      runIssueViewCommand: async () => ({
+        stdout: JSON.stringify({
+          number: 36,
+          title: '[AL-6] 引入 issue quality report 与 lint CLI',
+          body: '## 用户故事\n作为维护者，我希望 lint 输出稳定 JSON。',
+          url: 'https://github.com/JamesWuHK/agent-loop/issues/36',
+        }),
+        stderr: '',
+        exitCode: 0,
+      }),
+    })
+
+    expect(issue).toEqual({
+      number: 36,
+      title: '[AL-6] 引入 issue quality report 与 lint CLI',
+      body: '## 用户故事\n作为维护者，我希望 lint 输出稳定 JSON。',
+      url: 'https://github.com/JamesWuHK/agent-loop/issues/36',
+    })
   })
 })

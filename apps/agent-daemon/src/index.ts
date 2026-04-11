@@ -47,6 +47,13 @@ import {
   DEFAULT_DASHBOARD_PORT,
   startDashboardServer,
 } from './dashboard'
+import {
+  buildIssueLintReportFromMarkdownFile,
+  buildIssueLintReportFromRemoteIssue,
+  formatIssueLintReport,
+  formatIssueLintReportJson,
+  type IssueLintReport,
+} from './audit-issue-contracts'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -56,6 +63,12 @@ export interface WakeCommand {
   kind: 'now' | 'issue' | 'pr'
   issueNumber?: number
   prNumber?: number
+}
+
+export interface IssueLintTarget {
+  kind: 'file' | 'issue'
+  path?: string
+  issueNumber?: number
 }
 
 export interface ExecuteWakeCommandInput {
@@ -76,6 +89,12 @@ export interface ExecuteWakeCommandResult {
   queuePath: string
   request: WakeRequest
   notified: boolean
+}
+
+export interface ExecuteIssueLintInput {
+  target: IssueLintTarget
+  repo?: string
+  pat?: string
 }
 
 export interface RestartManagedRuntimeInput {
@@ -149,6 +168,12 @@ interface WakeCommandDependencies {
   now: () => Date
 }
 
+interface IssueLintCommandDependencies {
+  loadConfig: typeof loadConfig
+  buildIssueLintReportFromMarkdownFile: typeof buildIssueLintReportFromMarkdownFile
+  buildIssueLintReportFromRemoteIssue: typeof buildIssueLintReportFromRemoteIssue
+}
+
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   platform: process.platform,
   resolveLocalDaemonIdentity,
@@ -167,6 +192,12 @@ const DEFAULT_WAKE_COMMAND_DEPENDENCIES: WakeCommandDependencies = {
   appendWakeRequest,
   notifyLocalWake,
   now: () => new Date(),
+}
+
+const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
+  loadConfig,
+  buildIssueLintReportFromMarkdownFile,
+  buildIssueLintReportFromRemoteIssue,
 }
 
 async function main() {
@@ -206,6 +237,9 @@ async function main() {
       'wake-from-github-event': { type: 'boolean' },
       'github-event-name': { type: 'string' },
       'github-event-path': { type: 'string' },
+      'lint-issue': { type: 'string' },
+      'lint-file': { type: 'string' },
+      json: { type: 'boolean' },
       help: { type: 'boolean' },
     },
   })
@@ -227,16 +261,31 @@ async function main() {
     'wake-issue': args['wake-issue'] as string | undefined,
     'wake-pr': args['wake-pr'] as string | undefined,
   })
+  const issueLintTarget = resolveIssueLintTarget({
+    'lint-issue': args['lint-issue'] as string | undefined,
+    'lint-file': args['lint-file'] as string | undefined,
+  })
 
   if (wakeCommand) {
     assertWakeCommandCompatible(args)
+  }
+
+  if (issueLintTarget) {
+    assertIssueLintCompatible(args)
   }
 
   if (args['wake-from-github-event']) {
     if (wakeCommand) {
       throw new Error('--wake-from-github-event cannot be combined with --wake-now, --wake-issue, or --wake-pr')
     }
+    if (issueLintTarget) {
+      throw new Error('--wake-from-github-event cannot be combined with --lint-issue or --lint-file')
+    }
     assertWakeCommandCompatible(args)
+  }
+
+  if (wakeCommand && issueLintTarget) {
+    throw new Error('--lint-issue/--lint-file cannot be combined with wake commands')
   }
 
   if (args['repo-cap'] && !args['join-project']) {
@@ -294,6 +343,16 @@ async function main() {
   const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
   const runtimeMachineIdHint = args['machine-id'] as string | undefined
   const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
+
+  if (issueLintTarget) {
+    const report = await executeIssueLintCommand({
+      target: issueLintTarget,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+    })
+    console.log(formatIssueLintOutput(report, args.json as boolean | undefined))
+    process.exit(report.readyGateBlocked ? 1 : 0)
+  }
 
   if (args['join-project']) {
     const result = joinProjectMachine({
@@ -650,6 +709,8 @@ Usage:
   agent-loop --wake-issue <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-pr <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
+  agent-loop --lint-file <path> [--json]
+  agent-loop --lint-issue <number> [--repo owner/repo --json]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -682,6 +743,9 @@ Options:
                               Translate the current GitHub Actions event into a local wake request
       --github-event-name     Override the GitHub event name used by --wake-from-github-event
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
+      --lint-file <path>      Lint a local issue markdown file
+      --lint-issue <number>   Lint a remote GitHub issue body
+      --json                  Print machine-readable JSON for lint commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -723,6 +787,8 @@ Examples:
   agent-loop --wake-now --repo owner/repo
   agent-loop --wake-issue 374 --repo owner/repo --machine-id macbook-pro-b
   agent-loop --wake-pr 381 --health-port 9311
+  agent-loop --lint-file docs/issues/ready-gate.md --json
+  agent-loop --lint-issue 374 --repo owner/repo --json
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
@@ -815,6 +881,63 @@ export function resolveWakeCommand(args: {
   }
 
   return commands[0] ?? null
+}
+
+export function resolveIssueLintTarget(args: {
+  'lint-issue'?: string
+  'lint-file'?: string
+}): IssueLintTarget | null {
+  const targets: IssueLintTarget[] = []
+
+  if (typeof args['lint-issue'] === 'string') {
+    targets.push({
+      kind: 'issue',
+      issueNumber: parseWakeTargetNumber(args['lint-issue'], '--lint-issue'),
+    })
+  }
+
+  if (typeof args['lint-file'] === 'string') {
+    const path = args['lint-file'].trim()
+    if (!path) {
+      throw new Error('--lint-file must be a non-empty path')
+    }
+    targets.push({
+      kind: 'file',
+      path,
+    })
+  }
+
+  if (targets.length > 1) {
+    throw new Error('Only one of --lint-issue or --lint-file can be used at a time')
+  }
+
+  return targets[0] ?? null
+}
+
+export async function executeIssueLintCommand(
+  input: ExecuteIssueLintInput,
+  deps: IssueLintCommandDependencies = DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES,
+): Promise<IssueLintReport> {
+  if (input.target.kind === 'file') {
+    return deps.buildIssueLintReportFromMarkdownFile(input.target.path!)
+  }
+
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+
+  return deps.buildIssueLintReportFromRemoteIssue({
+    issueNumber: input.target.issueNumber!,
+    config,
+  })
+}
+
+export function formatIssueLintOutput(
+  report: IssueLintReport,
+  asJson = false,
+): string {
+  return asJson ? formatIssueLintReportJson(report) : formatIssueLintReport(report)
 }
 
 export function buildWakeRequestFromCli(
@@ -1069,6 +1192,76 @@ function assertWakeCommandCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Wake commands cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertIssueLintCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Issue lint cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 
