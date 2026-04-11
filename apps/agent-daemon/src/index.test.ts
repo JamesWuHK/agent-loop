@@ -9,6 +9,7 @@ import {
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
   executeIssueRewriteCommand,
+  executeIssueSplitCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
@@ -16,6 +17,7 @@ import {
   readManagedRuntimeLog,
   resolveIssueLintTarget,
   resolveIssueRewritePath,
+  resolveIssueSplitInput,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -332,6 +334,153 @@ describe('index helpers', () => {
 
     expect(result.markdown).toBe('## 用户故事\n\nrewritten markdown')
     expect(result.validation.valid).toBe(true)
+  })
+
+  test('resolves split inputs and requires a starting issue number', () => {
+    expect(resolveIssueSplitInput({
+      'split-file': 'docs/issues/epic.md',
+      'split-start-number': '41',
+    })).toEqual({
+      path: 'docs/issues/epic.md',
+      startingIssueNumber: 41,
+    })
+
+    expect(resolveIssueSplitInput({})).toBeNull()
+
+    expect(() => resolveIssueSplitInput({
+      'split-file': 'docs/issues/epic.md',
+    })).toThrow('--split-file requires --split-start-number')
+
+    expect(() => resolveIssueSplitInput({
+      'split-start-number': '41',
+    })).toThrow('--split-start-number requires --split-file')
+  })
+
+  test('executes local issue split through the read-only agent runner', async () => {
+    const result = await executeIssueSplitCommand({
+      path: 'docs/issues/epic.md',
+      startingIssueNumber: 41,
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: (path) => {
+        expect(path).toBe('docs/issues/epic.md')
+        return `# [AL-EPIC] 改进 issue authoring
+
+需要补 lint、rewrite、split 三块能力`
+      },
+      splitTrackingIssue: async ({ title, body, repoRoot, issueNumberAllocator }, { runAgent }) => {
+        expect(title).toBe('[AL-EPIC] 改进 issue authoring')
+        expect(body).toContain('需要补 lint')
+        expect(repoRoot).toBe('/tmp/repo-root')
+        expect(issueNumberAllocator()).toBe(41)
+        expect(issueNumberAllocator()).toBe(42)
+
+        const response = await runAgent({
+          prompt: 'split prompt',
+          repoRoot,
+        })
+
+        expect(response.responseText).toBe('1. [AL-X] 引入 lint\n2. [AL-Y] 增加 rewrite CLI')
+
+        return {
+          parentSummary: 'summary',
+          children: [
+            {
+              issueNumber: 41,
+              title: '[AL-X] 引入 lint',
+              body: 'child body 41',
+              validation: {
+                source: { kind: 'file', path: 'child-41.md' },
+                valid: true,
+                readyGateBlocked: false,
+                readyGateStatus: 'pass',
+                readyGateSummary: 'ready gate would pass hard validation checks',
+                score: 100,
+                errors: [],
+                warnings: [],
+                contract: { allowedFiles: ['apps/agent-daemon/src/audit-issue-contracts.ts'] },
+              },
+              authoringContext: {
+                candidateValidationCommands: ['bun run typecheck'],
+                candidateAllowedFiles: ['apps/agent-daemon/src/audit-issue-contracts.ts'],
+                candidateForbiddenFiles: ['package.json'],
+              },
+            },
+          ],
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.prompt).toBe('split prompt')
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: '1. [AL-X] 引入 lint\n2. [AL-Y] 增加 rewrite CLI',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result.parentSummary).toBe('summary')
+    expect(result.children).toHaveLength(1)
   })
 
   test('resolves wake commands and validates targeted wake numbers', () => {
