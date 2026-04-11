@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import type {
   AgentConfig,
+  CodexReasoningEffort,
   ProjectProfileName,
   ProjectPromptContext,
   ProjectPromptGuidanceOverrides,
@@ -27,6 +28,7 @@ export interface RepoLocalConfig {
   agent?: {
     primary?: AgentConfig['agent']['primary']
     fallback?: AgentConfig['agent']['fallback']
+    codexReasoningEffort?: AgentConfig['agent']['codexReasoningEffort']
   }
   git?: {
     defaultBranch?: string
@@ -218,6 +220,10 @@ export function buildConfig(
         env.OPENAI_API_URL ??
         env.OPENAI_BASE ??
         fileConfig.agent?.codexBaseUrl,
+      codexReasoningEffort: resolveCodexReasoningEffort(
+        repoConfig.agent?.codexReasoningEffort
+          ?? fileConfig.agent?.codexReasoningEffort,
+      ),
       timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000, // 30 min default
     },
     git: {
@@ -333,6 +339,14 @@ function resolveGitHubToken(input: {
   }
 
   return ''
+}
+
+function resolveCodexReasoningEffort(value: unknown): CodexReasoningEffort {
+  if (value === 'low' || value === 'medium' || value === 'high') {
+    return value
+  }
+
+  return 'high'
 }
 
 function canUseGhCliSession(homeDir = homedir()): boolean {

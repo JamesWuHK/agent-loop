@@ -46,6 +46,7 @@ const baseConfig: AgentConfig = {
     fallback: 'claude',
     claudePath: 'claude',
     codexPath: 'codex',
+    codexReasoningEffort: 'high',
     timeoutMs: 60_000,
   },
   git: {
@@ -70,8 +71,8 @@ describe('cli-agent', () => {
     ])
   })
 
-  test('builds Codex command with non-interactive exec flags', () => {
-    expect(buildAgentCommand('codex', 'codex', '/tmp/last-message.txt', true)).toEqual([
+  test('builds Codex command with configured reasoning effort', () => {
+    expect(buildAgentCommand('codex', 'codex', '/tmp/last-message.txt', true, 'high')).toEqual([
       'codex',
       'exec',
       '--color',
@@ -79,14 +80,14 @@ describe('cli-agent', () => {
       '--output-last-message',
       '/tmp/last-message.txt',
       '-c',
-      'model_reasoning_effort="medium"',
+      'model_reasoning_effort="high"',
       '--dangerously-bypass-approvals-and-sandbox',
       '-',
     ])
   })
 
-  test('builds read-only Codex command for review-style runs', () => {
-    expect(buildAgentCommand('codex', 'codex', '/tmp/review-message.txt', false)).toEqual([
+  test('builds read-only Codex command with configured reasoning effort', () => {
+    expect(buildAgentCommand('codex', 'codex', '/tmp/review-message.txt', false, 'high')).toEqual([
       'codex',
       'exec',
       '--color',
@@ -94,11 +95,17 @@ describe('cli-agent', () => {
       '--output-last-message',
       '/tmp/review-message.txt',
       '-c',
-      'model_reasoning_effort="medium"',
+      'model_reasoning_effort="high"',
       '--sandbox',
       'read-only',
       '-',
     ])
+  })
+
+  test('writes the same reasoning effort into isolated Codex config', () => {
+    expect(buildIsolatedCodexConfig('http://127.0.0.1:18777/v1', 'high')).toContain(
+      'model_reasoning_effort = "high"',
+    )
   })
 
   test('prefers environment auth for isolated Codex runtime', () => {
@@ -138,7 +145,7 @@ describe('cli-agent', () => {
       expect(existsSync(join(homeDir, '.zshenv'))).toBe(true)
       expect(existsSync(join(homeDir, '.bash_profile'))).toBe(true)
       expect(readFileSync(join(codexHomeDir, 'config.toml'), 'utf-8')).toBe(
-        buildIsolatedCodexConfig('http://127.0.0.1:18777/v1'),
+        buildIsolatedCodexConfig('http://127.0.0.1:18777/v1', 'high'),
       )
       expect(readFileSync(join(codexHomeDir, 'auth.json'), 'utf-8')).toBe(
         '{\n  "OPENAI_API_KEY": "sk-local-proxy"\n}\n',
@@ -223,24 +230,25 @@ printf 'fake codex ok\n' > "$response_file"
           prompt: 'noop',
           worktreePath,
           timeoutMs: 5_000,
-          config: {
-            ...baseConfig,
-            agent: {
-              ...baseConfig.agent,
-              primary: 'codex',
-              fallback: null,
-              codexPath: scriptPath,
-              codexBaseUrl: 'http://127.0.0.1:18777/v1',
-            },
+        config: {
+          ...baseConfig,
+          agent: {
+            ...baseConfig.agent,
+            primary: 'codex',
+            fallback: null,
+            codexPath: scriptPath,
+            codexBaseUrl: 'http://127.0.0.1:18777/v1',
+            codexReasoningEffort: 'high',
           },
-        })
+        },
+      })
 
         expect(result.ok).toBe(true)
         expect(result.exitCode).toBe(0)
         expect(result.responseText).toBe('fake codex ok')
 
         expect(readFileSync(configCapturePath, 'utf-8')).toBe(
-          buildIsolatedCodexConfig('http://127.0.0.1:18777/v1'),
+          buildIsolatedCodexConfig('http://127.0.0.1:18777/v1', 'high'),
         )
         const argv = readFileSync(argvCapturePath, 'utf-8').trim().split('\n')
         expect(argv[0]).toBe('exec')
@@ -249,7 +257,7 @@ printf 'fake codex ok\n' > "$response_file"
         expect(argv[3]).toBe('--output-last-message')
         expect(argv[4]).toEndWith('/last-message.txt')
         expect(argv[5]).toBe('-c')
-        expect(argv[6]).toBe('model_reasoning_effort="medium"')
+        expect(argv[6]).toBe('model_reasoning_effort="high"')
         expect(argv[7]).toBe('--dangerously-bypass-approvals-and-sandbox')
         expect(argv[8]).toBe('-')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_BASE_URL=__UNSET__')

@@ -78,6 +78,8 @@ export interface PrLineageMetadata {
   fingerprint: string
 }
 
+export type CodexReasoningEffort = 'low' | 'medium' | 'high'
+
 // ─── Internal Issue (derived) ───────────────────────────────────────────────
 
 export interface AgentIssue {
@@ -375,6 +377,7 @@ export interface AgentConfig {
     claudePath: string
     codexPath: string
     codexBaseUrl?: string
+    codexReasoningEffort?: CodexReasoningEffort
     // Agent 执行超时（毫秒）
     timeoutMs: number
   }
