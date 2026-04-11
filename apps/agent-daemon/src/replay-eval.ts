@@ -79,6 +79,37 @@ export interface ReplayFixtureReport {
 }
 
 const DEFAULT_FIXTURES_DIR = 'apps/agent-daemon/src/fixtures/replay'
+export const DEFAULT_BOOTSTRAP_SCENARIO_SUITE = 'self-bootstrap-v0.2'
+export const REQUIRED_BOOTSTRAP_SCENARIO_CASES = [
+  'self-bootstrap-happy-path',
+  'self-bootstrap-closed-pr-recreate',
+  'self-bootstrap-checks-pending',
+  'self-bootstrap-checks-fail',
+] as const
+
+export interface BootstrapScenarioSuiteCaseReport {
+  name: string
+  ok: boolean
+  present: boolean
+  mismatches: string[]
+  actual: ReplayFixtureSummary | null
+  expected: ReplayFixtureSummary | null
+}
+
+export interface BootstrapScenarioSuiteReportSummary {
+  requiredCases: number
+  presentCases: number
+  passedCases: number
+  failedCases: number
+}
+
+export interface BootstrapScenarioSuiteReport {
+  suite: string
+  ok: boolean
+  cases: BootstrapScenarioSuiteCaseReport[]
+  failedCases: string[]
+  summary: BootstrapScenarioSuiteReportSummary
+}
 
 export function evaluateReplayFixtures(fixtures: ReplayFixtureCase[]): ReplayFixtureReport {
   const caseResults = fixtures.map(evaluateReplayFixtureCase)
@@ -99,6 +130,74 @@ export function evaluateReplayFixtures(fixtures: ReplayFixtureCase[]): ReplayFix
 
 export function evaluateReplayFixtureDirectory(fixturesDir: string): ReplayFixtureReport {
   return evaluateReplayFixtures(loadReplayFixtures(fixturesDir))
+}
+
+export function evaluateBootstrapScenarioSuite(input: {
+  suite?: string
+  cases: Array<{
+    name: string
+    ok: boolean
+    present?: boolean
+    mismatches?: string[]
+    actual?: ReplayFixtureSummary | null
+    expected?: ReplayFixtureSummary | null
+  }>
+}): BootstrapScenarioSuiteReport {
+  const reportedCases = new Map(input.cases.map((fixture) => [fixture.name, fixture]))
+  const cases = REQUIRED_BOOTSTRAP_SCENARIO_CASES.map<BootstrapScenarioSuiteCaseReport>((name) => {
+    const reportedCase = reportedCases.get(name)
+    if (!reportedCase) {
+      return {
+        name,
+        ok: false,
+        present: false,
+        mismatches: ['required self-bootstrap scenario is missing'],
+        actual: null,
+        expected: null,
+      }
+    }
+
+    return {
+      name,
+      ok: reportedCase.ok,
+      present: reportedCase.present ?? true,
+      mismatches: [...(reportedCase.mismatches ?? [])],
+      actual: reportedCase.actual ?? null,
+      expected: reportedCase.expected ?? null,
+    }
+  })
+  const failedCases = cases.filter((fixture) => !fixture.ok).map((fixture) => fixture.name)
+
+  return {
+    suite: input.suite ?? DEFAULT_BOOTSTRAP_SCENARIO_SUITE,
+    ok: failedCases.length === 0,
+    cases,
+    failedCases,
+    summary: {
+      requiredCases: REQUIRED_BOOTSTRAP_SCENARIO_CASES.length,
+      presentCases: cases.filter((fixture) => fixture.present).length,
+      passedCases: cases.filter((fixture) => fixture.ok).length,
+      failedCases: failedCases.length,
+    },
+  }
+}
+
+export function evaluateBootstrapScenarioFixtureDirectory(
+  fixturesDir: string,
+): BootstrapScenarioSuiteReport {
+  const replayReport = evaluateReplayFixtureDirectory(fixturesDir)
+
+  return evaluateBootstrapScenarioSuite({
+    suite: DEFAULT_BOOTSTRAP_SCENARIO_SUITE,
+    cases: replayReport.cases.map((fixture) => ({
+      name: fixture.name,
+      ok: fixture.ok,
+      present: true,
+      mismatches: fixture.mismatches,
+      actual: fixture.actual,
+      expected: fixture.expected,
+    })),
+  })
 }
 
 export function loadReplayFixtures(fixturesDir: string): ReplayFixtureCase[] {
@@ -132,6 +231,38 @@ export function formatReplayFixtureReport(report: ReplayFixtureReport): string {
   )
 
   return lines.join('\n')
+}
+
+export function formatBootstrapScenarioSuiteReport(
+  report: BootstrapScenarioSuiteReport,
+): string {
+  return [
+    'Bootstrap Scenarios',
+    `suite=${report.suite}`,
+    `ok=${report.ok}`,
+    'cases:',
+    ...report.cases.map((fixture) => {
+      const status = fixture.ok ? 'ok' : fixture.present ? 'failed' : 'missing'
+      const mismatchSuffix = fixture.mismatches.length > 0
+        ? ` mismatches=${fixture.mismatches.join(' | ')}`
+        : ''
+      return `- ${fixture.name}: ${status}${mismatchSuffix}`
+    }),
+    `failedCases=${report.failedCases.join(',') || '-'}`,
+    `summary: required=${report.summary.requiredCases} present=${report.summary.presentCases} passed=${report.summary.passedCases} failed=${report.summary.failedCases}`,
+  ].join('\n')
+}
+
+export function formatBootstrapScenarioSuiteReportJson(
+  report: BootstrapScenarioSuiteReport,
+): string {
+  return JSON.stringify(report, null, 2)
+}
+
+export function resolveBootstrapScenarioSuiteExitCode(
+  report: Pick<BootstrapScenarioSuiteReport, 'ok'>,
+): number {
+  return report.ok ? 0 : 1
 }
 
 function evaluateReplayFixtureCase(fixture: ReplayFixtureCase): ReplayFixtureCaseResult {

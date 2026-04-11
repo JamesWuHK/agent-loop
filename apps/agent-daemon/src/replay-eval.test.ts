@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import {
+  evaluateBootstrapScenarioFixtureDirectory,
+  evaluateBootstrapScenarioSuite,
   evaluateReplayFixtureDirectory,
   evaluateReplayFixtures,
 } from './replay-eval'
@@ -108,12 +110,56 @@ throw new Error('fixture red test body')
 
     expect(report.ok).toBe(true)
     expect(report.summary).toMatchObject({
-      totalCases: 2,
-      passedCases: 2,
+      totalCases: 6,
+      passedCases: 6,
       failedCases: 0,
-      claimable: 1,
-      blocked: 1,
+      claimable: 3,
+      blocked: 3,
       invalid: 1,
+    })
+  })
+})
+
+describe('evaluateBootstrapScenarioSuite', () => {
+  test('fails when any required self-bootstrap case is missing or red', () => {
+    const report = evaluateBootstrapScenarioSuite({
+      suite: 'self-bootstrap-v0.2',
+      cases: [
+        { name: 'self-bootstrap-happy-path', ok: true },
+        { name: 'self-bootstrap-closed-pr-recreate', ok: true },
+        { name: 'self-bootstrap-checks-pending', ok: false },
+      ],
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.failedCases).toEqual([
+      'self-bootstrap-checks-pending',
+      'self-bootstrap-checks-fail',
+    ])
+    expect(report.summary).toEqual({
+      requiredCases: 4,
+      presentCases: 3,
+      passedCases: 2,
+      failedCases: 2,
+    })
+  })
+
+  test('loads the fixed self-bootstrap scenario suite from disk', () => {
+    const report = evaluateBootstrapScenarioFixtureDirectory(join(import.meta.dir, 'fixtures', 'replay'))
+
+    expect(report.ok).toBe(true)
+    expect(report.cases.map((fixture) => fixture.name)).toEqual([
+      'self-bootstrap-happy-path',
+      'self-bootstrap-closed-pr-recreate',
+      'self-bootstrap-checks-pending',
+      'self-bootstrap-checks-fail',
+    ])
+    expect(report.failedCases).toEqual([])
+    expect(report.summary).toEqual({
+      requiredCases: 4,
+      presentCases: 4,
+      passedCases: 4,
+      failedCases: 0,
     })
   })
 })

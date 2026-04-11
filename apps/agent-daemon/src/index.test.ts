@@ -7,9 +7,11 @@ import {
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeBootstrapScenarioCommand,
   executeIssueLintCommand,
   executeWakeCommand,
   executeWakeRequest,
+  formatBootstrapScenarioOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
@@ -336,6 +338,57 @@ describe('index helpers', () => {
     })
     expect(report.readyGateBlocked).toBe(true)
     expect(report.errors).toEqual(['missing ## RED 测试 / RED Tests'])
+  })
+
+  test('executes bootstrap scenarios locally and supports json output', async () => {
+    const report = await executeBootstrapScenarioCommand({
+      fixturesDir: '/tmp/self-bootstrap-suite',
+    }, {
+      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
+        expect(fixturesDir).toBe('/tmp/self-bootstrap-suite')
+
+        return {
+          suite: 'self-bootstrap-v0.2',
+          ok: false,
+          cases: [
+            {
+              name: 'self-bootstrap-happy-path',
+              ok: true,
+              present: true,
+              mismatches: [],
+              actual: { claimable: 1, blocked: 0, invalid: 0 },
+              expected: { claimable: 1, blocked: 0, invalid: 0 },
+            },
+            {
+              name: 'self-bootstrap-checks-fail',
+              ok: false,
+              present: true,
+              mismatches: ['blocked: expected 0, received 1'],
+              actual: { claimable: 0, blocked: 1, invalid: 0 },
+              expected: { claimable: 0, blocked: 0, invalid: 0 },
+            },
+          ],
+          failedCases: ['self-bootstrap-checks-fail'],
+          summary: {
+            requiredCases: 4,
+            presentCases: 2,
+            passedCases: 1,
+            failedCases: 1,
+          },
+        }
+      },
+    })
+
+    expect(report.ok).toBe(false)
+    expect(JSON.parse(formatBootstrapScenarioOutput(report, true))).toMatchObject({
+      suite: 'self-bootstrap-v0.2',
+      ok: false,
+      failedCases: ['self-bootstrap-checks-fail'],
+      summary: {
+        requiredCases: 4,
+      },
+    })
+    expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
   })
 
   test('builds stable wake requests from CLI commands', () => {

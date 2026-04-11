@@ -1,0 +1,23 @@
+{
+  "name": "self-bootstrap-happy-path",
+  "openIssues": [
+    {
+      "number": 301,
+      "title": "self-bootstrap happy path child issue",
+      "body": "## 用户故事\n\n作为 agent-loop 维护者，我希望 happy path child issue 可以直接进入 claimable 队列。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/replay-eval.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- scenario stays deterministic\n\n### OutOfScope\n- real GitHub calls\n\n### RequiredSemantics\n- issue remains claimable in replay\n\n### ReviewHints\n- check contract validity\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('self-bootstrap happy path fixture')\n```\n\n## 实现步骤\n1. add replay fixture\n\n## 验收\n- [ ] replay case stays claimable",
+      "labels": [
+        "agent:ready"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updatedAt": "2026-04-11T10:00:00.000Z"
+    }
+  ],
+  "issueComments": [],
+  "openPullRequests": [],
+  "expected": {
+    "claimable": 1,
+    "blocked": 0,
+    "invalid": 0
+  }
+}
