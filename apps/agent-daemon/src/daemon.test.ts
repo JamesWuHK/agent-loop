@@ -548,6 +548,70 @@ describe('agent-loop upgrade coordination', () => {
     expect(scheduledPolls).toBe(0)
   })
 
+  test('pauses repeated automatic self-upgrade retries for the same target after a failure', async () => {
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: true,
+      },
+    }) as any
+
+    let autoUpgradeAttempts = 0
+
+    daemon.running = true
+    daemon.startupRecoveryPending = false
+    daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
+    daemon.performAutomaticAgentLoopUpgrade = async () => {
+      autoUpgradeAttempts += 1
+      return true
+    }
+    daemon.agentLoopUpgrade = {
+      enabled: true,
+      repo: 'JamesWuHK/agent-loop',
+      channel: 'master',
+      checkedAt: '2026-04-11T11:00:00.000Z',
+      status: 'upgrade-available',
+      latestVersion: '0.1.2',
+      latestRevision: '2222222222222222222222222222222222222222',
+      latestCommitAt: '2026-04-11T10:59:30.000Z',
+      safeToUpgradeNow: true,
+      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+    }
+    daemon.autoUpgradeState = {
+      attemptCount: 1,
+      successCount: 0,
+      failureCount: 1,
+      noChangeCount: 0,
+      consecutiveFailureCount: 1,
+      lastAttemptAt: '2026-04-11T11:30:00.000Z',
+      lastSuccessAt: null,
+      lastOutcome: 'failed',
+      lastTargetVersion: '0.1.2',
+      lastTargetRevision: '2222222222222222222222222222222222222222',
+      lastError: 'git pull failed',
+      pausedUntil: '2099-04-11T12:00:00.000Z',
+    }
+
+    await daemon.maybeAutoApplyAgentLoopUpgrade()
+
+    expect(autoUpgradeAttempts).toBe(0)
+
+    daemon.agentLoopUpgrade = {
+      ...daemon.agentLoopUpgrade,
+      latestVersion: '0.1.3',
+      latestRevision: '3333333333333333333333333333333333333333',
+      message: 'channel master is newer: local v0.1.0, latest v0.1.3',
+    }
+
+    await daemon.maybeAutoApplyAgentLoopUpgrade()
+
+    expect(autoUpgradeAttempts).toBe(1)
+  })
+
   test('logs a fresh upgrade notice when the announced target changes inside the reminder cooldown', () => {
     const warnings: string[] = []
     const daemon = createTestDaemon({
@@ -963,12 +1027,14 @@ describe('daemon merge recovery helpers', () => {
         successCount: 1,
         failureCount: 0,
         noChangeCount: 0,
+        consecutiveFailureCount: 0,
         lastAttemptAt: '2026-04-05T08:11:05.000Z',
         lastSuccessAt: '2026-04-05T08:11:05.000Z',
         lastOutcome: 'succeeded',
         lastTargetVersion: '0.1.1',
         lastTargetRevision: '2222222222222222222222222222222222222222',
         lastError: null,
+        pausedUntil: null,
       },
     })).toEqual({
       supervisor: 'launchd',
@@ -1054,12 +1120,14 @@ describe('daemon merge recovery helpers', () => {
         successCount: 1,
         failureCount: 0,
         noChangeCount: 0,
+        consecutiveFailureCount: 0,
         lastAttemptAt: '2026-04-05T08:11:05.000Z',
         lastSuccessAt: '2026-04-05T08:11:05.000Z',
         lastOutcome: 'succeeded',
         lastTargetVersion: '0.1.1',
         lastTargetRevision: '2222222222222222222222222222222222222222',
         lastError: null,
+        pausedUntil: null,
       },
     })
   })

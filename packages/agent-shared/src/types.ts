@@ -184,12 +184,14 @@ export interface AgentLoopAutoUpgradeRuntimeState {
   successCount: number
   failureCount: number
   noChangeCount: number
+  consecutiveFailureCount: number
   lastAttemptAt: string | null
   lastSuccessAt: string | null
   lastOutcome: AgentLoopAutoUpgradeOutcome | null
   lastTargetVersion: string | null
   lastTargetRevision: string | null
   lastError: string | null
+  pausedUntil: string | null
 }
 
 export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'

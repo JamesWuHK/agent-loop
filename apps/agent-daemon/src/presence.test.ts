@@ -84,12 +84,14 @@ function buildPresence(overrides: Partial<ManagedDaemonPresence> = {}): ManagedD
       successCount: 1,
       failureCount: 0,
       noChangeCount: 0,
+      consecutiveFailureCount: 0,
       lastAttemptAt: '2026-04-05T08:00:10.000Z',
       lastSuccessAt: '2026-04-05T08:00:12.000Z',
       lastOutcome: 'succeeded',
       lastTargetVersion: '0.1.0',
       lastTargetRevision: 'abcdef1234567890',
       lastError: null,
+      pausedUntil: null,
     },
     ...overrides,
   }
@@ -156,6 +158,7 @@ describe('managed daemon presence helpers', () => {
     expect(extractManagedDaemonPresenceComment(body)).toEqual(presence)
     expect(body).toContain('"autoUpgrade":{')
     expect(body).toContain('Auto-upgrade outcome: succeeded')
+    expect(body).toContain('Auto-upgrade failure streak: 0')
   })
 
   test('round-trips managed daemon upgrade announcement comments and picks the newest one', () => {
@@ -291,12 +294,14 @@ describe('managed daemon presence publisher', () => {
         successCount: 1,
         failureCount: 0,
         noChangeCount: 0,
+        consecutiveFailureCount: 0,
         lastAttemptAt: '2026-04-05T08:00:10.000Z',
         lastSuccessAt: '2026-04-05T08:00:12.000Z',
         lastOutcome: 'succeeded',
         lastTargetVersion: '0.1.0',
         lastTargetRevision: 'abcdef1234567890',
         lastError: null,
+        pausedUntil: null,
       },
     }
 
@@ -327,12 +332,14 @@ describe('managed daemon presence publisher', () => {
       successCount: 1,
       failureCount: 1,
       noChangeCount: 0,
+      consecutiveFailureCount: 1,
       lastAttemptAt: '2026-04-05T08:00:40.000Z',
       lastSuccessAt: '2026-04-05T08:00:12.000Z',
       lastOutcome: 'failed',
       lastTargetVersion: '0.1.1',
       lastTargetRevision: 'fedcba9876543210',
       lastError: 'git pull failed',
+      pausedUntil: '2026-04-05T08:15:40.000Z',
     }
 
     await publisher.flushHeartbeat()
@@ -344,7 +351,9 @@ describe('managed daemon presence publisher', () => {
     expect(comments[0]?.body).toContain('"safeToUpgradeNow":false')
     expect(comments[0]?.body).toContain('"upgradeMessage":"channel master is newer: local v0.1.0, latest v0.1.1"')
     expect(comments[0]?.body).toContain('"lastOutcome":"failed"')
+    expect(comments[0]?.body).toContain('"consecutiveFailureCount":1')
     expect(comments[0]?.body).toContain('Auto-upgrade last error: git pull failed')
+    expect(comments[0]?.body).toContain('Auto-upgrade paused until: 2026-04-05T08:15:40.000Z')
 
     await publisher.stop()
     expect(comments[0]?.body).toContain('"status":"stopped"')

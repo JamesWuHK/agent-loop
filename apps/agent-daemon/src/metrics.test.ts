@@ -209,12 +209,14 @@ describe('metrics', () => {
         successCount: 1,
         failureCount: 1,
         noChangeCount: 1,
+        consecutiveFailureCount: 1,
         lastAttemptAt: '2026-04-11T12:10:00.000Z',
         lastSuccessAt: '2026-04-11T12:00:00.000Z',
         lastOutcome: 'failed',
         lastTargetVersion: '0.1.2',
         lastTargetRevision: '2222222222222222222222222222222222222222',
         lastError: 'git pull failed',
+        pausedUntil: '2026-04-11T12:30:00.000Z',
       }, Date.parse('2026-04-11T12:15:00.000Z'))
 
       const metrics = await getMetrics()

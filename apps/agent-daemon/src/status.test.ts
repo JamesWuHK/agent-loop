@@ -193,12 +193,14 @@ const baseHealth: DaemonStatus & {
       successCount: 1,
       failureCount: 0,
       noChangeCount: 1,
+      consecutiveFailureCount: 0,
       lastAttemptAt: '2026-04-05T08:09:55.000Z',
       lastSuccessAt: '2026-04-05T07:55:00.000Z',
       lastOutcome: 'no_change',
       lastTargetVersion: '0.1.1',
       lastTargetRevision: '2222222222222222222222222222222222222222',
       lastError: null,
+      pausedUntil: null,
     },
   },
   activeWorktrees: [
@@ -455,7 +457,7 @@ describe('status helpers', () => {
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
     expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
-    expect(report).toContain('auto-upgrade: attempts 2 | success 1 | failed 0 | no-change 1 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | target v0.1.1@2222222')
+    expect(report).toContain('auto-upgrade: attempts 2 | success 1 | failed 0 | no-change 1 | failure streak 0 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | paused until none | target v0.1.1@2222222')
     expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
@@ -559,7 +561,7 @@ describe('status helpers', () => {
     expect(report).toContain('auto-upgrade-last-attempt-age-seconds: 300')
     expect(report).toContain('auto-upgrade-last-success-age-seconds: 900')
     expect(report).toContain('oldest blocked issue resume age: 45s')
-    expect(report).toContain('auto-upgrade runtime: attempts 2 | success 1 | failed 0 | no-change 1 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | target v0.1.1@2222222')
+    expect(report).toContain('auto-upgrade runtime: attempts 2 | success 1 | failed 0 | no-change 1 | failure streak 0 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | paused until none | target v0.1.1@2222222')
     expect(report).toContain('- agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work')
     expect(report).toContain('- open PR review blockers: pr#239')
     expect(report).toContain('- github api rate limits observed: graphql/direct[success=0, error=0, timeout=0, rate_limited=1]')
@@ -582,8 +584,10 @@ describe('status helpers', () => {
           autoUpgrade: {
             ...baseHealth.runtime.autoUpgrade!,
             failureCount: 1,
+            consecutiveFailureCount: 2,
             lastOutcome: 'failed',
             lastError: 'git pull failed',
+            pausedUntil: '2099-04-05T09:00:00.000Z',
           },
         },
       },
@@ -600,6 +604,7 @@ describe('status helpers', () => {
     })
 
     expect(report).toContain('- last automatic agent-loop upgrade failed: git pull failed')
+    expect(report).toContain('- automatic agent-loop upgrades paused until 2099-04-05T09:00:00.000Z after 2 consecutive failure(s)')
   })
 
   test('doctor warnings call out adoptable leases and repeated recoveries for the same target', async () => {
