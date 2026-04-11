@@ -8,6 +8,7 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeBootstrapGateCommand,
+  executeBootstrapScorecardCommand,
   executeBootstrapScenarioCommand,
   executeAuditIssuesCommand,
   executeIssueApplyCommand,
@@ -20,6 +21,7 @@ import {
   executeWakeRequest,
   formatAuditIssuesOutput,
   formatBootstrapGateOutput,
+  formatBootstrapScorecardOutput,
   formatBootstrapScenarioOutput,
   formatIssueApplyOutput,
   formatIssueLintOutput,
@@ -739,6 +741,107 @@ describe('index helpers', () => {
     })
 
     expect(report.ok).toBe(true)
+  })
+
+  test('executes bootstrap scorecard with repo-aware config and supports json output', async () => {
+    const scorecard = await executeBootstrapScorecardCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      buildBootstrapScorecardForRepo: async ({ config }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ready: false,
+          categoryCounts: {
+            contract_failure: 2,
+            runtime_failure: 0,
+            pr_lifecycle_failure: 1,
+            review_failure: 1,
+            github_transport_failure: 0,
+            release_process_failure: 1,
+          },
+          topBlockers: [
+            {
+              category: 'contract_failure',
+              issueNumber: null,
+              prNumber: null,
+              reason: '2 invalid ready issue(s) require executable contracts',
+            },
+          ],
+          auditSummary: {
+            managedIssueCount: 8,
+            readyIssueCount: 3,
+            invalidReadyIssueCount: 2,
+            lowScoreIssueCount: 3,
+            warningIssueCount: 1,
+          },
+        }
+      },
+    })
+
+    expect(scorecard.ready).toBe(false)
+    expect(JSON.parse(formatBootstrapScorecardOutput(scorecard, true))).toMatchObject({
+      ready: false,
+      categoryCounts: {
+        contract_failure: 2,
+        release_process_failure: 1,
+      },
+      auditSummary: {
+        invalidReadyIssueCount: 2,
+      },
+    })
+    expect(formatBootstrapScorecardOutput(scorecard)).toContain('Bootstrap Scorecard')
   })
 
   test('resolves rewrite file paths and rejects empty values', () => {

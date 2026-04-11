@@ -46,6 +46,14 @@ export interface IssueOpsSummary {
   warningIssueCount: number
 }
 
+export interface AuditIssueSummary {
+  managedIssueCount: number
+  readyIssueCount: number
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
+}
+
 export interface AuditIssuesReport {
   summary: AuditIssuesSummary
   issues: AuditedIssue[]
@@ -223,6 +231,39 @@ export async function auditIssues(
   return {
     summary: buildAuditSummary(issues),
     issues,
+  }
+}
+
+export function buildAuditedIssue(issue: Pick<
+  AgentIssue,
+  | 'number'
+  | 'title'
+  | 'body'
+  | 'state'
+  | 'labels'
+  | 'isClaimable'
+  | 'claimBlockedBy'
+  | 'hasExecutableContract'
+  | 'contractValidationErrors'
+>): AuditedIssue {
+  const contract = buildIssueLintReport(issue.body, {
+    kind: 'issue',
+    issueNumber: issue.number,
+    repo: '',
+  }, issue.title)
+
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    labels: [...issue.labels],
+    isClaimable: issue.isClaimable,
+    hasExecutableContract: issue.hasExecutableContract,
+    claimBlockedBy: [...issue.claimBlockedBy],
+    contractValidationErrors: [...issue.contractValidationErrors],
+    qualityScore: contract.score,
+    contractWarnings: [...contract.warnings],
+    contract,
   }
 }
 
@@ -409,6 +450,23 @@ export function buildIssueOpsSummary(input: Array<{
     invalidReadyIssueCount: input.filter((issue) => issue.state === 'ready' && issue.readyGateBlocked).length,
     lowScoreIssueCount: input.filter((issue) => issue.qualityScore < LOW_ISSUE_QUALITY_SCORE_THRESHOLD).length,
     warningIssueCount: input.filter((issue) => issue.warningCount > 0).length,
+  }
+}
+
+export function buildAuditIssueSummary(
+  issues: AuditedIssue[],
+  options: {
+    lowScoreThreshold?: number
+  } = {},
+): AuditIssueSummary {
+  const lowScoreThreshold = options.lowScoreThreshold ?? LOW_ISSUE_QUALITY_SCORE_THRESHOLD
+
+  return {
+    managedIssueCount: issues.length,
+    readyIssueCount: issues.filter((issue) => issue.state === 'ready').length,
+    invalidReadyIssueCount: issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract).length,
+    lowScoreIssueCount: issues.filter((issue) => issue.qualityScore < lowScoreThreshold).length,
+    warningIssueCount: issues.filter((issue) => issue.contractWarnings.length > 0).length,
   }
 }
 
