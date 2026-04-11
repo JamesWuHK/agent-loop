@@ -12,6 +12,7 @@ import {
   formatStatusReport,
   parsePrometheusSamples,
   summarizeDaemonMetrics,
+  summarizePrLineageWarnings,
 } from './status'
 
 const baseHealth: DaemonStatus & {
@@ -69,6 +70,28 @@ const baseHealth: DaemonStatus & {
     latestCommitAt: '2026-04-05T08:09:40.000Z',
     safeToUpgradeNow: false,
     message: 'channel master is newer: local v0.1.0, latest v0.1.1',
+  },
+  prLineage: {
+    warningCount: 1,
+    warningCounts: {
+      multiActiveLineage: 1,
+      terminalReuseBlocked: 1,
+      supersededLineage: 1,
+      missingMetadata: 0,
+      lineageMismatchBlocked: 0,
+    },
+    warnings: [
+      {
+        issueNumber: 37,
+        branch: 'agent/37-rebuild/codex-dev',
+        activePrNumbers: [78, 91],
+        supersededPrNumbers: [45],
+        terminalReuseBlockedPrNumbers: [45],
+        missingMetadataPrNumbers: [],
+        lineageMismatchBlockedPrNumbers: [],
+        updatedAt: '2026-04-05T08:09:50.000Z',
+      },
+    ],
   },
   endpoints: {
     health: {
@@ -243,6 +266,14 @@ agent_loop_review_auto_fixes_total{outcome="committed"} 2
 agent_loop_review_auto_fixes_total{outcome="push_failed"} 1
 agent_loop_pr_merge_recovery_total{outcome="merged_initial"} 1
 agent_loop_pr_merge_recovery_total{outcome="refresh_push_failed"} 1
+agent_loop_pr_lineage_events_total{kind="multi_active_lineage"} 1
+agent_loop_pr_lineage_events_total{kind="terminal_reuse_blocked"} 1
+agent_loop_pr_lineage_events_total{kind="superseded_lineage"} 1
+agent_loop_pr_lineage_warnings{kind="multi_active_lineage"} 1
+agent_loop_pr_lineage_warnings{kind="terminal_reuse_blocked"} 1
+agent_loop_pr_lineage_warnings{kind="superseded_lineage"} 1
+agent_loop_pr_lineage_warnings{kind="missing_metadata"} 0
+agent_loop_pr_lineage_warnings{kind="lineage_mismatch_blocked"} 0
 agent_loop_recovery_actions_total{kind="issue-process-idle-timeout",outcome="recoverable"} 2
 agent_loop_transient_loop_errors_total{kind="startup-recovery"} 1
 agent_loop_transient_loop_errors_total{kind="poll-cycle"} 1
@@ -379,6 +410,18 @@ describe('status helpers', () => {
         merged_initial: 1,
         refresh_push_failed: 1,
       },
+      prLineageEvents: {
+        multi_active_lineage: 1,
+        terminal_reuse_blocked: 1,
+        superseded_lineage: 1,
+      },
+      prLineageWarnings: {
+        multi_active_lineage: 1,
+        terminal_reuse_blocked: 1,
+        superseded_lineage: 1,
+        missing_metadata: 0,
+        lineage_mismatch_blocked: 0,
+      },
       recoveryActions: {
         'issue-process-idle-timeout': {
           recoverable: 2,
@@ -410,6 +453,25 @@ describe('status helpers', () => {
       leaseConflicts: 1,
       rateLimitHits: 0,
     })
+  })
+
+  test('surfaces multi-lineage and terminal reuse warnings explicitly', () => {
+    const warnings = summarizePrLineageWarnings([
+      {
+        issueNumber: 37,
+        branch: 'agent/37-rebuild/codex-dev',
+        activePrNumbers: [78, 91],
+        supersededPrNumbers: [45],
+        terminalReuseBlockedPrNumbers: [45],
+        missingMetadataPrNumbers: [],
+        lineageMismatchBlockedPrNumbers: [],
+        updatedAt: '2026-04-05T08:09:50.000Z',
+      },
+    ])
+
+    expect(warnings).toContain('issue#37 has multiple active PR lineages: pr#78, pr#91')
+    expect(warnings).toContain('issue#37 blocked a terminal PR reuse attempt on pr#45')
+    expect(warnings).toContain('issue#37 has superseded PR lineages: pr#45')
   })
 
   test('formats a concise status report with concurrency caps and warnings', () => {
@@ -457,18 +519,23 @@ describe('status helpers', () => {
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
     expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
+    expect(report).toContain('pr lineage: warned issues 1 | multi-active 1 | terminal blocked 1 | superseded 1 | missing metadata 0 | mismatch blocked 0')
     expect(report).toContain('auto-upgrade: attempts 2 | success 1 | failed 0 | no-change 1 | failure streak 0 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | paused until none | target v0.1.1@2222222')
     expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
+    expect(report).toContain('pr lineage detail: issue#37 | active pr#78, pr#91 | superseded pr#45 | terminal pr#45')
     expect(report).toContain('launchd: loaded yes | state running | runs 2 | last signal Terminated: 15')
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1 | wake queued=2, started_work=1, no_match=1, allow_fallback=1')
     expect(report).toContain('github api: graphql/direct[success=8, error=0, timeout=0, rate_limited=1], rest/gh_cli[success=5, error=1, timeout=0, rate_limited=0]')
+    expect(report).toContain('pr-lineage metrics: events multi_active_lineage=1, terminal_reuse_blocked=1, superseded_lineage=1, missing_metadata=0, lineage_mismatch_blocked=0 | warnings multi_active_lineage=1, terminal_reuse_blocked=1, superseded_lineage=1, missing_metadata=0, lineage_mismatch_blocked=0')
     expect(report).toContain('auto-upgrade metrics: attempts 3 | success 1 | failed 1 | no-change 1 | last attempt age 300s | last success age 900s')
     expect(report).toContain('wake: pending 2 | now[queued=0, started_work=0, no_match=0, allow_fallback=1], issue[queued=2, started_work=1, no_match=0, allow_fallback=0], pr[queued=0, started_work=0, no_match=1, allow_fallback=0]')
     expect(report).toContain('pr blockers: pr#239<-issue#105 attempt 5 @ 2026-04-06T01:23:45.000Z: The PR breaks the existing approval-bar flow')
     expect(report).toContain('warnings: startup recovery is still pending')
+    expect(report).toContain('issue#37 has multiple active PR lineages: pr#78, pr#91')
+    expect(report).toContain('issue#37 blocked a terminal PR reuse attempt on pr#45')
     expect(report).toContain('github api rate limits observed: graphql/direct[success=0, error=0, timeout=0, rate_limited=1]')
   })
 

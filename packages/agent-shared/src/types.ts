@@ -287,6 +287,29 @@ export interface RecoveryActionRuntimeDetail {
   reason: string | null
 }
 
+export interface PrLineageWarningRuntimeDetail {
+  issueNumber: number
+  branch: string
+  activePrNumbers: number[]
+  supersededPrNumbers: number[]
+  terminalReuseBlockedPrNumbers: number[]
+  missingMetadataPrNumbers: number[]
+  lineageMismatchBlockedPrNumbers: number[]
+  updatedAt: string
+}
+
+export interface PrLineageRuntimeStatus {
+  warningCount: number
+  warningCounts: {
+    multiActiveLineage: number
+    terminalReuseBlocked: number
+    supersededLineage: number
+    missingMetadata: number
+    lineageMismatchBlocked: number
+  }
+  warnings: PrLineageWarningRuntimeDetail[]
+}
+
 // ─── Claim Event (JSON in issue comment) ────────────────────────────────────
 
 export interface ClaimEvent {
@@ -392,6 +415,7 @@ export interface DaemonStatus {
   }
   agentLoop?: AgentLoopBuildMetadata
   upgrade?: AgentLoopUpgradeMetadata
+  prLineage?: PrLineageRuntimeStatus
   endpoints: {
     health: {
       host: string

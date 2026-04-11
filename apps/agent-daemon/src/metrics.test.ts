@@ -14,6 +14,7 @@ import {
   recordWorkerIdleTimeout,
   recordQueuedWakeRequest,
   recordHandledWakeRequest,
+  recordPrLineageEvent,
   recordPrCreated,
   setActiveWorktrees,
   setActivePrReviews,
@@ -25,6 +26,7 @@ import {
   setLastTransientLoopErrorAgeSeconds,
   setNextPollDelaySeconds,
   setPendingWakeRequests,
+  setPrLineageWarningSnapshot,
   setAutoUpgradeSnapshot,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
@@ -131,6 +133,17 @@ describe('metrics', () => {
   })
 
   describe('review and merge metrics', () => {
+    test('records lineage counters for blocked terminal reuse and superseded PRs', async () => {
+      recordPrLineageEvent('terminal_reuse_blocked')
+      recordPrLineageEvent('superseded_lineage')
+
+      const metrics = await getMetrics()
+
+      expect(metrics).toContain('agent_loop_pr_lineage_events_total')
+      expect(metrics).toContain('kind="terminal_reuse_blocked"')
+      expect(metrics).toContain('kind="superseded_lineage"')
+    })
+
     test('increments pr_reviews_total counter with stage and outcome labels', async () => {
       recordPrReviewOutcome('initial', 'approved')
       recordPrReviewOutcome('post_fix', 'rejected')
@@ -266,6 +279,13 @@ describe('metrics', () => {
     test('tracks active PR reviews and in-flight task gauges', async () => {
       setActivePrReviews(2)
       setActiveLeases(3)
+      setPrLineageWarningSnapshot({
+        multi_active_lineage: 1,
+        terminal_reuse_blocked: 1,
+        superseded_lineage: 1,
+        missing_metadata: 1,
+        lineage_mismatch_blocked: 0,
+      })
       setBlockedIssueResumes(1)
       setBlockedIssueResumeAgeSeconds(45)
       setBlockedIssueResumeEscalations(1)
@@ -283,6 +303,11 @@ describe('metrics', () => {
       const metrics = await getMetrics()
       expect(metrics).toContain('agent_loop_active_pr_reviews')
       expect(metrics).toContain('agent_loop_active_leases')
+      expect(metrics).toContain('agent_loop_pr_lineage_warnings')
+      expect(metrics).toContain('kind="multi_active_lineage"')
+      expect(metrics).toContain('kind="terminal_reuse_blocked"')
+      expect(metrics).toContain('kind="superseded_lineage"')
+      expect(metrics).toContain('kind="missing_metadata"')
       expect(metrics).toContain('agent_loop_blocked_issue_resumes')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_age_seconds')
       expect(metrics).toContain('agent_loop_blocked_issue_resume_escalations')

@@ -47,6 +47,13 @@ const WAKE_KIND_ORDER = ['now', 'issue', 'pr'] as const
 const WAKE_OUTCOME_ORDER = ['queued', 'started_work', 'no_match', 'allow_fallback'] as const
 const GITHUB_API_REQUEST_KEY_ORDER = ['graphql/direct', 'graphql/gh_cli', 'rest/direct', 'rest/gh_cli'] as const
 const GITHUB_API_OUTCOME_ORDER = ['success', 'error', 'timeout', 'rate_limited'] as const
+const PR_LINEAGE_KIND_ORDER = [
+  'multi_active_lineage',
+  'terminal_reuse_blocked',
+  'superseded_lineage',
+  'missing_metadata',
+  'lineage_mismatch_blocked',
+] as const
 const GITHUB_AUDIT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
 const RECENT_TRANSIENT_LOOP_ERROR_WARNING_AGE_SECONDS = 5 * 60
 export interface DaemonHealthPayload extends DaemonStatus {
@@ -62,6 +69,8 @@ export interface DaemonMetricSummary {
   prReviews: Record<string, Record<string, number>>
   autoFixes: Record<string, number>
   mergeRecovery: Record<string, number>
+  prLineageEvents: Record<string, number>
+  prLineageWarnings: Record<string, number>
   recoveryActions: Record<string, Record<string, number>>
   transientLoopErrors: Record<string, number>
   workerIdleTimeouts: Record<string, number>
@@ -147,6 +156,8 @@ interface LocalEndpointResponse {
   statusText: string
   body: string
 }
+
+type PrLineageWarningList = NonNullable<DaemonHealthPayload['prLineage']>['warnings']
 
 export interface GitHubLeaseAuditCheck {
   scope: ManagedLeaseScope
@@ -424,6 +435,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
   const transientLoopErrorCount = health.runtime.transientLoopErrorCount ?? 0
   const startupRecoveryDeferredCount = health.runtime.startupRecoveryDeferredCount ?? 0
+  const prLineage = health.prLineage ?? null
   const lines = [
     `daemon: ${health.status} v${health.version} (${health.mode})`,
     `agent-loop: repo ${health.agentLoop?.repo ?? 'unknown'} | revision ${formatRevision(health.agentLoop?.revision ?? null)} | upgrade ${formatUpgradeSummary(health.upgrade)}`,
@@ -438,6 +450,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `connectivity: transient ${transientLoopErrorCount} | startup deferred ${startupRecoveryDeferredCount} | last transient ${formatTransientLoopError(health.runtime.lastTransientLoopErrorKind, health.runtime.lastTransientLoopErrorAgeSeconds)}`,
     `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)} | escalated ${blockedIssueResumeEscalationCount} | oldest escalation ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
+    `pr lineage: warned issues ${prLineage?.warningCount ?? 0} | multi-active ${prLineage?.warningCounts.multiActiveLineage ?? 0} | terminal blocked ${prLineage?.warningCounts.terminalReuseBlocked ?? 0} | superseded ${prLineage?.warningCounts.supersededLineage ?? 0} | missing metadata ${prLineage?.warningCounts.missingMetadata ?? 0} | mismatch blocked ${prLineage?.warningCounts.lineageMismatchBlocked ?? 0}`,
     `auto-upgrade: ${formatAutoUpgradeRuntimeSummary(health.runtime.autoUpgrade ?? null)}`,
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'} | next ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
   ]
@@ -450,6 +463,9 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
   }
   if (blockedIssueResumeDetails.length > 0) {
     lines.push(`blocked resumes: ${formatBlockedIssueResumeInlineSummary(blockedIssueResumeDetails)}`)
+  }
+  if ((prLineage?.warnings.length ?? 0) > 0) {
+    lines.push(`pr lineage detail: ${formatPrLineageInlineSummary(prLineage?.warnings ?? [])}`)
   }
   if (snapshot.localRuntime?.launchd) {
     lines.push(`launchd: ${formatLaunchdInlineSummary(snapshot.localRuntime.launchd)}`)
@@ -466,6 +482,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
       `outcomes: polls ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)} | wake ${formatOrderedMap(summarizeWakeOutcomes(snapshot.metrics.wakeRequests), WAKE_OUTCOME_ORDER)} | reviews ${formatOrderedMap(reviewTotals, REVIEW_OUTCOME_ORDER)} | auto-fix ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)} | merge ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
     )
     lines.push(`github api: ${formatGitHubApiRequestSummary(snapshot.metrics.githubApiRequests)}`)
+    lines.push(`pr-lineage metrics: events ${formatPrLineageMetricSummary(snapshot.metrics.prLineageEvents)} | warnings ${formatPrLineageMetricSummary(snapshot.metrics.prLineageWarnings)}`)
     lines.push(`auto-upgrade metrics: ${formatAutoUpgradeMetricSummary(snapshot.metrics)}`)
     lines.push(
       `wake: pending ${snapshot.metrics.pendingWakeRequests ?? 0} | ${formatWakeRequestSummary(snapshot.metrics.wakeRequests)}`,
@@ -546,6 +563,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
   const blockedIssueResumeDetails = health.runtime.blockedIssueResumeDetails ?? []
   const oldestBlockedIssueResumeAgeSeconds = health.runtime.oldestBlockedIssueResumeAgeSeconds ?? 0
   const oldestBlockedIssueResumeEscalationAgeSeconds = health.runtime.oldestBlockedIssueResumeEscalationAgeSeconds ?? 0
+  const prLineage = health.prLineage ?? null
   const worktreeLines = health.activeWorktrees.length === 0
     ? ['none']
     : health.activeWorktrees.map((worktree) => `#${worktree.issueNumber} ${worktree.branch} ${worktree.path}`)
@@ -577,6 +595,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         ...REVIEW_STAGE_ORDER.map((stage) => `reviews.${stage}: ${formatOrderedMap(snapshot.metrics?.prReviews[stage] ?? {}, REVIEW_OUTCOME_ORDER)}`),
         `auto-fix: ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)}`,
         `merge-recovery: ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
+        `pr-lineage-events: ${formatPrLineageMetricSummary(snapshot.metrics.prLineageEvents)}`,
+        `pr-lineage-warnings: ${formatPrLineageMetricSummary(snapshot.metrics.prLineageWarnings)}`,
         `transient-loop-errors: ${formatInlineKeyValue(snapshot.metrics.transientLoopErrors) || 'none'}`,
         `last-transient-loop-error-age-seconds: ${snapshot.metrics.lastTransientLoopErrorAgeSeconds ?? 0}`,
         `next-poll-delay-seconds: ${snapshot.metrics.nextPollDelaySeconds ?? 0}`,
@@ -647,6 +667,8 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `oldest blocked issue resume age: ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)}`,
     `blocked issue resume escalations: ${blockedIssueResumeEscalationCount}`,
     `oldest blocked issue resume escalation age: ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
+    `pr lineage warned issues: ${prLineage?.warningCount ?? 0}`,
+    `pr lineage warning counts: multi-active=${prLineage?.warningCounts.multiActiveLineage ?? 0}, terminal-blocked=${prLineage?.warningCounts.terminalReuseBlocked ?? 0}, superseded=${prLineage?.warningCounts.supersededLineage ?? 0}, missing-metadata=${prLineage?.warningCounts.missingMetadata ?? 0}, mismatch-blocked=${prLineage?.warningCounts.lineageMismatchBlocked ?? 0}`,
     `last recovery action: ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `failed issue resume attempts tracked: ${health.runtime.failedIssueResumeAttemptsTracked}`,
     `failed issue resume cooldowns tracked: ${health.runtime.failedIssueResumeCooldownsTracked}`,
@@ -668,6 +690,11 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     ...(blockedIssueResumeDetails.length === 0
       ? ['none']
       : blockedIssueResumeDetails.map((blocked) => formatBlockedIssueResumeDoctorLine(blocked))),
+    '',
+    'PR Lineage',
+    ...((prLineage?.warnings.length ?? 0) === 0
+      ? ['none']
+      : summarizePrLineageWarnings(prLineage?.warnings ?? [])),
     '',
     'Recent Recovery Actions',
     ...recoveryHistoryLines,
@@ -811,6 +838,8 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     prReviews: {},
     autoFixes: {},
     mergeRecovery: {},
+    prLineageEvents: {},
+    prLineageWarnings: {},
     recoveryActions: {},
     transientLoopErrors: {},
     workerIdleTimeouts: {},
@@ -859,6 +888,12 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_pr_merge_recovery_total':
         if (sample.labels.outcome) summary.mergeRecovery[sample.labels.outcome] = sample.value
+        break
+      case 'agent_loop_pr_lineage_events_total':
+        if (sample.labels.kind) summary.prLineageEvents[sample.labels.kind] = sample.value
+        break
+      case 'agent_loop_pr_lineage_warnings':
+        if (sample.labels.kind) summary.prLineageWarnings[sample.labels.kind] = sample.value
         break
       case 'agent_loop_recovery_actions_total':
         if (!sample.labels.kind || !sample.labels.outcome) break
@@ -1073,6 +1108,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (longBlockedWithoutEscalation.length > 0) {
     warnings.push(`long blocked issue resumes without GitHub escalation: ${longBlockedWithoutEscalation.join(', ')}`)
   }
+  if ((snapshot.health.prLineage?.warningCount ?? 0) > 0) {
+    warnings.push(...summarizePrLineageWarnings(snapshot.health.prLineage?.warnings ?? []))
+  }
   const adoptableLeases = snapshot.health.runtime.activeLeaseDetails.filter((lease) => lease.adoptable)
   if (adoptableLeases.length > 0) {
     warnings.push(`adoptable leases detected: ${adoptableLeases.map((lease) => formatLeaseIdentity(lease.scope, lease.targetNumber)).join(', ')}`)
@@ -1111,6 +1149,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if (((snapshot.metrics?.mergeRecovery.refresh_push_failed ?? 0) + (snapshot.metrics?.mergeRecovery.retry_merge_failed ?? 0)) > 0) {
     warnings.push('merge recovery has recent push/merge retry failures; inspect the latest PR recovery comments')
+  }
+  if (Object.values(snapshot.metrics?.prLineageEvents ?? {}).reduce((sum, value) => sum + value, 0) > 0) {
+    warnings.push(`pr lineage events observed: ${formatPrLineageMetricSummary(snapshot.metrics?.prLineageEvents ?? {})}`)
   }
   if ((snapshot.githubAudit?.prBlockers.length ?? 0) > 0) {
     warnings.push(`open PR review blockers: ${snapshot.githubAudit?.prBlockers.map((blocker) => `pr#${blocker.prNumber}`).join(', ')}`)
@@ -1223,6 +1264,42 @@ function summarizeWakeOutcomes(
   return totals
 }
 
+export function summarizePrLineageWarnings(
+  warnings: PrLineageWarningList | null | undefined,
+): string[] {
+  const messages: string[] = []
+
+  for (const warning of warnings ?? []) {
+    if (warning.activePrNumbers.length > 1) {
+      messages.push(
+        `issue#${warning.issueNumber} has multiple active PR lineages: ${formatPrNumberList(warning.activePrNumbers)}`,
+      )
+    }
+    if (warning.terminalReuseBlockedPrNumbers.length > 0) {
+      messages.push(
+        `issue#${warning.issueNumber} blocked a terminal PR reuse attempt on ${formatPrNumberList(warning.terminalReuseBlockedPrNumbers)}`,
+      )
+    }
+    if (warning.supersededPrNumbers.length > 0) {
+      messages.push(
+        `issue#${warning.issueNumber} has superseded PR lineages: ${formatPrNumberList(warning.supersededPrNumbers)}`,
+      )
+    }
+    if (warning.missingMetadataPrNumbers.length > 0) {
+      messages.push(
+        `issue#${warning.issueNumber} has PR lineage metadata missing or invalid on ${formatPrNumberList(warning.missingMetadataPrNumbers)}`,
+      )
+    }
+    if (warning.lineageMismatchBlockedPrNumbers.length > 0) {
+      messages.push(
+        `issue#${warning.issueNumber} blocked PR lineage mismatch on ${formatPrNumberList(warning.lineageMismatchBlockedPrNumbers)}`,
+      )
+    }
+  }
+
+  return messages
+}
+
 function formatGitHubApiRequestKey(transport: string, mode: string): string {
   return `${transport}/${mode}`
 }
@@ -1240,6 +1317,10 @@ function formatOrderedMap(
   order: readonly string[],
 ): string {
   return order.map((key) => `${key}=${values[key] ?? 0}`).join(', ')
+}
+
+function formatPrNumberList(prNumbers: number[]): string {
+  return prNumbers.map((prNumber) => `pr#${prNumber}`).join(', ')
 }
 
 function formatBoolean(value: boolean): string {
@@ -1318,6 +1399,40 @@ function formatGitHubApiRequestSummary(values: Record<string, Record<string, num
     .map((key) => `${key}[${formatOrderedMap(values[key] ?? {}, GITHUB_API_OUTCOME_ORDER)}]`)
 
   return parts.join(', ') || 'none'
+}
+
+function formatPrLineageMetricSummary(values: Record<string, number>): string {
+  return formatOrderedMap(values, PR_LINEAGE_KIND_ORDER)
+}
+
+function formatPrLineageInlineSummary(
+  warnings: NonNullable<DaemonHealthPayload['prLineage']>['warnings'],
+): string {
+  const rendered = warnings.slice(0, 3).map((warning) => {
+    const parts = [`issue#${warning.issueNumber}`]
+    if (warning.activePrNumbers.length > 0) {
+      parts.push(`active ${formatPrNumberList(warning.activePrNumbers)}`)
+    }
+    if (warning.supersededPrNumbers.length > 0) {
+      parts.push(`superseded ${formatPrNumberList(warning.supersededPrNumbers)}`)
+    }
+    if (warning.terminalReuseBlockedPrNumbers.length > 0) {
+      parts.push(`terminal ${formatPrNumberList(warning.terminalReuseBlockedPrNumbers)}`)
+    }
+    if (warning.missingMetadataPrNumbers.length > 0) {
+      parts.push(`missing-metadata ${formatPrNumberList(warning.missingMetadataPrNumbers)}`)
+    }
+    if (warning.lineageMismatchBlockedPrNumbers.length > 0) {
+      parts.push(`mismatch ${formatPrNumberList(warning.lineageMismatchBlockedPrNumbers)}`)
+    }
+    return parts.join(' | ')
+  })
+
+  if (warnings.length > 3) {
+    rendered.push(`+${warnings.length - 3} more`)
+  }
+
+  return rendered.join(' | ')
 }
 
 function countGitHubApiOutcomes(

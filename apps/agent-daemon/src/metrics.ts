@@ -34,6 +34,8 @@
  * - agent_loop_auto_upgrade_no_changes: Gauge of automatic self-upgrades that found no revision change
  * - agent_loop_auto_upgrade_last_attempt_age_seconds: Gauge of the last automatic self-upgrade attempt age
  * - agent_loop_auto_upgrade_last_success_age_seconds: Gauge of the last successful automatic self-upgrade age
+ * - agent_loop_pr_lineage_events_total: Counter of observed PR lineage anomalies and transitions (labels: kind)
+ * - agent_loop_pr_lineage_warnings: Gauge of currently tracked PR lineage warnings by kind
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
@@ -122,6 +124,12 @@ export type PrReviewStage = 'initial' | 'post_fix' | 'merge_refresh'
 export type PrReviewOutcome = 'approved' | 'rejected' | 'invalid_output' | 'execution_failed'
 export type WakeRequestKind = 'now' | 'issue' | 'pr'
 export type WakeRequestOutcome = 'queued' | 'started_work' | 'no_match' | 'allow_fallback'
+export type PrLineageEventKind =
+  | 'multi_active_lineage'
+  | 'terminal_reuse_blocked'
+  | 'superseded_lineage'
+  | 'missing_metadata'
+  | 'lineage_mismatch_blocked'
 
 /**
  * Total number of automated PR reviews performed by the daemon.
@@ -267,6 +275,18 @@ export const wakeRequestsTotal = new Counter({
   name: 'agent_loop_wake_requests_total',
   help: 'Total number of wake requests queued and handled by the daemon',
   labelNames: ['kind', 'outcome'] as const,
+  registers: [registry],
+})
+
+/**
+ * Total number of PR lineage anomalies or transitions observed by the daemon.
+ * Labels:
+ *   - kind: lineage event kind
+ */
+export const prLineageEventsTotal = new Counter({
+  name: 'agent_loop_pr_lineage_events_total',
+  help: 'Total number of PR lineage anomalies or transitions observed by the daemon',
+  labelNames: ['kind'] as const,
   registers: [registry],
 })
 
@@ -508,6 +528,16 @@ export const autoUpgradeLastSuccessAgeSeconds = new Gauge({
   registers: [registry],
 })
 
+/**
+ * Current number of tracked PR lineage warnings by kind.
+ */
+export const prLineageWarnings = new Gauge({
+  name: 'agent_loop_pr_lineage_warnings',
+  help: 'Current number of tracked PR lineage warnings by kind',
+  labelNames: ['kind'] as const,
+  registers: [registry],
+})
+
 // ─── Histograms ────────────────────────────────────────────────────────────────
 
 /**
@@ -739,6 +769,13 @@ export function recordHandledWakeRequest(
 }
 
 /**
+ * Record a PR lineage observability event.
+ */
+export function recordPrLineageEvent(kind: PrLineageEventKind): void {
+  prLineageEventsTotal.inc({ kind })
+}
+
+/**
  * Update active worktrees gauge.
  */
 export function setActiveWorktrees(count: number): void {
@@ -920,6 +957,26 @@ export function setAutoUpgradeSnapshot(
   autoUpgradeNoChanges.set(state.noChangeCount)
   autoUpgradeLastAttemptAgeSeconds.set(computeIsoAgeSeconds(state.lastAttemptAt, nowMs))
   autoUpgradeLastSuccessAgeSeconds.set(computeIsoAgeSeconds(state.lastSuccessAt, nowMs))
+}
+
+/**
+ * Update tracked PR lineage warning gauges by kind.
+ */
+export function setPrLineageWarningSnapshot(
+  counts: Partial<Record<PrLineageEventKind, number>>,
+): void {
+  const orderedKinds: PrLineageEventKind[] = [
+    'multi_active_lineage',
+    'terminal_reuse_blocked',
+    'superseded_lineage',
+    'missing_metadata',
+    'lineage_mismatch_blocked',
+  ]
+
+  prLineageWarnings.reset()
+  for (const kind of orderedKinds) {
+    prLineageWarnings.labels({ kind }).set(counts[kind] ?? 0)
+  }
 }
 
 /**

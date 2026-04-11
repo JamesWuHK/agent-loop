@@ -18,6 +18,7 @@ import type {
   ManagedLeaseComment,
   ManagedLeaseScope,
   ManagedPullRequest,
+  PrLineageWarningRuntimeDetail,
   RecoveryActionRuntimeDetail,
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
@@ -58,6 +59,7 @@ import {
   recordWorkerIdleTimeout,
   recordQueuedWakeRequest,
   recordHandledWakeRequest,
+  recordPrLineageEvent,
   setStalledWorkers,
   setBlockedIssueResumes,
   setBlockedIssueResumeAgeSeconds,
@@ -65,11 +67,13 @@ import {
   setBlockedIssueResumeEscalationAgeSeconds,
   setLastTransientLoopErrorAgeSeconds,
   setPendingWakeRequests,
+  setPrLineageWarningSnapshot,
   setStartupRecoveryPending,
   setAutoUpgradeSnapshot,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
   METRICS_PATH,
+  type PrLineageEventKind,
   type MetricsServer,
 } from './metrics'
 import {
@@ -110,7 +114,7 @@ import {
   resolveAgentLoopBuildMetadata,
   resolveAgentLoopUpgradePolicy,
 } from './version'
-import { parsePrLineageMetadata } from './pr-lineage'
+import { inferPrAttemptFromBranch, parsePrLineageMetadata } from './pr-lineage'
 import {
   PrLineagePreflightError,
   collectPrLineagePreflightActualState,
@@ -159,6 +163,7 @@ const BLOCKED_ISSUE_RESUME_ESCALATION_COMMENT_PREFIX = '<!-- agent-loop:issue-re
 const ISSUE_RESUME_RESOLUTION_COMMENT_PREFIX = '<!-- agent-loop:issue-resume-resolved '
 export const BLOCKED_ISSUE_RESUME_WARNING_AGE_SECONDS = 5 * 60
 const MISSING_REMOTE_BRANCH_RECOVERY_REASON_PREFIX = 'missing-remote-branch:'
+const MAX_PR_LINEAGE_BRANCH_SCAN_ATTEMPTS = 4
 
 interface ResumableIssueCandidate {
   issue: AgentIssue
@@ -184,6 +189,13 @@ interface MissingRemoteBranchResumableIssueWorktree {
 type ResumableIssueWorktreeResult =
   | ReadyResumableIssueWorktree
   | MissingRemoteBranchResumableIssueWorktree
+
+interface PrLineageObservationInput {
+  issueNumber: number
+  branch: string
+  terminalReuseBlockedPrNumbers?: number[]
+  lineageMismatchBlockedPrNumbers?: number[]
+}
 
 interface ResumableIssuePrHandoff {
   kind: 'pr-review' | 'pr-merge'
@@ -268,6 +280,7 @@ export class AgentDaemon {
   private activeLeaseReaders = new Map<string, ActiveLeaseRuntimeReader>()
   private stalledWorkers = new Map<string, StalledWorkerState>()
   private blockedIssueResumes = new Map<number, BlockedIssueResumeState>()
+  private prLineageWarnings = new Map<number, PrLineageWarningRuntimeDetail>()
   private recoveryActionHistory: RecoveryActionRuntimeDetail[] = []
   private lastRecoveryActionAt: string | null = null
   private lastRecoveryActionKind: string | null = null
@@ -704,6 +717,161 @@ export class AgentDaemon {
   ): Promise<BranchPullRequestRecord | null> {
     const pullRequests = await listBranchPullRequests(branch, this.config)
     return pullRequests.find(pullRequest => pullRequest.number === prNumber) ?? null
+  }
+
+  private async observePrLineageForIssue(
+    input: PrLineageObservationInput,
+  ): Promise<void> {
+    const familyBranches = buildPrLineageFamilyBranches(input.branch)
+    const records = await Promise.all(
+      familyBranches.map(async (branch) => ({
+        branch,
+        pullRequests: await listBranchPullRequests(branch, this.config),
+      })),
+    )
+
+    const candidates = new Map<number, BranchPullRequestRecord>()
+    for (const entry of records) {
+      for (const pullRequest of entry.pullRequests) {
+        candidates.set(pullRequest.number, pullRequest)
+      }
+    }
+
+    const observed = [...candidates.values()]
+      .map((pullRequest) => {
+        let metadataIssue: number | null = null
+        let metadataAttempt = inferPrAttemptFromBranch(pullRequest.headRefName)
+        let hasValidMetadata = false
+
+        if (pullRequest.body) {
+          try {
+            const metadata = parsePrLineageMetadata(pullRequest.body)
+            metadataIssue = metadata.issue
+            metadataAttempt = metadata.attempt
+            hasValidMetadata = true
+          } catch {
+            hasValidMetadata = false
+          }
+        }
+
+        return {
+          ...pullRequest,
+          metadataIssue,
+          metadataAttempt,
+          hasValidMetadata,
+        }
+      })
+      .filter((pullRequest) => (
+        pullRequest.headRefName.startsWith(`agent/${input.issueNumber}/`)
+        || pullRequest.headRefName.startsWith(`agent/${input.issueNumber}-rebuild/`)
+        || pullRequest.headRefName.startsWith(`agent/${input.issueNumber}-rebuild-`)
+        || pullRequest.metadataIssue === input.issueNumber
+      ))
+
+    const openAttempts = observed
+      .filter(pullRequest => pullRequest.prState === 'open')
+      .map(pullRequest => pullRequest.metadataAttempt)
+    const highestOpenAttempt = openAttempts.length > 0
+      ? Math.max(...openAttempts)
+      : null
+
+    const activePrNumbers = observed
+      .filter(pullRequest => pullRequest.prState === 'open')
+      .map(pullRequest => pullRequest.number)
+      .sort((left, right) => left - right)
+
+    const supersededPrNumbers = highestOpenAttempt === null
+      ? []
+      : observed
+          .filter((pullRequest) => (
+            pullRequest.prState !== 'open'
+            && pullRequest.metadataAttempt < highestOpenAttempt
+          ))
+          .map(pullRequest => pullRequest.number)
+          .sort((left, right) => left - right)
+
+    const missingMetadataPrNumbers = observed
+      .filter(pullRequest => !pullRequest.hasValidMetadata)
+      .map(pullRequest => pullRequest.number)
+      .sort((left, right) => left - right)
+
+    const terminalReuseBlockedPrNumbers = uniqueSortedNumbers(
+      input.terminalReuseBlockedPrNumbers ?? [],
+    )
+
+    const lineageMismatchBlockedPrNumbers = uniqueSortedNumbers(
+      input.lineageMismatchBlockedPrNumbers ?? [],
+    )
+
+    this.setPrLineageWarningState({
+      issueNumber: input.issueNumber,
+      branch: input.branch,
+      activePrNumbers,
+      supersededPrNumbers,
+      terminalReuseBlockedPrNumbers,
+      missingMetadataPrNumbers,
+      lineageMismatchBlockedPrNumbers,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+
+  private setPrLineageWarningState(next: PrLineageWarningRuntimeDetail): void {
+    if (!hasPrLineageWarnings(next)) {
+      const deleted = this.prLineageWarnings.delete(next.issueNumber)
+      if (deleted) {
+        this.syncRuntimeMetrics()
+      }
+      return
+    }
+
+    const previous = this.prLineageWarnings.get(next.issueNumber) ?? null
+
+    if (next.activePrNumbers.length > 1 && (previous?.activePrNumbers.length ?? 0) <= 1) {
+      recordPrLineageEvent('multi_active_lineage')
+    }
+    this.recordNewPrLineageNumbers(previous?.terminalReuseBlockedPrNumbers ?? [], next.terminalReuseBlockedPrNumbers, 'terminal_reuse_blocked')
+    this.recordNewPrLineageNumbers(previous?.supersededPrNumbers ?? [], next.supersededPrNumbers, 'superseded_lineage')
+    this.recordNewPrLineageNumbers(previous?.missingMetadataPrNumbers ?? [], next.missingMetadataPrNumbers, 'missing_metadata')
+    this.recordNewPrLineageNumbers(previous?.lineageMismatchBlockedPrNumbers ?? [], next.lineageMismatchBlockedPrNumbers, 'lineage_mismatch_blocked')
+
+    this.prLineageWarnings.set(next.issueNumber, next)
+    this.syncRuntimeMetrics()
+  }
+
+  private recordNewPrLineageNumbers(
+    previous: number[],
+    next: number[],
+    kind: PrLineageEventKind,
+  ): void {
+    const seen = new Set(previous)
+    for (const prNumber of next) {
+      if (seen.has(prNumber)) continue
+      recordPrLineageEvent(kind)
+    }
+  }
+
+  private clearPrLineageWarning(issueNumber: number): void {
+    if (this.prLineageWarnings.delete(issueNumber)) {
+      this.syncRuntimeMetrics()
+    }
+  }
+
+  private buildPrLineageStatus(): DaemonStatus['prLineage'] {
+    const warnings = [...this.prLineageWarnings.values()]
+      .sort((left, right) => left.issueNumber - right.issueNumber)
+    const warningCounts = {
+      multiActiveLineage: warnings.filter(warning => warning.activePrNumbers.length > 1).length,
+      terminalReuseBlocked: warnings.filter(warning => warning.terminalReuseBlockedPrNumbers.length > 0).length,
+      supersededLineage: warnings.filter(warning => warning.supersededPrNumbers.length > 0).length,
+      missingMetadata: warnings.filter(warning => warning.missingMetadataPrNumbers.length > 0).length,
+      lineageMismatchBlocked: warnings.filter(warning => warning.lineageMismatchBlockedPrNumbers.length > 0).length,
+    }
+
+    return {
+      warningCount: warnings.length,
+      warningCounts,
+      warnings,
+    }
   }
 
   private enqueueWakeRequests(requests: WakeRequest[]): void {
@@ -1156,6 +1324,7 @@ export class AgentDaemon {
         ...this.agentLoopBuild,
       },
       upgrade: this.buildUpgradeStatus(),
+      prLineage: this.buildPrLineageStatus(),
       endpoints: {
         health: {
           host: this.healthServerConfig.host,
@@ -2198,6 +2367,12 @@ export class AgentDaemon {
     let leaseReason: string | undefined
     let leaseRecoveryKind: string | undefined
     try {
+      if (issueNumber !== null) {
+        await this.observePrLineageForIssue({
+          issueNumber,
+          branch: pr.headRefName,
+        })
+      }
       try {
         await this.runPrLineagePreflightOrThrow({
           stage: 'PR review',
@@ -2210,6 +2385,13 @@ export class AgentDaemon {
         })
       } catch (error) {
         if (error instanceof PrLineagePreflightError) {
+          if (issueNumber !== null) {
+            await this.observePrLineageForIssue({
+              issueNumber,
+              branch: pr.headRefName,
+              lineageMismatchBlockedPrNumbers: [pr.number],
+            })
+          }
           this.logger.warn(`[pr-review-subagent] blocked PR #${pr.number} by lineage preflight: ${error.message}`)
           leaseReason = error.message
           leaseRecoveryKind = 'pr-review-lineage-blocked'
@@ -2560,6 +2742,12 @@ export class AgentDaemon {
     let leaseReason: string | undefined
     let leaseRecoveryKind: string | undefined
     try {
+      if (issueNumber !== null) {
+        await this.observePrLineageForIssue({
+          issueNumber,
+          branch: pr.headRefName,
+        })
+      }
       try {
         await this.runPrLineagePreflightOrThrow({
           stage: 'PR merge',
@@ -2572,6 +2760,13 @@ export class AgentDaemon {
         })
       } catch (error) {
         if (error instanceof PrLineagePreflightError) {
+          if (issueNumber !== null) {
+            await this.observePrLineageForIssue({
+              issueNumber,
+              branch: pr.headRefName,
+              lineageMismatchBlockedPrNumbers: [pr.number],
+            })
+          }
           this.logger.warn(`[pr-merge-subagent] blocked PR #${pr.number} by lineage preflight: ${error.message}`)
           leaseReason = error.message
           leaseRecoveryKind = 'pr-merge-lineage-blocked'
@@ -2610,6 +2805,7 @@ export class AgentDaemon {
               : mergeResult.message,
             pr.number,
           )
+          this.clearPrLineageWarning(issueNumber)
         }
         this.logger.log(`[pr-merge-subagent] merged approved PR #${pr.number}`)
         return
@@ -2767,6 +2963,13 @@ export class AgentDaemon {
       const linkedOpenPr = hasReusableOpenPr(prCheck)
         ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
         : null
+      await this.observePrLineageForIssue({
+        issueNumber,
+        branch,
+        terminalReuseBlockedPrNumbers: prCheck.prNumber !== null && prCheck.prState !== 'open'
+          ? [prCheck.prNumber]
+          : [],
+      })
       try {
         await this.runPrLineagePreflightOrThrow({
           stage: 'issue recovery',
@@ -2778,6 +2981,14 @@ export class AgentDaemon {
         })
       } catch (error) {
         if (error instanceof PrLineagePreflightError) {
+          await this.observePrLineageForIssue({
+            issueNumber,
+            branch,
+            terminalReuseBlockedPrNumbers: prCheck.prNumber !== null && prCheck.prState !== 'open'
+              ? [prCheck.prNumber]
+              : [],
+            lineageMismatchBlockedPrNumbers: linkedOpenPr?.number !== undefined ? [linkedOpenPr.number] : [],
+          })
           this.logger.warn(`[daemon] issue #${issueNumber} blocked by PR lineage preflight: ${error.message}`)
           this.registerFailedIssueResume(issueNumber)
           await this.completeManagedLease(
@@ -3303,6 +3514,15 @@ export class AgentDaemon {
       }
     }
 
+    const linkedBranchPr = await checkPrExists(activeBranch, this.config)
+    await this.observePrLineageForIssue({
+      issueNumber: issue.number,
+      branch: activeBranch,
+      terminalReuseBlockedPrNumbers: linkedBranchPr.prNumber !== null && linkedBranchPr.prState !== 'open'
+        ? [linkedBranchPr.prNumber]
+        : [],
+    })
+
     let pr: Awaited<ReturnType<typeof createOrFindPr>>
     try {
       pr = await createOrFindPr(
@@ -3317,6 +3537,13 @@ export class AgentDaemon {
       )
     } catch (error) {
       if (error instanceof PrLineagePreflightError) {
+        await this.observePrLineageForIssue({
+          issueNumber: issue.number,
+          branch: activeBranch,
+          lineageMismatchBlockedPrNumbers: linkedBranchPr.prNumber !== null
+            ? [linkedBranchPr.prNumber]
+            : [],
+        })
         this.logger.warn(`[daemon] issue #${issue.number} blocked by PR lineage preflight: ${error.message}`)
         return {
           status: 'blocked',
@@ -3336,8 +3563,17 @@ export class AgentDaemon {
         this.syncRuntimeMetrics()
       }
     }
+    await this.observePrLineageForIssue({
+      issueNumber: issue.number,
+      branch: activeBranch,
+    })
 
     if (pr.kind === 'terminal') {
+      await this.observePrLineageForIssue({
+        issueNumber: issue.number,
+        branch: activeBranch,
+        terminalReuseBlockedPrNumbers: [pr.prNumber],
+      })
       const reason = `Linked PR #${pr.prNumber} is ${pr.prState}; replacement PR required before automation can continue`
       await transitionIssueState(
         issue.number,
@@ -3374,6 +3610,11 @@ export class AgentDaemon {
       })
     } catch (error) {
       if (error instanceof PrLineagePreflightError) {
+        await this.observePrLineageForIssue({
+          issueNumber: issue.number,
+          branch: activeBranch,
+          lineageMismatchBlockedPrNumbers: [pr.prNumber],
+        })
         this.logger.warn(`[daemon] issue #${issue.number} blocked before PR review: ${error.message}`)
         return {
           status: 'blocked',
@@ -3438,6 +3679,11 @@ export class AgentDaemon {
         })
       } catch (error) {
         if (error instanceof PrLineagePreflightError) {
+          await this.observePrLineageForIssue({
+            issueNumber: issue.number,
+            branch: activeBranch,
+            lineageMismatchBlockedPrNumbers: [pr.prNumber],
+          })
           this.logger.warn(`[daemon] issue #${issue.number} blocked before PR merge: ${error.message}`)
           return {
             status: 'blocked',
@@ -3537,6 +3783,7 @@ export class AgentDaemon {
       recordPrCreated()
 
       await removeWorktree(worktreePath, activeBranch)
+      this.clearPrLineageWarning(issue.number)
       this.activeWorktrees.delete(issue.number)
       this.syncRuntimeMetrics()
       return { status: 'completed' }
@@ -4359,6 +4606,7 @@ export class AgentDaemon {
 
   private syncRuntimeMetrics(): void {
     const runtime = this.buildRuntimeStatus()
+    const prLineage = this.buildPrLineageStatus()
     setActiveWorktrees(this.activeWorktrees.size)
     setActivePrReviews(runtime.activePrReviews)
     setInFlightIssueProcesses(runtime.inFlightIssueProcess)
@@ -4375,6 +4623,13 @@ export class AgentDaemon {
     setBlockedIssueResumeEscalations(runtime.blockedIssueResumeEscalationCount)
     setBlockedIssueResumeEscalationAgeSeconds(runtime.oldestBlockedIssueResumeEscalationAgeSeconds)
     setPendingWakeRequests(this.pendingWakeRequests.length)
+    setPrLineageWarningSnapshot({
+      multi_active_lineage: prLineage?.warningCounts.multiActiveLineage ?? 0,
+      terminal_reuse_blocked: prLineage?.warningCounts.terminalReuseBlocked ?? 0,
+      superseded_lineage: prLineage?.warningCounts.supersededLineage ?? 0,
+      missing_metadata: prLineage?.warningCounts.missingMetadata ?? 0,
+      lineage_mismatch_blocked: prLineage?.warningCounts.lineageMismatchBlocked ?? 0,
+    })
     setAutoUpgradeSnapshot(this.autoUpgradeState)
   }
 
@@ -5000,6 +5255,56 @@ export function buildDaemonRuntimeStatus(input: {
     oldestBlockedIssueResumeEscalationAgeSeconds: input.oldestBlockedIssueResumeEscalationAgeSeconds,
     autoUpgrade: input.autoUpgrade,
   }
+}
+
+function buildPrLineageFamilyBranches(branch: string): string[] {
+  const match = branch.match(/^agent\/(\d+)(?:-rebuild(?:-(\d+))?)?\/(.+)$/)
+  if (!match?.[1] || !match[3]) {
+    return [branch]
+  }
+
+  const issueNumber = match[1]
+  const suffix = match[3]
+  const currentAttempt = inferPrAttemptFromBranch(branch)
+  const maxAttempts = Math.max(MAX_PR_LINEAGE_BRANCH_SCAN_ATTEMPTS, currentAttempt + 1)
+  const branches: string[] = []
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    branches.push(attempt === 1
+      ? `agent/${issueNumber}/${suffix}`
+      : attempt === 2
+        ? `agent/${issueNumber}-rebuild/${suffix}`
+        : `agent/${issueNumber}-rebuild-${attempt - 1}/${suffix}`)
+  }
+
+  return uniqueSortedStrings(branches)
+}
+
+function hasPrLineageWarnings(
+  warning: Pick<
+    PrLineageWarningRuntimeDetail,
+    | 'activePrNumbers'
+    | 'supersededPrNumbers'
+    | 'terminalReuseBlockedPrNumbers'
+    | 'missingMetadataPrNumbers'
+    | 'lineageMismatchBlockedPrNumbers'
+  >,
+): boolean {
+  return (
+    warning.activePrNumbers.length > 1
+    || warning.supersededPrNumbers.length > 0
+    || warning.terminalReuseBlockedPrNumbers.length > 0
+    || warning.missingMetadataPrNumbers.length > 0
+    || warning.lineageMismatchBlockedPrNumbers.length > 0
+  )
+}
+
+function uniqueSortedNumbers(values: number[]): number[] {
+  return [...new Set(values)].sort((left, right) => left - right)
+}
+
+function uniqueSortedStrings(values: string[]): string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right))
 }
 
 function getIsoAgeSeconds(iso: string, now = Date.now()): number {
