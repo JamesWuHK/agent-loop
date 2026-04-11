@@ -6,8 +6,8 @@ import { ISSUE_LABELS } from '@agent/shared'
 import { buildReadyGateFailureComment, evaluateReadyGate } from './ready-gate'
 
 describe('ready-gate', () => {
-  test('skips issues that are not in agent:ready', () => {
-    expect(evaluateReadyGate({
+  test('skips issues that are not in agent:ready', async () => {
+    expect(await evaluateReadyGate({
       number: 49,
       title: 'example',
       body: '## 用户故事\n- test',
@@ -17,11 +17,12 @@ describe('ready-gate', () => {
       shouldEnforce: false,
       valid: true,
       errors: [],
+      simulation: null,
     })
   })
 
-  test('rejects ready issues with incomplete executable contracts', () => {
-    expect(evaluateReadyGate({
+  test('rejects ready issues with incomplete executable contracts', async () => {
+    expect(await evaluateReadyGate({
       number: 49,
       title: 'example',
       body: '## 用户故事\n只有故事，没有 contract。',
@@ -38,17 +39,18 @@ describe('ready-gate', () => {
         'missing ### Validation / Validation Commands',
         'missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)',
       ],
+      simulation: null,
     })
   })
 
-  test('accepts ready issues with executable contracts', () => {
+  test('accepts ready issues with executable contracts', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-valid-'))
 
     try {
       mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
       writeFileSync(join(tempDir, 'apps', 'desktop', 'src', 'pages', 'LoginPage.test.tsx'), 'test', 'utf-8')
 
-      expect(evaluateReadyGate({
+      expect(await evaluateReadyGate({
         number: 49,
         title: 'example',
         body: [
@@ -86,19 +88,20 @@ describe('ready-gate', () => {
         shouldEnforce: true,
         valid: true,
         errors: [],
+        simulation: null,
       })
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
 
-  test('accepts ready issues when validation points at a new file that is explicitly allowed', () => {
+  test('accepts ready issues when validation points at a new file that is explicitly allowed', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-future-file-'))
 
     try {
       mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
 
-      expect(evaluateReadyGate({
+      expect(await evaluateReadyGate({
         number: 77,
         title: 'example',
         body: [
@@ -142,20 +145,21 @@ describe('ready-gate', () => {
         shouldEnforce: true,
         valid: true,
         errors: [],
+        simulation: null,
       })
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
   })
 
-  test('rejects ready issues when validation references repo paths that do not exist', () => {
+  test('rejects ready issues when validation references repo paths that do not exist', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'ready-gate-missing-'))
 
     try {
       mkdirSync(join(tempDir, 'apps', 'desktop', 'src', 'pages'), { recursive: true })
       writeFileSync(join(tempDir, 'apps', 'desktop', 'src', 'pages', 'MainPage.sprint-c.smoke.test.tsx'), 'test', 'utf-8')
 
-      expect(evaluateReadyGate({
+      expect(await evaluateReadyGate({
         number: 92,
         title: 'example',
         body: [
@@ -202,10 +206,73 @@ describe('ready-gate', () => {
         errors: [
           'validation references missing repo path: apps/desktop/src/pages/MainPage.sessions-sidebar.test.tsx',
         ],
+        simulation: null,
       })
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+
+  test('merges simulation failures only when explicitly enabled', async () => {
+    const evaluation = await evaluateReadyGate({
+      number: 105,
+      title: '[AL-X] 增加 issue simulate',
+      body: [
+        '## 用户故事',
+        '作为维护者，我希望 ready gate 可选叠加 simulation。',
+        '',
+        '## Context',
+        '### Dependencies',
+        '```json',
+        '{ "dependsOn": [] }',
+        '```',
+        '### AllowedFiles',
+        '- apps/agent-daemon/src/ready-gate.ts',
+        '### ForbiddenFiles',
+        '- apps/agent-daemon/src/daemon.ts',
+        '### MustPreserve',
+        '- 默认 hard validation 保持兼容',
+        '### OutOfScope',
+        '- runtime evaluator',
+        '### RequiredSemantics',
+        '- 显式开关控制 simulation',
+        '### Validation',
+        '- `bun test apps/agent-daemon/src/ready-gate.test.ts`',
+        '',
+        '## RED 测试',
+        '```ts',
+        'throw new Error("red")',
+        '```',
+        '',
+        '## 实现步骤',
+        '1. 先补测试',
+        '',
+        '## 验收',
+        '- [ ] 默认行为不回归',
+      ].join('\n'),
+      state: 'open',
+      labels: [ISSUE_LABELS.READY],
+    }, {
+      enableSimulation: true,
+      repoRoot: '/tmp/repo',
+      simulateIssueExecutability: async () => ({
+        valid: false,
+        summary: 'simulation failed',
+        failures: ['planning output does not contain commit-shaped subtasks'],
+        findings: [{
+          code: 'planning_not_commit_shaped',
+          stage: 'planner',
+          message: 'planning output does not contain commit-shaped subtasks',
+        }],
+        plannerPrompt: 'prompt',
+        plannerOutput: '1. Read the codebase',
+        plannedSubtasks: ['Read the codebase'],
+      }),
+    })
+
+    expect(evaluation.valid).toBe(false)
+    expect(evaluation.errors).toContain('planning output does not contain commit-shaped subtasks')
+    expect(evaluation.simulation?.valid).toBe(false)
   })
 
   test('renders a repair-oriented failure comment', () => {

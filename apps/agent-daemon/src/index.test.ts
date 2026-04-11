@@ -10,6 +10,7 @@ import {
   executeIssueLintCommand,
   executeIssueRewriteCommand,
   executeIssueSplitCommand,
+  executeIssueSimulateCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
@@ -18,6 +19,7 @@ import {
   resolveIssueLintTarget,
   resolveIssueRewriteTarget,
   resolveIssueSplitTarget,
+  resolveIssueSimulateTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -101,6 +103,31 @@ describe('index helpers', () => {
     expect(() => resolveIssueSplitTarget({
       'split-start-number': '41',
     })).toThrow('--split-start-number can only be used with --split-file')
+  })
+
+  test('resolves simulate targets and rejects conflicting simulate selectors', () => {
+    expect(resolveIssueSimulateTarget({
+      'simulate-file': 'docs/issues/ready.md',
+    })).toEqual({
+      kind: 'file',
+      path: 'docs/issues/ready.md',
+    })
+
+    expect(resolveIssueSimulateTarget({
+      'simulate-issue': '40',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 40,
+    })
+
+    expect(() => resolveIssueSimulateTarget({
+      'simulate-file': 'docs/issues/ready.md',
+      'simulate-issue': '40',
+    })).toThrow('Only one of --simulate-issue or --simulate-file can be used at a time')
+
+    expect(() => resolveIssueSimulateTarget({
+      'simulate-file': '   ',
+    })).toThrow('--simulate-file must be a non-empty path')
   })
 
   test('executes local issue lint without loading remote config', async () => {
@@ -315,6 +342,166 @@ describe('index helpers', () => {
     })
 
     expect(result.markdown.startsWith('## Parent Summary')).toBe(true)
+  })
+
+  test('executes local issue simulation by reading a markdown file', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-simulate-test-'))
+    const draftPath = join(draftDir, 'issue.md')
+    writeFileSync(draftPath, '## 用户故事\n\n作为维护者，我希望 issue simulate 能提前发现风险。\n')
+
+    const result = await executeIssueSimulateCommand({
+      target: {
+        kind: 'file',
+        path: draftPath,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      fetchIssueSnapshot: async () => {
+        throw new Error('should not fetch remote issue for local simulate')
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody, repoRoot, config }) => {
+        expect(issueTitle).toBe(draftPath)
+        expect(issueBody).toContain('issue simulate')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          valid: true,
+          summary: 'simulation passed',
+          failures: [],
+          findings: [],
+          plannerPrompt: 'prompt',
+          plannerOutput: '1. Add issue simulate CLI',
+          plannedSubtasks: ['Add issue simulate CLI'],
+        }
+      },
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.plannedSubtasks).toEqual(['Add issue simulate CLI'])
+  })
+
+  test('executes remote issue simulation by loading the issue body first', async () => {
+    const result = await executeIssueSimulateCommand({
+      target: {
+        kind: 'issue',
+        issueNumber: 40,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => ({
+        repo: args.repo!,
+        pat: args.pat!,
+        concurrency: 1,
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        machineId: 'codex-dev',
+        project: {
+          profile: 'generic',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: 'claude',
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 300_000,
+        },
+      } as any),
+      readTextFile: () => {
+        throw new Error('should not read local files for remote simulate')
+      },
+      fetchIssueSnapshot: async (issueNumber, config) => {
+        expect(issueNumber).toBe(40)
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          number: 40,
+          title: '[AL-10] issue simulate',
+          body: '## 用户故事\n\n作为维护者，我希望 issue simulate 能提前发现风险。\n',
+          state: 'open',
+          labels: ['agent:ready'],
+        }
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody }) => {
+        expect(issueTitle).toBe('[AL-10] issue simulate')
+        expect(issueBody).toContain('issue simulate')
+
+        return {
+          valid: false,
+          summary: 'simulation failed',
+          failures: ['planning output does not contain commit-shaped subtasks'],
+          findings: [{
+            code: 'planning_not_commit_shaped',
+            stage: 'planner',
+            message: 'planning output does not contain commit-shaped subtasks',
+          }],
+          plannerPrompt: 'prompt',
+          plannerOutput: '1. Read the codebase',
+          plannedSubtasks: ['Read the codebase'],
+        }
+      },
+    })
+
+    expect(result.valid).toBe(false)
+    expect(result.failures).toContain('planning output does not contain commit-shaped subtasks')
   })
 
   test('executes remote issue lint with repo-aware config and supports json output', async () => {
