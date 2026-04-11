@@ -3,6 +3,7 @@ import {
   formatIssueSimulationResult,
   parseIssueSimulationDocument,
   simulateIssueExecutability,
+  type IssueSimulationResult,
 } from './issue-simulate'
 
 describe('simulateIssueExecutability', () => {
@@ -70,6 +71,11 @@ throw new Error('red')
     expect(result.failures).toContain(
       'validation commands are too generic to confirm issue-specific semantics',
     )
+    expect(result.summary).toBe('simulation failed')
+    expect(result.findings.map((finding) => finding.code)).toEqual([
+      'planning_not_commit_shaped',
+      'validation_too_generic',
+    ])
   })
 
   test('passes when planner output is commit-shaped and contract boundaries are specific', async () => {
@@ -133,6 +139,8 @@ throw new Error('red')
 
     expect(result.valid).toBe(true)
     expect(result.failures).toEqual([])
+    expect(result.summary).toBe('simulation passed')
+    expect(result.findings).toEqual([])
   })
 
   test('parses local markdown documents and preserves full body when there is no h1 title', () => {
@@ -143,10 +151,20 @@ throw new Error('red')
   })
 
   test('formats simulation output as text or json', () => {
-    const result = {
+    const result: IssueSimulationResult = {
       valid: false,
+      summary: 'simulation failed',
       failures: ['planning output does not contain commit-shaped subtasks'],
+      findings: [
+        {
+          code: 'planning_not_commit_shaped',
+          stage: 'planner',
+          message: 'planning output does not contain commit-shaped subtasks',
+        },
+      ],
+      plannerPrompt: 'prompt',
       plannerOutput: '1. Read the code',
+      plannedSubtasks: ['Read the code'],
       checks: {
         commitShapedPlan: false,
         scopedAllowedFiles: true,
@@ -155,8 +173,10 @@ throw new Error('red')
     }
 
     expect(formatIssueSimulationResult(result)).toContain('valid=false')
+    expect(formatIssueSimulationResult(result)).toContain('summary=simulation failed')
     expect(JSON.parse(formatIssueSimulationResult(result, true))).toMatchObject({
       valid: false,
+      summary: 'simulation failed',
       failures: ['planning output does not contain commit-shaped subtasks'],
     })
   })

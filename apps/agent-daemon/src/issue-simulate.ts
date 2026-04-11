@@ -8,6 +8,21 @@ export interface IssueSimulationPlannerResponse {
   responseText: string
 }
 
+export type IssueSimulationFindingCode =
+  | 'planning_not_commit_shaped'
+  | 'allowed_files_too_broad'
+  | 'validation_too_generic'
+
+export type IssueSimulationFindingStage =
+  | 'planner'
+  | 'reviewer'
+
+export interface IssueSimulationFinding {
+  code: IssueSimulationFindingCode
+  stage: IssueSimulationFindingStage
+  message: string
+}
+
 export type IssueSimulationPlannerRunner = (input: {
   prompt: string
   repoRoot: string
@@ -22,8 +37,12 @@ export interface SimulateIssueExecutabilityInput {
 
 export interface IssueSimulationResult {
   valid: boolean
+  summary: string
   failures: string[]
+  findings: IssueSimulationFinding[]
+  plannerPrompt: string
   plannerOutput: string
+  plannedSubtasks: string[]
   checks: {
     commitShapedPlan: boolean
     scopedAllowedFiles: boolean
@@ -67,39 +86,66 @@ const COMMIT_SHAPED_STEP_PATTERNS = [
 export async function simulateIssueExecutability(
   input: SimulateIssueExecutabilityInput,
 ): Promise<IssueSimulationResult> {
+  const plannerPrompt = buildIssueSimulationPrompt(input.issueTitle, input.issueBody)
   const contract = parseIssueContract(input.issueBody)
   const quality = buildIssueQualityReport(contract)
   const planner = await input.runPlanner({
-    prompt: buildIssueSimulationPrompt(input.issueTitle, input.issueBody),
+    prompt: plannerPrompt,
     repoRoot: input.repoRoot ?? process.cwd(),
   })
   const plannerOutput = planner.responseText.trim()
   const plannerSteps = parsePlannerSteps(plannerOutput)
   const commitShapedPlan = plannerSteps.some(isCommitShapedStep)
-  const scopedAllowedFiles = !quality.warnings.some((warning) => (
-    warning.startsWith('AllowedFiles should use exact paths or tightly scoped directories:')
-  ))
-  const specificValidation = !quality.warnings.some((warning) => (
-    warning.startsWith('Validation should use concrete executable commands instead of generic guidance:')
-  ))
+  const allowedFilesWarnings = quality.warnings
+    .filter((warning) => warning.startsWith('AllowedFiles should use exact paths or tightly scoped directories:'))
+  const validationWarnings = quality.warnings
+    .filter((warning) => warning.startsWith('Validation should use concrete executable commands instead of generic guidance:'))
+  const scopedAllowedFiles = allowedFilesWarnings.length === 0
+  const specificValidation = validationWarnings.length === 0
   const failures: string[] = []
+  const findings: IssueSimulationFinding[] = []
 
   if (!commitShapedPlan) {
     failures.push('planning output does not contain commit-shaped subtasks')
+    findings.push({
+      code: 'planning_not_commit_shaped',
+      stage: 'planner',
+      message: 'planning output does not contain commit-shaped subtasks',
+    })
   }
 
   if (!scopedAllowedFiles) {
     failures.push('allowed file scope is too broad for reliable reviewer/auto-fix execution')
+    findings.push(...allowedFilesWarnings.map((warning) => ({
+      code: 'allowed_files_too_broad' as const,
+      stage: 'reviewer' as const,
+      message: warning.replace(
+        'AllowedFiles should use exact paths or tightly scoped directories:',
+        'allowed file scope is too broad for reliable reviewer/auto-fix execution:',
+      ).trim(),
+    })))
   }
 
   if (!specificValidation) {
     failures.push('validation commands are too generic to confirm issue-specific semantics')
+    findings.push(...validationWarnings.map((warning) => ({
+      code: 'validation_too_generic' as const,
+      stage: 'reviewer' as const,
+      message: warning.replace(
+        'Validation should use concrete executable commands instead of generic guidance:',
+        'validation commands are too generic to confirm issue-specific semantics:',
+      ).trim(),
+    })))
   }
 
   return {
     valid: failures.length === 0,
+    summary: failures.length === 0 ? 'simulation passed' : 'simulation failed',
     failures,
+    findings,
+    plannerPrompt,
     plannerOutput,
+    plannedSubtasks: plannerSteps,
     checks: {
       commitShapedPlan,
       scopedAllowedFiles,
@@ -154,7 +200,9 @@ export function formatIssueSimulationResult(
 
   return [
     `valid=${result.valid}`,
+    `summary=${result.summary}`,
     `checks=commitShapedPlan:${result.checks.commitShapedPlan}, scopedAllowedFiles:${result.checks.scopedAllowedFiles}, specificValidation:${result.checks.specificValidation}`,
+    `findings=${result.findings.map((finding) => `${finding.code}:${finding.message}`).join(' | ') || '-'}`,
     `failures=${result.failures.join(' | ') || '-'}`,
     `plannerOutput=${result.plannerOutput || '-'}`,
   ].join('\n')

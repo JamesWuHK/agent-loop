@@ -9,6 +9,7 @@ import {
   cleanupManagedRuntimeRecord,
   executeAuditIssuesCommand,
   executeIssueLintCommand,
+  executeIssueRepairCommand,
   executeIssueSimulationCommand,
   executeIssueRewriteCommand,
   executeIssueSplitCommand,
@@ -16,11 +17,13 @@ import {
   executeWakeRequest,
   formatAuditIssuesOutput,
   formatIssueLintOutput,
+  formatIssueRepairOutput,
   formatIssueSimulationOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveAuditIssuesInput,
   resolveIssueLintTarget,
+  resolveIssueRepairInput,
   resolveIssueRewritePath,
   resolveIssueSimulationTarget,
   resolveIssueSplitInput,
@@ -31,6 +34,7 @@ import {
   formatRuntimeListing,
   restartManagedRuntime,
   shouldFailAuditIssuesCommand,
+  shouldFailIssueRepairCommand,
   shouldRemoveManagedRuntimeRecord,
   stopManagedRuntime,
 } from './index'
@@ -89,6 +93,11 @@ describe('index helpers', () => {
       issueNumbers: [50, 51],
       includeSimulation: true,
     })
+
+    expect(resolveAuditIssuesInput({
+      'repair-file': 'docs/issues/broken.md',
+      simulate: true,
+    })).toBeNull()
 
     expect(() => resolveAuditIssuesInput({
       issue: ['50'],
@@ -346,8 +355,18 @@ describe('index helpers', () => {
               } as any,
               simulation: {
                 valid: false,
+                summary: 'simulation failed',
                 failures: ['planning output does not contain commit-shaped subtasks'],
+                findings: [
+                  {
+                    code: 'planning_not_commit_shaped',
+                    stage: 'planner',
+                    message: 'planning output does not contain commit-shaped subtasks',
+                  },
+                ],
+                plannerPrompt: 'audit simulate prompt',
                 plannerOutput: response.responseText,
+                plannedSubtasks: ['Simulate the issue audit plan'],
                 checks: {
                   commitShapedPlan: false,
                   scopedAllowedFiles: true,
@@ -542,6 +561,22 @@ describe('index helpers', () => {
     })).toThrow('--rewrite-file must be a non-empty path')
   })
 
+  test('resolves repair file paths and shared simulate flag', () => {
+    expect(resolveIssueRepairInput({
+      'repair-file': 'docs/issues/broken.md',
+      simulate: true,
+    })).toEqual({
+      path: 'docs/issues/broken.md',
+      includeSimulation: true,
+    })
+
+    expect(resolveIssueRepairInput({})).toBeNull()
+
+    expect(() => resolveIssueRepairInput({
+      'repair-file': '   ',
+    })).toThrow('--repair-file must be a non-empty path')
+  })
+
   test('resolves simulate targets and rejects conflicting selectors', () => {
     expect(resolveIssueSimulationTarget({
       'simulate-file': 'docs/issues/simulate.md',
@@ -649,8 +684,12 @@ describe('index helpers', () => {
 
         return {
           valid: true,
+          summary: 'simulation passed',
           failures: [],
+          findings: [],
+          plannerPrompt: 'simulate prompt',
           plannerOutput: response.responseText,
+          plannedSubtasks: ['Add local simulate coverage'],
           checks: {
             commitShapedPlan: true,
             scopedAllowedFiles: true,
@@ -684,8 +723,12 @@ describe('index helpers', () => {
       },
       result: {
         valid: true,
+        summary: 'simulation passed',
         failures: [],
+        findings: [],
+        plannerPrompt: 'simulate prompt',
         plannerOutput: '1. Add local simulate coverage',
+        plannedSubtasks: ['Add local simulate coverage'],
         checks: {
           commitShapedPlan: true,
           scopedAllowedFiles: true,
@@ -700,6 +743,7 @@ describe('index helpers', () => {
       },
       result: {
         valid: true,
+        summary: 'simulation passed',
       },
     })
   })
@@ -792,8 +836,18 @@ describe('index helpers', () => {
 
         return {
           valid: false,
+          summary: 'simulation failed',
           failures: ['planning output does not contain commit-shaped subtasks'],
+          findings: [
+            {
+              code: 'planning_not_commit_shaped',
+              stage: 'planner',
+              message: 'planning output does not contain commit-shaped subtasks',
+            },
+          ],
+          plannerPrompt: 'remote simulate prompt',
           plannerOutput: response.responseText,
+          plannedSubtasks: ['Implement remote simulate path'],
           checks: {
             commitShapedPlan: false,
             scopedAllowedFiles: true,
@@ -828,8 +882,18 @@ describe('index helpers', () => {
       },
       result: {
         valid: false,
+        summary: 'simulation failed',
         failures: ['planning output does not contain commit-shaped subtasks'],
+        findings: [
+          {
+            code: 'planning_not_commit_shaped',
+            stage: 'planner',
+            message: 'planning output does not contain commit-shaped subtasks',
+          },
+        ],
+        plannerPrompt: 'remote simulate prompt',
         plannerOutput: '1. Implement remote simulate path',
+        plannedSubtasks: ['Implement remote simulate path'],
         checks: {
           commitShapedPlan: false,
           scopedAllowedFiles: true,
@@ -838,6 +902,274 @@ describe('index helpers', () => {
       },
     })
     expect(formatIssueSimulationOutput(result)).toContain('source=issue:JamesWuHK/agent-loop#40')
+  })
+
+  test('executes local issue repair through the read-only agent runner', async () => {
+    let plannerInvocation = 0
+
+    const result = await executeIssueRepairCommand({
+      path: 'docs/issues/broken.md',
+      includeSimulation: true,
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: (path) => {
+        expect(path).toBe('docs/issues/broken.md')
+        return 'broken issue markdown'
+      },
+      repairIssueDraft: async ({ issueText, repoRoot, includeSimulation }, { runAgent, runPlanner }) => {
+        expect(issueText).toBe('broken issue markdown')
+        expect(repoRoot).toBe('/tmp/repo-root')
+        expect(includeSimulation).toBe(true)
+
+        const repairResponse = await runAgent({
+          prompt: 'repair prompt',
+          repoRoot,
+        })
+
+        expect(repairResponse.responseText).toBe('## 用户故事\n\nrepaired markdown')
+
+        const beforeSimulation = await runPlanner!({
+          prompt: 'repair simulate before prompt',
+          repoRoot,
+        })
+        const afterSimulation = await runPlanner!({
+          prompt: 'repair simulate after prompt',
+          repoRoot,
+        })
+
+        expect(beforeSimulation.responseText).toBe('1. Simulate repair before state')
+        expect(afterSimulation.responseText).toBe('1. Simulate repair after state')
+
+        return {
+          success: true,
+          repairedMarkdown: repairResponse.responseText,
+          appliedFindingCodes: ['allowed_files_too_broad'],
+          blockingFindings: [],
+          before: {
+            validation: {
+              source: { kind: 'file', path: 'stdin' },
+              valid: false,
+              readyGateBlocked: true,
+              readyGateStatus: 'blocked',
+              readyGateSummary: 'ready gate would still block on hard validation errors',
+              score: 72,
+              errors: ['missing ### Constraints / Constraints'],
+              warnings: [],
+              contract: {} as any,
+            },
+            simulation: {
+              valid: false,
+              summary: 'simulation failed',
+              failures: ['planning output does not contain commit-shaped subtasks'],
+              findings: [
+                {
+                  code: 'planning_not_commit_shaped',
+                  stage: 'planner',
+                  message: 'planning output does not contain commit-shaped subtasks',
+                },
+              ],
+              plannerPrompt: 'repair simulate before prompt',
+              plannerOutput: beforeSimulation.responseText,
+              plannedSubtasks: ['Simulate repair before state'],
+              checks: {
+                commitShapedPlan: false,
+                scopedAllowedFiles: true,
+                specificValidation: true,
+              },
+            },
+          },
+          after: {
+            validation: {
+              source: { kind: 'file', path: 'stdout' },
+              valid: true,
+              readyGateBlocked: false,
+              readyGateStatus: 'pass',
+              readyGateSummary: 'ready gate would pass hard validation checks',
+              score: 100,
+              errors: [],
+              warnings: [],
+              contract: {} as any,
+            },
+            simulation: {
+              valid: true,
+              summary: 'simulation passed',
+              failures: [],
+              findings: [],
+              plannerPrompt: 'repair simulate after prompt',
+              plannerOutput: afterSimulation.responseText,
+              plannedSubtasks: ['Simulate repair after state'],
+              checks: {
+                commitShapedPlan: true,
+                scopedAllowedFiles: true,
+                specificValidation: true,
+              },
+            },
+          },
+          authoringContext: {
+            candidateValidationCommands: [
+              'bun test apps/agent-daemon/src/issue-repair.test.ts',
+            ],
+            candidateAllowedFiles: [
+              'apps/agent-daemon/src/issue-repair.ts',
+            ],
+            candidateForbiddenFiles: [
+              'apps/agent-daemon/src/dashboard.ts',
+            ],
+            candidateReviewHints: [
+              '检查 repair 是否保留 Dependencies JSON',
+            ],
+            projectIssueRules: {
+              preferredValidationCommands: [
+                'bun test apps/agent-daemon/src/issue-repair.test.ts',
+              ],
+              preferredAllowedFiles: [
+                'apps/agent-daemon/src/issue-repair.ts',
+              ],
+              forbiddenPaths: [
+                'apps/agent-daemon/src/dashboard.ts',
+              ],
+              reviewHints: [
+                '检查 repair 是否保留 Dependencies JSON',
+              ],
+            },
+          },
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        if (options.prompt === 'repair prompt') {
+          return {
+            ok: true,
+            exitCode: 0,
+            stdout: '',
+            stderr: '',
+            responseText: '## 用户故事\n\nrepaired markdown',
+            usedAgent: 'codex',
+            usedFallback: false,
+          }
+        }
+
+        plannerInvocation += 1
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: plannerInvocation === 1
+            ? '1. Simulate repair before state'
+            : '1. Simulate repair after state',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.repairedMarkdown).toBe('## 用户故事\n\nrepaired markdown')
+    expect(formatIssueRepairOutput(result)).toBe('## 用户故事\n\nrepaired markdown')
+    expect(shouldFailIssueRepairCommand(result)).toBe(false)
+  })
+
+  test('formats repair json output and failure exit semantics', () => {
+    const result = {
+      success: false,
+      repairedMarkdown: '## 用户故事\n\nstill broken',
+      appliedFindingCodes: ['missing_dependencies_block'],
+      blockingFindings: ['missing ### Dependencies JSON block'],
+      before: {
+        validation: {
+          source: { kind: 'file', path: 'stdin' },
+          valid: false,
+          readyGateBlocked: true,
+          readyGateStatus: 'blocked',
+          readyGateSummary: 'ready gate would still block on hard validation errors',
+          score: 60,
+          errors: ['missing ### Dependencies JSON block'],
+          warnings: [],
+          contract: {} as any,
+        },
+      },
+      after: {
+        validation: {
+          source: { kind: 'file', path: 'stdout' },
+          valid: false,
+          readyGateBlocked: true,
+          readyGateStatus: 'blocked',
+          readyGateSummary: 'ready gate would still block on hard validation errors',
+          score: 60,
+          errors: ['missing ### Dependencies JSON block'],
+          warnings: [],
+          contract: {} as any,
+        },
+      },
+      authoringContext: {
+        candidateValidationCommands: [],
+        candidateAllowedFiles: [],
+        candidateForbiddenFiles: [],
+      },
+    }
+
+    expect(shouldFailIssueRepairCommand(result as any)).toBe(true)
+    expect(JSON.parse(formatIssueRepairOutput(result as any, true))).toMatchObject({
+      success: false,
+      repairedMarkdown: '## 用户故事\n\nstill broken',
+      blockingFindings: ['missing ### Dependencies JSON block'],
+    })
   })
 
   test('executes local issue rewrite through the read-only agent runner', async () => {

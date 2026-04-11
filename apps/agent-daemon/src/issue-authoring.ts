@@ -56,7 +56,7 @@ export async function rewriteIssueDraft(
     prompt,
     repoRoot: input.repoRoot,
   })
-  const markdown = normalizeRewrittenIssueMarkdown(response.responseText)
+  const markdown = normalizeCanonicalIssueMarkdown(response.responseText)
   const validation = buildIssueLintReport(markdown, {
     kind: 'file',
     path: 'stdout',
@@ -191,7 +191,7 @@ function formatProjectIssueRules(authoringContext: RepoAuthoringContext): string
   ].filter((value): value is string => value !== null).join('\n\n')
 }
 
-function normalizeRewrittenIssueMarkdown(responseText: string): string {
+export function normalizeCanonicalIssueMarkdown(responseText: string): string {
   let normalized = responseText.trim()
 
   const firstHeadingIndex = normalized.search(/^##\s*(用户故事|User Story)\b/m)
