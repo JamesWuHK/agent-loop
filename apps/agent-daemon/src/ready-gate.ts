@@ -2,6 +2,12 @@ import { parseIssueContract, validateIssueContract, ISSUE_LABELS, buildGhEnv, co
 import { existsSync } from 'node:fs'
 import { isAbsolute, posix, resolve } from 'node:path'
 import { loadConfig, type CliArgs } from './config'
+import {
+  simulateIssueExecutability,
+  type IssueSimulationPlannerRunner,
+  type IssueSimulationResult,
+} from './issue-simulate'
+import { runConfiguredAgent } from './cli-agent'
 
 interface ReadyGateIssueSnapshot {
   number: number
@@ -15,10 +21,18 @@ export interface ReadyGateEvaluation {
   shouldEnforce: boolean
   valid: boolean
   errors: string[]
+  simulation?: IssueSimulationResult
 }
 
 interface ReadyGateOptions {
   repoRoot?: string
+}
+
+interface ReadyGateSimulationOptions extends ReadyGateOptions {
+  simulate?: {
+    enabled: boolean
+    runPlanner: IssueSimulationPlannerRunner
+  }
 }
 
 function normalizeContractPath(value: string): string {
@@ -154,6 +168,37 @@ export function evaluateReadyGate(
   }
 }
 
+export async function evaluateReadyGateWithSimulation(
+  issue: ReadyGateIssueSnapshot,
+  options: ReadyGateSimulationOptions = {},
+): Promise<ReadyGateEvaluation> {
+  const base = evaluateReadyGate(issue, options)
+  if (!options.simulate?.enabled || !base.shouldEnforce || !base.valid) {
+    return base
+  }
+
+  const simulation = await simulateIssueExecutability({
+    issueTitle: issue.title,
+    issueBody: issue.body,
+    repoRoot: options.repoRoot,
+    runPlanner: options.simulate.runPlanner,
+  })
+
+  if (simulation.valid) {
+    return {
+      ...base,
+      simulation,
+    }
+  }
+
+  return {
+    shouldEnforce: true,
+    valid: false,
+    errors: [...base.errors, ...simulation.failures],
+    simulation,
+  }
+}
+
 export function buildReadyGateFailureComment(issueNumber: number, errors: string[]): string {
   return `<!-- agent-loop:ready-gate {"issue":${issueNumber},"valid":false} -->
 ## agent:ready gate blocked
@@ -240,9 +285,39 @@ export async function enforceReadyGate(
   issueNumber: number,
   config: AgentConfig,
   logger = console,
+  options: {
+    simulate?: boolean
+    repoRoot?: string
+    runPlanner?: IssueSimulationPlannerRunner
+  } = {},
 ): Promise<ReadyGateEvaluation> {
   const issue = await fetchIssueSnapshot(issueNumber, config)
-  const evaluation = evaluateReadyGate(issue, { repoRoot: process.cwd() })
+  const evaluation = await evaluateReadyGateWithSimulation(issue, {
+    repoRoot: options.repoRoot ?? process.cwd(),
+    simulate: options.simulate
+      ? {
+          enabled: true,
+          runPlanner: options.runPlanner ?? (async ({ prompt, repoRoot }) => {
+            const result = await runConfiguredAgent({
+              prompt,
+              worktreePath: repoRoot,
+              timeoutMs: config.agent.timeoutMs,
+              config,
+              logger,
+              allowWrites: false,
+            })
+
+            if (!result.ok) {
+              throw new Error(result.stderr || result.stdout || 'ready-gate simulation planner failed')
+            }
+
+            return {
+              responseText: result.responseText,
+            }
+          }),
+        }
+      : undefined,
+  })
 
   if (!evaluation.shouldEnforce) {
     logger.log(`[ready-gate] issue #${issueNumber} does not currently require enforcement`)
@@ -260,9 +335,10 @@ export async function enforceReadyGate(
   return evaluation
 }
 
-function parseArgs(argv: string[]): CliArgs & { issueNumber: number } {
+function parseArgs(argv: string[]): CliArgs & { issueNumber: number; simulate: boolean } {
   let issueNumber: number | null = null
   let repo: string | undefined
+  let simulate = false
 
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
@@ -277,6 +353,10 @@ function parseArgs(argv: string[]): CliArgs & { issueNumber: number } {
       repo = argv[index + 1]
       index++
     }
+
+    if (arg === '--simulate') {
+      simulate = true
+    }
   }
 
   if (!Number.isInteger(issueNumber) || issueNumber === null || issueNumber <= 0) {
@@ -286,13 +366,16 @@ function parseArgs(argv: string[]): CliArgs & { issueNumber: number } {
   return {
     issueNumber,
     repo,
+    simulate,
   }
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const config = loadConfig({ repo: args.repo })
-  const evaluation = await enforceReadyGate(args.issueNumber, config)
+  const evaluation = await enforceReadyGate(args.issueNumber, config, console, {
+    simulate: args.simulate,
+  })
 
   if (evaluation.shouldEnforce && !evaluation.valid) {
     process.exitCode = 1

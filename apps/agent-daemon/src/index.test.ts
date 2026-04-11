@@ -8,15 +8,18 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
+  executeIssueSimulationCommand,
   executeIssueRewriteCommand,
   executeIssueSplitCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
+  formatIssueSimulationOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveIssueLintTarget,
   resolveIssueRewritePath,
+  resolveIssueSimulationTarget,
   resolveIssueSplitInput,
   resolveWakeCommand,
   startManagedRuntime,
@@ -215,6 +218,304 @@ describe('index helpers', () => {
     expect(() => resolveIssueRewritePath({
       'rewrite-file': '   ',
     })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
+  test('resolves simulate targets and rejects conflicting selectors', () => {
+    expect(resolveIssueSimulationTarget({
+      'simulate-file': 'docs/issues/simulate.md',
+    })).toEqual({
+      kind: 'file',
+      path: 'docs/issues/simulate.md',
+    })
+
+    expect(resolveIssueSimulationTarget({
+      'simulate-issue': '40',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 40,
+    })
+
+    expect(() => resolveIssueSimulationTarget({
+      'simulate-issue': '40',
+      'simulate-file': 'docs/issues/simulate.md',
+    })).toThrow('Only one of --simulate-issue or --simulate-file can be used at a time')
+  })
+
+  test('executes local issue simulation through the read-only agent runner', async () => {
+    const result = await executeIssueSimulationCommand({
+      target: {
+        kind: 'file',
+        path: 'docs/issues/simulate.md',
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: (path) => {
+        expect(path).toBe('docs/issues/simulate.md')
+        return [
+          '# [AL-10] Simulate local draft',
+          '',
+          '## 用户故事',
+          '作为维护者，我希望本地 draft 也能直接 simulate。',
+        ].join('\n')
+      },
+      fetchRemoteIssueDocument: async () => {
+        throw new Error('should not fetch a remote issue for local simulation')
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody, repoRoot, runPlanner }) => {
+        expect(issueTitle).toBe('[AL-10] Simulate local draft')
+        expect(issueBody).toBe('## 用户故事\n作为维护者，我希望本地 draft 也能直接 simulate。')
+        expect(repoRoot).toBe('/tmp/repo-root')
+
+        const response = await runPlanner({
+          prompt: 'simulate prompt',
+          repoRoot: '/tmp/repo-root',
+        })
+
+        expect(response.responseText).toBe('1. Add local simulate coverage')
+
+        return {
+          valid: true,
+          failures: [],
+          plannerOutput: response.responseText,
+          checks: {
+            commitShapedPlan: true,
+            scopedAllowedFiles: true,
+            specificValidation: true,
+          },
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.prompt).toBe('simulate prompt')
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: '1. Add local simulate coverage',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result).toEqual({
+      source: {
+        kind: 'file',
+        path: 'docs/issues/simulate.md',
+        title: '[AL-10] Simulate local draft',
+      },
+      result: {
+        valid: true,
+        failures: [],
+        plannerOutput: '1. Add local simulate coverage',
+        checks: {
+          commitShapedPlan: true,
+          scopedAllowedFiles: true,
+          specificValidation: true,
+        },
+      },
+    })
+    expect(JSON.parse(formatIssueSimulationOutput(result, true))).toMatchObject({
+      source: {
+        kind: 'file',
+        path: 'docs/issues/simulate.md',
+      },
+      result: {
+        valid: true,
+      },
+    })
+  })
+
+  test('executes remote issue simulation with repo-aware config', async () => {
+    const result = await executeIssueSimulationCommand({
+      target: {
+        kind: 'issue',
+        issueNumber: 40,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: () => {
+        throw new Error('should not read a local file for remote simulation')
+      },
+      fetchRemoteIssueDocument: async ({ issueNumber, config }) => {
+        expect(issueNumber).toBe(40)
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          number: 40,
+          title: '[AL-10] Simulate remote issue',
+          body: '## 用户故事\n作为维护者，我希望远端 issue 也能 simulate。',
+          url: 'https://github.com/JamesWuHK/agent-loop/issues/40',
+        }
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody, repoRoot, runPlanner }) => {
+        expect(issueTitle).toBe('[AL-10] Simulate remote issue')
+        expect(issueBody).toBe('## 用户故事\n作为维护者，我希望远端 issue 也能 simulate。')
+        expect(repoRoot).toBe('/tmp/repo-root')
+
+        const response = await runPlanner({
+          prompt: 'remote simulate prompt',
+          repoRoot: '/tmp/repo-root',
+        })
+
+        expect(response.responseText).toBe('1. Implement remote simulate path')
+
+        return {
+          valid: false,
+          failures: ['planning output does not contain commit-shaped subtasks'],
+          plannerOutput: response.responseText,
+          checks: {
+            commitShapedPlan: false,
+            scopedAllowedFiles: true,
+            specificValidation: true,
+          },
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.prompt).toBe('remote simulate prompt')
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: '1. Implement remote simulate path',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result).toEqual({
+      source: {
+        kind: 'issue',
+        issueNumber: 40,
+        repo: 'JamesWuHK/agent-loop',
+        title: '[AL-10] Simulate remote issue',
+      },
+      result: {
+        valid: false,
+        failures: ['planning output does not contain commit-shaped subtasks'],
+        plannerOutput: '1. Implement remote simulate path',
+        checks: {
+          commitShapedPlan: false,
+          scopedAllowedFiles: true,
+          specificValidation: true,
+        },
+      },
+    })
+    expect(formatIssueSimulationOutput(result)).toContain('source=issue:JamesWuHK/agent-loop#40')
   })
 
   test('executes local issue rewrite through the read-only agent runner', async () => {

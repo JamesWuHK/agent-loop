@@ -51,6 +51,7 @@ import {
 import {
   buildIssueLintReportFromMarkdownFile,
   buildIssueLintReportFromRemoteIssue,
+  fetchRemoteIssueDocument,
   formatIssueLintReport,
   formatIssueLintReportJson,
   type IssueLintReport,
@@ -60,6 +61,12 @@ import {
   type RewriteIssueDraftResult,
 } from './issue-authoring'
 import { runConfiguredAgent } from './cli-agent'
+import {
+  formatIssueSimulationResult,
+  parseIssueSimulationDocument,
+  simulateIssueExecutability,
+  type IssueSimulationResult,
+} from './issue-simulate'
 import {
   formatSplitTrackingIssueResult,
   parseTrackingIssueDocument,
@@ -78,6 +85,12 @@ export interface WakeCommand {
 }
 
 export interface IssueLintTarget {
+  kind: 'file' | 'issue'
+  path?: string
+  issueNumber?: number
+}
+
+export interface IssueSimulationTarget {
   kind: 'file' | 'issue'
   path?: string
   issueNumber?: number
@@ -107,6 +120,13 @@ export interface ExecuteIssueLintInput {
   target: IssueLintTarget
   repo?: string
   pat?: string
+}
+
+export interface ExecuteIssueSimulationInput {
+  target: IssueSimulationTarget
+  repo?: string
+  pat?: string
+  repoRoot?: string
 }
 
 export interface ExecuteIssueRewriteInput {
@@ -178,6 +198,17 @@ export type ManagedRuntimeCleanupResult =
   | 'not-owned'
   | 'unreadable'
 
+export interface ExecuteIssueSimulationResult {
+  source: {
+    kind: 'file' | 'issue'
+    title: string
+    path?: string
+    issueNumber?: number
+    repo?: string
+  }
+  result: IssueSimulationResult
+}
+
 interface RestartManagedRuntimeDependencies {
   platform: NodeJS.Platform
   resolveLocalDaemonIdentity: LocalDaemonIdentityResolver
@@ -202,6 +233,14 @@ interface IssueLintCommandDependencies {
   loadConfig: typeof loadConfig
   buildIssueLintReportFromMarkdownFile: typeof buildIssueLintReportFromMarkdownFile
   buildIssueLintReportFromRemoteIssue: typeof buildIssueLintReportFromRemoteIssue
+}
+
+interface IssueSimulationCommandDependencies {
+  loadConfig: typeof loadConfig
+  readIssueDraftFile: (path: string) => string
+  fetchRemoteIssueDocument: typeof fetchRemoteIssueDocument
+  simulateIssueExecutability: typeof simulateIssueExecutability
+  runConfiguredAgent: typeof runConfiguredAgent
 }
 
 interface IssueRewriteCommandDependencies {
@@ -242,6 +281,14 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
   loadConfig,
   buildIssueLintReportFromMarkdownFile,
   buildIssueLintReportFromRemoteIssue,
+}
+
+const DEFAULT_ISSUE_SIMULATION_COMMAND_DEPENDENCIES: IssueSimulationCommandDependencies = {
+  loadConfig,
+  readIssueDraftFile: (path) => readFileSync(path, 'utf-8'),
+  fetchRemoteIssueDocument,
+  simulateIssueExecutability,
+  runConfiguredAgent,
 }
 
 const DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES: IssueRewriteCommandDependencies = {
@@ -297,6 +344,8 @@ async function main() {
       'github-event-path': { type: 'string' },
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
+      'simulate-issue': { type: 'string' },
+      'simulate-file': { type: 'string' },
       'rewrite-file': { type: 'string' },
       'split-file': { type: 'string' },
       'split-start-number': { type: 'string' },
@@ -326,6 +375,10 @@ async function main() {
     'lint-issue': args['lint-issue'] as string | undefined,
     'lint-file': args['lint-file'] as string | undefined,
   })
+  const issueSimulationTarget = resolveIssueSimulationTarget({
+    'simulate-issue': args['simulate-issue'] as string | undefined,
+    'simulate-file': args['simulate-file'] as string | undefined,
+  })
   const issueRewritePath = resolveIssueRewritePath({
     'rewrite-file': args['rewrite-file'] as string | undefined,
   })
@@ -350,6 +403,8 @@ async function main() {
       'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
       'lint-issue': args['lint-issue'] as string | undefined,
       'lint-file': args['lint-file'] as string | undefined,
+      'simulate-issue': args['simulate-issue'] as string | undefined,
+      'simulate-file': args['simulate-file'] as string | undefined,
       concurrency: args.concurrency as string | undefined,
       'poll-interval': args['poll-interval'] as string | undefined,
       'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
@@ -388,6 +443,8 @@ async function main() {
       'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
       'lint-issue': args['lint-issue'] as string | undefined,
       'lint-file': args['lint-file'] as string | undefined,
+      'simulate-issue': args['simulate-issue'] as string | undefined,
+      'simulate-file': args['simulate-file'] as string | undefined,
       'rewrite-file': args['rewrite-file'] as string | undefined,
       concurrency: args.concurrency as string | undefined,
       'poll-interval': args['poll-interval'] as string | undefined,
@@ -419,6 +476,46 @@ async function main() {
     })
   }
 
+  if (issueSimulationTarget) {
+    assertIssueSimulationCompatible({
+      'wake-now': args['wake-now'] as boolean | undefined,
+      'wake-issue': args['wake-issue'] as string | undefined,
+      'wake-pr': args['wake-pr'] as string | undefined,
+      'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
+      'lint-issue': args['lint-issue'] as string | undefined,
+      'lint-file': args['lint-file'] as string | undefined,
+      'rewrite-file': args['rewrite-file'] as string | undefined,
+      'split-file': args['split-file'] as string | undefined,
+      'split-start-number': args['split-start-number'] as string | undefined,
+      concurrency: args.concurrency as string | undefined,
+      'poll-interval': args['poll-interval'] as string | undefined,
+      'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
+      'machine-id': args['machine-id'] as string | undefined,
+      'dry-run': args['dry-run'] as boolean | undefined,
+      'metrics-port': args['metrics-port'] as string | undefined,
+      dashboard: args.dashboard as boolean | undefined,
+      'dashboard-host': args['dashboard-host'] as string | undefined,
+      'dashboard-port': args['dashboard-port'] as string | undefined,
+      daemonize: args.daemonize as boolean | undefined,
+      'join-project': args['join-project'] as boolean | undefined,
+      'repo-cap': args['repo-cap'] as string | undefined,
+      runtimes: args.runtimes as boolean | undefined,
+      start: args.start as boolean | undefined,
+      logs: args.logs as boolean | undefined,
+      reconcile: args.reconcile as boolean | undefined,
+      restart: args.restart as boolean | undefined,
+      'launchd-install': args['launchd-install'] as boolean | undefined,
+      'launchd-uninstall': args['launchd-uninstall'] as boolean | undefined,
+      'launchd-status': args['launchd-status'] as boolean | undefined,
+      stop: args.stop as boolean | undefined,
+      once: args.once as boolean | undefined,
+      status: args.status as boolean | undefined,
+      doctor: args.doctor as boolean | undefined,
+      'health-host': args['health-host'] as string | undefined,
+      'health-port': args['health-port'] as string | undefined,
+    })
+  }
+
   if (args['wake-from-github-event']) {
     if (wakeCommand) {
       throw new Error('--wake-from-github-event cannot be combined with --wake-now, --wake-issue, or --wake-pr')
@@ -431,6 +528,9 @@ async function main() {
     }
     if (issueSplitInput) {
       throw new Error('--wake-from-github-event cannot be combined with --split-file')
+    }
+    if (issueSimulationTarget) {
+      throw new Error('--wake-from-github-event cannot be combined with --simulate-issue or --simulate-file')
     }
     assertWakeCommandCompatible(args)
   }
@@ -529,6 +629,17 @@ async function main() {
     })
     console.log(formatIssueSplitOutput(result))
     process.exit(0)
+  }
+
+  if (issueSimulationTarget) {
+    const result = await executeIssueSimulationCommand({
+      target: issueSimulationTarget,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(formatIssueSimulationOutput(result, args.json as boolean | undefined))
+    process.exit(result.result.valid ? 0 : 1)
   }
 
   if (args['join-project']) {
@@ -888,6 +999,8 @@ Usage:
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
+  agent-loop --simulate-file <path> [--repo owner/repo --json]
+  agent-loop --simulate-issue <number> [--repo owner/repo --json]
   agent-loop --rewrite-file <path> [--repo owner/repo]
   agent-loop --split-file <path> --split-start-number <n> [--repo owner/repo]
   agent-loop --reconcile [--health-port 9310]
@@ -924,11 +1037,14 @@ Options:
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
+      --simulate-file <path>  Run read-only executability simulation for a local issue markdown file
+      --simulate-issue <number>
+                              Run read-only executability simulation for a remote GitHub issue body
       --rewrite-file <path>   Rewrite a local issue draft into canonical contract markdown
       --split-file <path>     Split a tracking parent draft into ordered child issue contracts
       --split-start-number <n>
                               First issue number to use when filling child dependency JSON
-      --json                  Print machine-readable JSON for lint commands
+      --json                  Print machine-readable JSON for lint and simulate commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -972,6 +1088,8 @@ Examples:
   agent-loop --wake-pr 381 --health-port 9311
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
+  agent-loop --simulate-file docs/issues/ready-gate.md --json
+  agent-loop --simulate-issue 374 --repo owner/repo --json
   agent-loop --rewrite-file docs/issues/draft.md
   agent-loop --split-file docs/issues/epic.md --split-start-number 41
   agent-loop --dashboard
@@ -1099,6 +1217,37 @@ export function resolveIssueLintTarget(args: {
   return targets[0] ?? null
 }
 
+export function resolveIssueSimulationTarget(args: {
+  'simulate-issue'?: string
+  'simulate-file'?: string
+}): IssueSimulationTarget | null {
+  const targets: IssueSimulationTarget[] = []
+
+  if (typeof args['simulate-issue'] === 'string') {
+    targets.push({
+      kind: 'issue',
+      issueNumber: parseWakeTargetNumber(args['simulate-issue'], '--simulate-issue'),
+    })
+  }
+
+  if (typeof args['simulate-file'] === 'string') {
+    const path = args['simulate-file'].trim()
+    if (!path) {
+      throw new Error('--simulate-file must be a non-empty path')
+    }
+    targets.push({
+      kind: 'file',
+      path,
+    })
+  }
+
+  if (targets.length > 1) {
+    throw new Error('Only one of --simulate-issue or --simulate-file can be used at a time')
+  }
+
+  return targets[0] ?? null
+}
+
 export function resolveIssueRewritePath(args: {
   'rewrite-file'?: string
 }): string | null {
@@ -1195,6 +1344,77 @@ export async function executeIssueRewriteCommand(
   })
 }
 
+export async function executeIssueSimulationCommand(
+  input: ExecuteIssueSimulationInput,
+  deps: IssueSimulationCommandDependencies = DEFAULT_ISSUE_SIMULATION_COMMAND_DEPENDENCIES,
+): Promise<ExecuteIssueSimulationResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+  const repoRoot = input.repoRoot ?? process.cwd()
+
+  const source = input.target.kind === 'file'
+    ? (() => {
+        const markdown = deps.readIssueDraftFile(input.target.path!)
+        const document = parseIssueSimulationDocument(markdown, basename(input.target.path!))
+        return {
+          source: {
+            kind: 'file' as const,
+            path: input.target.path!,
+            title: document.title,
+          },
+          issueTitle: document.title,
+          issueBody: document.body,
+        }
+      })()
+    : await (async () => {
+        const issue = await deps.fetchRemoteIssueDocument({
+          issueNumber: input.target.issueNumber!,
+          config,
+        })
+        return {
+          source: {
+            kind: 'issue' as const,
+            issueNumber: issue.number,
+            repo: config.repo,
+            title: issue.title,
+          },
+          issueTitle: issue.title,
+          issueBody: issue.body,
+        }
+      })()
+
+  const result = await deps.simulateIssueExecutability({
+    issueTitle: source.issueTitle,
+    issueBody: source.issueBody,
+    repoRoot,
+    runPlanner: async ({ prompt, repoRoot: worktreePath }) => {
+      const plannerResult = await deps.runConfiguredAgent({
+        prompt,
+        worktreePath,
+        timeoutMs: config.agent.timeoutMs,
+        config,
+        logger: console,
+        allowWrites: false,
+      })
+
+      if (!plannerResult.ok) {
+        throw new Error(plannerResult.stderr || plannerResult.stdout || 'Issue simulate agent execution failed')
+      }
+
+      return {
+        responseText: plannerResult.responseText,
+      }
+    },
+  })
+
+  return {
+    source: source.source,
+    result,
+  }
+}
+
 export async function executeIssueSplitCommand(
   input: ExecuteIssueSplitInput,
   deps: IssueSplitCommandDependencies = DEFAULT_ISSUE_SPLIT_COMMAND_DEPENDENCIES,
@@ -1250,6 +1470,25 @@ export function formatIssueSplitOutput(
   result: SplitTrackingIssueResult,
 ): string {
   return formatSplitTrackingIssueResult(result)
+}
+
+export function formatIssueSimulationOutput(
+  output: ExecuteIssueSimulationResult,
+  asJson = false,
+): string {
+  if (asJson) {
+    return JSON.stringify(output, null, 2)
+  }
+
+  const source = output.source.kind === 'file'
+    ? `source=file:${output.source.path!}`
+    : `source=issue:${output.source.repo}#${output.source.issueNumber!}`
+
+  return [
+    source,
+    `title=${output.source.title}`,
+    formatIssueSimulationResult(output.result),
+  ].join('\n')
 }
 
 export function buildWakeRequestFromCli(
@@ -1584,6 +1823,8 @@ function assertIssueRewriteCompatible(args: {
   'wake-from-github-event'?: boolean
   'lint-issue'?: string
   'lint-file'?: string
+  'simulate-issue'?: string
+  'simulate-file'?: string
   concurrency?: string
   'poll-interval'?: string
   'idle-poll-interval'?: string
@@ -1619,6 +1860,8 @@ function assertIssueRewriteCompatible(args: {
     args['wake-from-github-event'] ? '--wake-from-github-event' : null,
     typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
     typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['simulate-issue'] === 'string' ? '--simulate-issue' : null,
+    typeof args['simulate-file'] === 'string' ? '--simulate-file' : null,
     typeof args.concurrency === 'string' ? '--concurrency' : null,
     typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
     typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
@@ -1660,6 +1903,8 @@ function assertIssueSplitCompatible(args: {
   'wake-from-github-event'?: boolean
   'lint-issue'?: string
   'lint-file'?: string
+  'simulate-issue'?: string
+  'simulate-file'?: string
   'rewrite-file'?: string
   concurrency?: string
   'poll-interval'?: string
@@ -1696,6 +1941,8 @@ function assertIssueSplitCompatible(args: {
     args['wake-from-github-event'] ? '--wake-from-github-event' : null,
     typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
     typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['simulate-issue'] === 'string' ? '--simulate-issue' : null,
+    typeof args['simulate-file'] === 'string' ? '--simulate-file' : null,
     typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
     typeof args.concurrency === 'string' ? '--concurrency' : null,
     typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
@@ -1728,6 +1975,86 @@ function assertIssueSplitCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Issue split cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertIssueSimulationCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  'rewrite-file'?: string
+  'split-file'?: string
+  'split-start-number'?: string
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    typeof args['split-file'] === 'string' ? '--split-file' : null,
+    typeof args['split-start-number'] === 'string' ? '--split-start-number' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Issue simulate cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 

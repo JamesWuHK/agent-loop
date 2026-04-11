@@ -3,7 +3,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ISSUE_LABELS } from '@agent/shared'
-import { buildReadyGateFailureComment, evaluateReadyGate } from './ready-gate'
+import {
+  buildReadyGateFailureComment,
+  evaluateReadyGate,
+  evaluateReadyGateWithSimulation,
+} from './ready-gate'
 
 describe('ready-gate', () => {
   test('skips issues that are not in agent:ready', () => {
@@ -90,6 +94,188 @@ describe('ready-gate', () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+
+  test('keeps default ready gate evaluation unchanged without simulation', () => {
+    const issue = {
+      number: 63,
+      title: '[AL-10] simulate default gate remains static',
+      body: [
+        '## 用户故事',
+        '作为维护者，我希望默认 ready gate 保持静态校验兼容。',
+        '',
+        '## Context',
+        '### Dependencies',
+        '```json',
+        '{ "dependsOn": [62] }',
+        '```',
+        '### AllowedFiles',
+        '- apps/agent-daemon/src/ready-gate.ts',
+        '### ForbiddenFiles',
+        '- apps/agent-daemon/src/daemon.ts',
+        '### MustPreserve',
+        '- 默认 ready gate 行为不变',
+        '### OutOfScope',
+        '- runtime evaluator',
+        '### RequiredSemantics',
+        '- ready gate 继续只看静态 contract',
+        '### Validation',
+        '- bun test apps/agent-daemon/src/ready-gate.test.ts',
+        '',
+        '## RED 测试',
+        '```ts',
+        'throw new Error("red")',
+        '```',
+        '',
+        '## 实现步骤',
+        '1. 补 gate 测试',
+        '',
+        '## 验收',
+        '- 默认模式不受 simulate 影响',
+      ].join('\n'),
+      state: 'open' as const,
+      labels: [ISSUE_LABELS.READY],
+    }
+
+    expect(evaluateReadyGate(issue)).toEqual({
+      shouldEnforce: true,
+      valid: true,
+      errors: [],
+    })
+  })
+
+  test('blocks ready issues when opt-in simulation fails a planner executability check', async () => {
+    const result = await evaluateReadyGateWithSimulation({
+      number: 64,
+      title: '[AL-10] simulate blocks planner-only issue',
+      body: [
+        '## 用户故事',
+        '作为维护者，我希望 simulate 能拦住静态通过但实际不可执行的 issue。',
+        '',
+        '## Context',
+        '### Dependencies',
+        '```json',
+        '{ "dependsOn": [63] }',
+        '```',
+        '### AllowedFiles',
+        '- apps/agent-daemon/src/issue-simulate.ts',
+        '### ForbiddenFiles',
+        '- apps/agent-daemon/src/daemon.ts',
+        '### MustPreserve',
+        '- 只读 simulation 不写远端',
+        '### OutOfScope',
+        '- 自动 rewrite issue body',
+        '### RequiredSemantics',
+        '- simulate 暴露 planner failures',
+        '### Validation',
+        '- bun test apps/agent-daemon/src/issue-simulate.test.ts',
+        '',
+        '## RED 测试',
+        '```ts',
+        'throw new Error("red")',
+        '```',
+        '',
+        '## 实现步骤',
+        '1. 用 simulation 评估 executability',
+        '',
+        '## 验收',
+        '- simulation 失败时阻塞 ready gate',
+      ].join('\n'),
+      state: 'open',
+      labels: [ISSUE_LABELS.READY],
+    }, {
+      simulate: {
+        enabled: true,
+        runPlanner: async () => ({
+          responseText: '1. Read the codebase and analyze the issue\n2. Propose an approach',
+        }),
+      },
+    })
+
+    expect(result.shouldEnforce).toBe(true)
+    expect(result.valid).toBe(false)
+    expect(result.errors).toContain(
+      'planning output does not contain commit-shaped subtasks',
+    )
+    expect(result.simulation).toMatchObject({
+      valid: false,
+      checks: {
+        commitShapedPlan: false,
+        scopedAllowedFiles: true,
+        specificValidation: true,
+      },
+    })
+  })
+
+  test('preserves success when opt-in simulation passes', async () => {
+    const result = await evaluateReadyGateWithSimulation({
+      number: 65,
+      title: '[AL-10] simulate accepts executable issue',
+      body: [
+        '## 用户故事',
+        '作为维护者，我希望 simulate 通过时 ready gate 继续放行。',
+        '',
+        '## Context',
+        '### Dependencies',
+        '```json',
+        '{ "dependsOn": [64] }',
+        '```',
+        '### AllowedFiles',
+        '- apps/agent-daemon/src/index.ts',
+        '- apps/agent-daemon/src/index.test.ts',
+        '### ForbiddenFiles',
+        '- apps/agent-daemon/src/daemon.ts',
+        '### MustPreserve',
+        '- 默认 ready gate 行为不回归',
+        '### OutOfScope',
+        '- runtime browser evaluator',
+        '### RequiredSemantics',
+        '- simulate 输出结构化检查结果',
+        '### Validation',
+        '- bun test apps/agent-daemon/src/index.test.ts',
+        '- bun run typecheck',
+        '',
+        '## RED 测试',
+        '```ts',
+        'throw new Error("red")',
+        '```',
+        '',
+        '## 实现步骤',
+        '1. 新增 simulate CLI',
+        '2. 补 index tests',
+        '3. 跑 typecheck',
+        '',
+        '## 验收',
+        '- simulation valid=true',
+      ].join('\n'),
+      state: 'open',
+      labels: [ISSUE_LABELS.READY],
+    }, {
+      simulate: {
+        enabled: true,
+        runPlanner: async () => ({
+          responseText: [
+            '1. Add the simulate CLI entry in apps/agent-daemon/src/index.ts',
+            '2. Write index tests covering file and issue inputs',
+            '3. Run bun test apps/agent-daemon/src/index.test.ts and bun run typecheck',
+          ].join('\n'),
+        }),
+      },
+    })
+
+    expect(result).toMatchObject({
+      shouldEnforce: true,
+      valid: true,
+      errors: [],
+      simulation: {
+        valid: true,
+        checks: {
+          commitShapedPlan: true,
+          scopedAllowedFiles: true,
+          specificValidation: true,
+        },
+      },
+    })
   })
 
   test('accepts ready issues when validation points at a new file that is explicitly allowed', () => {
