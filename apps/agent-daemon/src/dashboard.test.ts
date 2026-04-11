@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildDashboardMachineCards,
   buildDashboardUpgradeEvents,
+  buildDashboardUpgradeRollout,
   buildDashboardSummary,
   buildDashboardUpgradeFailureAlertMessages,
   buildDashboardUpgradeSuccessNoteMessages,
@@ -635,6 +636,110 @@ describe('dashboard machine aggregation', () => {
       tone: 'gold',
     })
   })
+
+  test('builds the current rollout progress view from the latest announcement and machine state', () => {
+    const machines = buildDashboardMachineCards(
+      [],
+      [],
+      [
+        buildPresence({
+          machineId: 'machine-current',
+          daemonInstanceId: 'daemon-current',
+          upgradeStatus: 'up-to-date',
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+        }),
+        buildPresence({
+          machineId: 'machine-ready',
+          daemonInstanceId: 'daemon-ready',
+          upgradeStatus: 'upgrade-available',
+          safeToUpgradeNow: true,
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+        }),
+        buildPresence({
+          machineId: 'machine-busy',
+          daemonInstanceId: 'daemon-busy',
+          upgradeStatus: 'upgrade-available',
+          safeToUpgradeNow: false,
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+          autoUpgrade: {
+            attemptCount: 2,
+            successCount: 0,
+            failureCount: 2,
+            noChangeCount: 0,
+            consecutiveFailureCount: 2,
+            lastAttemptAt: '2026-04-05T09:11:20.000Z',
+            lastSuccessAt: null,
+            lastOutcome: 'failed',
+            lastTargetVersion: '0.1.2',
+            lastTargetRevision: 'fedcba9876543210',
+            lastError: 'git pull failed',
+            pausedUntil: '2026-04-05T09:25:20.000Z',
+          },
+        }),
+        buildPresence({
+          machineId: 'machine-manual',
+          daemonInstanceId: 'daemon-manual',
+          upgradeStatus: 'upgrade-available',
+          upgradeAutoApplyEnabled: false,
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+        }),
+        buildPresence({
+          machineId: 'machine-ahead',
+          daemonInstanceId: 'daemon-ahead',
+          upgradeStatus: 'ahead-of-channel',
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+        }),
+        buildPresence({
+          machineId: 'machine-error',
+          daemonInstanceId: 'daemon-error',
+          upgradeStatus: 'error',
+          latestVersion: null,
+          latestRevision: null,
+        }),
+      ],
+    )
+
+    const rollout = buildDashboardUpgradeRollout({
+      commentId: 800,
+      body: 'ignored',
+      createdAt: '2026-04-05T09:10:21.000Z',
+      updatedAt: '2026-04-05T09:10:21.000Z',
+      announcement: {
+        repo: 'JamesWuHK/digital-employee',
+        channel: 'master',
+        latestVersion: '0.1.2',
+        latestRevision: 'fedcba9876543210',
+        latestCommitAt: '2026-04-05T09:10:20.000Z',
+        announcedAt: '2026-04-05T09:10:21.000Z',
+        announcedByMachineId: 'machine-discoverer',
+        announcedByDaemonInstanceId: 'daemon-discoverer',
+      },
+    }, machines)
+
+    expect(rollout).toEqual({
+      channel: 'master',
+      targetVersion: '0.1.2',
+      targetRevision: 'fedcba9876543210',
+      announcedAt: '2026-04-05T09:10:21.000Z',
+      announcedByMachineId: 'machine-discoverer',
+      announcedByDaemonInstanceId: 'daemon-discoverer',
+      totalMachineCount: 6,
+      completedMachineCount: 1,
+      aheadMachineCount: 1,
+      pendingMachineCount: 3,
+      readyMachineCount: 1,
+      blockedMachineCount: 1,
+      manualMachineCount: 1,
+      failedMachineCount: 1,
+      errorMachineCount: 1,
+      progressPercent: 33,
+    })
+  })
 })
 
 describe('dashboard localization', () => {
@@ -645,6 +750,8 @@ describe('dashboard localization', () => {
     expect(html).toContain('<title>Agent Loop 监控台</title>')
     expect(html).toContain('分布式开发监控台')
     expect(html).toContain('立即刷新')
+    expect(html).toContain('当前升级波次进度')
+    expect(html).toContain('升级事件')
     expect(html).toContain('升级事件')
     expect(html).toContain('最近这波 rollout 发生了什么')
     expect(html).toContain('机器状态')
@@ -653,6 +760,9 @@ describe('dashboard localization', () => {
 
     expect(script).toContain('仪表盘快照加载失败')
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
+    expect(script).toContain('最近未发现共享升级广播')
+    expect(script).toContain('已完成')
+    expect(script).toContain('升级被阻塞')
     expect(script).toContain('最近没有记录到升级事件。')
     expect(script).toContain('升级广播')
     expect(script).toContain('升级成功')

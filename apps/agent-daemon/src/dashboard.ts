@@ -204,6 +204,25 @@ export interface DashboardUpgradeEvent {
   tone: '' | 'accent' | 'gold' | 'error'
 }
 
+export interface DashboardUpgradeRollout {
+  channel: string | null
+  targetVersion: string | null
+  targetRevision: string | null
+  announcedAt: string
+  announcedByMachineId: string
+  announcedByDaemonInstanceId: string
+  totalMachineCount: number
+  completedMachineCount: number
+  aheadMachineCount: number
+  pendingMachineCount: number
+  readyMachineCount: number
+  blockedMachineCount: number
+  manualMachineCount: number
+  failedMachineCount: number
+  errorMachineCount: number
+  progressPercent: number
+}
+
 export interface DashboardSnapshot {
   generatedAt: string
   repo: string
@@ -211,6 +230,7 @@ export interface DashboardSnapshot {
   machines: DashboardMachineCard[]
   issues: DashboardIssueView[]
   prs: DashboardPullRequestView[]
+  upgradeRollout: DashboardUpgradeRollout | null
   upgradeEvents: DashboardUpgradeEvent[]
   notes: string[]
   errors: string[]
@@ -365,6 +385,10 @@ export async function collectDashboardSnapshot(
     machines,
     issues,
     prs,
+    upgradeRollout: buildDashboardUpgradeRollout(
+      recentUpgradeAnnouncements[0] ?? null,
+      machines,
+    ),
     upgradeEvents: buildDashboardUpgradeEvents(
       recentUpgradeAnnouncements,
       recentUpgradeFailures,
@@ -556,6 +580,108 @@ export function buildDashboardUpgradeFailureAlertMessages(
   }
 
   return [...new Set(messages)]
+}
+
+export function buildDashboardUpgradeRollout(
+  latestAnnouncement: ManagedDaemonUpgradeAnnouncementComment | null,
+  machines: DashboardMachineCard[],
+): DashboardUpgradeRollout | null {
+  if (!latestAnnouncement) {
+    return null
+  }
+
+  const targetVersion = latestAnnouncement.announcement.latestVersion
+  const targetRevision = latestAnnouncement.announcement.latestRevision
+  let totalMachineCount = 0
+  let completedMachineCount = 0
+  let aheadMachineCount = 0
+  let pendingMachineCount = 0
+  let readyMachineCount = 0
+  let blockedMachineCount = 0
+  let manualMachineCount = 0
+  let failedMachineCount = 0
+  let errorMachineCount = 0
+
+  for (const machine of machines) {
+    const presence = machine.presence
+    if (!presence) {
+      continue
+    }
+
+    totalMachineCount += 1
+    const latestMatchesTarget = doesDashboardUpgradeTargetMatch(
+      presence.latestVersion,
+      presence.latestRevision,
+      targetVersion,
+      targetRevision,
+    )
+    const lastAttemptMatchesTarget = doesDashboardUpgradeTargetMatch(
+      presence.autoUpgrade?.lastTargetVersion ?? null,
+      presence.autoUpgrade?.lastTargetRevision ?? null,
+      targetVersion,
+      targetRevision,
+    )
+
+    if (presence.upgradeStatus === 'up-to-date' && latestMatchesTarget) {
+      completedMachineCount += 1
+    }
+    if (presence.upgradeStatus === 'ahead-of-channel' && latestMatchesTarget) {
+      aheadMachineCount += 1
+    }
+    if (presence.upgradeStatus === 'upgrade-available' && latestMatchesTarget) {
+      pendingMachineCount += 1
+      if (!presence.upgradeAutoApplyEnabled) {
+        manualMachineCount += 1
+      } else if (presence.safeToUpgradeNow) {
+        readyMachineCount += 1
+      } else {
+        blockedMachineCount += 1
+      }
+    }
+    if (presence.upgradeStatus === 'error') {
+      errorMachineCount += 1
+    }
+    if (presence.autoUpgrade?.lastOutcome === 'failed' && lastAttemptMatchesTarget) {
+      failedMachineCount += 1
+    }
+  }
+
+  const progressNumerator = completedMachineCount + aheadMachineCount
+  const progressPercent = totalMachineCount > 0
+    ? Math.max(0, Math.min(100, Math.round((progressNumerator / totalMachineCount) * 100)))
+    : 0
+
+  return {
+    channel: latestAnnouncement.announcement.channel,
+    targetVersion,
+    targetRevision,
+    announcedAt: latestAnnouncement.announcement.announcedAt,
+    announcedByMachineId: latestAnnouncement.announcement.announcedByMachineId,
+    announcedByDaemonInstanceId: latestAnnouncement.announcement.announcedByDaemonInstanceId,
+    totalMachineCount,
+    completedMachineCount,
+    aheadMachineCount,
+    pendingMachineCount,
+    readyMachineCount,
+    blockedMachineCount,
+    manualMachineCount,
+    failedMachineCount,
+    errorMachineCount,
+    progressPercent,
+  }
+}
+
+function doesDashboardUpgradeTargetMatch(
+  leftVersion: string | null,
+  leftRevision: string | null,
+  rightVersion: string | null,
+  rightRevision: string | null,
+): boolean {
+  if (!leftVersion && !leftRevision) {
+    return false
+  }
+
+  return leftVersion === rightVersion && leftRevision === rightRevision
 }
 
 export function buildDashboardUpgradeSuccessNoteMessages(
@@ -1337,6 +1463,16 @@ export function renderDashboardHtml(): string {
       <section class="panel">
         <div class="section-header">
           <div>
+            <p class="section-eyebrow">Rollout</p>
+            <h2>当前升级波次进度</h2>
+          </div>
+          <p class="section-note">按最近一次共享升级广播聚合各机器的完成、阻塞、手动和失败状态，帮助你判断这波升级是否已经收口。</p>
+        </div>
+        <div id="upgrade-rollout" class="rollout-panel"></div>
+      </section>
+      <section class="panel">
+        <div class="section-header">
+          <div>
             <p class="section-eyebrow">升级事件</p>
             <h2>最近这波 rollout 发生了什么</h2>
           </div>
@@ -1723,6 +1859,38 @@ select:hover {
   gap: 10px;
 }
 
+.rollout-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.rollout-hero {
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(60, 86, 76, 0.12);
+  padding: 16px 18px;
+}
+
+.rollout-progress {
+  margin-top: 12px;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background: rgba(60, 86, 76, 0.1);
+  overflow: hidden;
+}
+
+.rollout-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #67b29a);
+  border-radius: var(--radius-pill);
+}
+
+.rollout-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
 .runtime-item,
 .warning-item,
 .lease-item,
@@ -1736,6 +1904,13 @@ select:hover {
 .warning-item {
   background: rgba(255, 248, 244, 0.96);
   border-color: rgba(179, 77, 61, 0.12);
+}
+
+.rollout-stat {
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(60, 86, 76, 0.1);
+  padding: 12px 13px;
 }
 
 .lease-item {
@@ -1898,6 +2073,7 @@ const state = {
 
 const alertsEl = document.getElementById('alerts');
 const summaryEl = document.getElementById('summary');
+const upgradeRolloutEl = document.getElementById('upgrade-rollout');
 const upgradeEventsEl = document.getElementById('upgrade-events');
 const machinesEl = document.getElementById('machines');
 const issuesBodyEl = document.getElementById('issues-body');
@@ -1973,6 +2149,7 @@ function renderSnapshot(snapshot) {
   updatedAtEl.textContent = '仓库 ' + snapshot.repo + ' | 更新于 ' + formatTimestamp(snapshot.generatedAt) + ' | 自动刷新 ' + Math.round(refreshIntervalMs / 1000) + ' 秒';
   renderAlerts(snapshot);
   renderSummary(snapshot);
+  renderUpgradeRollout(snapshot.upgradeRollout);
   renderUpgradeEvents(snapshot.upgradeEvents);
   renderMachines(snapshot.machines);
   renderIssues(snapshot.issues);
@@ -2017,6 +2194,41 @@ function renderSummary(snapshot) {
   summaryEl.innerHTML = stats.map((stat) => {
     return '<article class="stat-card ' + stat.tone + '"><span class="muted">' + escapeHtml(stat.label) + '</span><strong>' + escapeHtml(String(stat.value)) + '</strong></article>';
   }).join('');
+}
+
+function renderUpgradeRollout(rollout) {
+  if (!rollout) {
+    upgradeRolloutEl.innerHTML = '<div class="empty-state">最近未发现共享升级广播，暂时没有可聚合的 rollout 波次。</div>';
+    return;
+  }
+
+  const targetRevision = rollout.targetRevision || 'unknown';
+  const shortRevision = targetRevision.length <= 18
+    ? targetRevision
+    : targetRevision.slice(0, 18) + '...';
+  const stats = [
+    { label: '受管机器', value: rollout.totalMachineCount, tone: '' },
+    { label: '已完成', value: rollout.completedMachineCount, tone: 'accent' },
+    { label: '超前 Channel', value: rollout.aheadMachineCount, tone: 'gold' },
+    { label: '待升级', value: rollout.pendingMachineCount, tone: 'gold' },
+    { label: '可立刻升级', value: rollout.readyMachineCount, tone: 'accent' },
+    { label: '升级被阻塞', value: rollout.blockedMachineCount, tone: 'gold' },
+    { label: '手动升级', value: rollout.manualMachineCount, tone: 'gold' },
+    { label: '升级失败', value: rollout.failedMachineCount, tone: rollout.failedMachineCount > 0 ? 'error' : '' },
+    { label: '检查错误', value: rollout.errorMachineCount, tone: rollout.errorMachineCount > 0 ? 'error' : '' },
+  ];
+
+  upgradeRolloutEl.innerHTML = [
+    '<div class="rollout-hero">',
+    '<div><strong>目标 v' + escapeHtml(String(rollout.targetVersion || 'unknown')) + '@' + escapeHtml(shortRevision) + '</strong></div>',
+    '<div class="muted" style="margin-top:8px">channel ' + escapeHtml(rollout.channel || 'default') + ' | 由 ' + escapeHtml(rollout.announcedByMachineId) + ' 广播于 ' + escapeHtml(formatTimestamp(rollout.announcedAt)) + '</div>',
+    '<div class="muted" style="margin-top:6px">已完成 ' + escapeHtml(String(rollout.progressPercent)) + '%</div>',
+    '<div class="rollout-progress"><div class="rollout-progress-bar" style="width:' + escapeHtml(String(rollout.progressPercent)) + '%"></div></div>',
+    '</div>',
+    '<div class="rollout-stats">' + stats.map((stat) => {
+      return '<article class="rollout-stat"><span class="muted">' + escapeHtml(stat.label) + '</span><strong class="' + escapeHtml(stat.tone) + '" style="display:block;margin-top:8px">' + escapeHtml(String(stat.value)) + '</strong></article>';
+    }).join('') + '</div>',
+  ].join('');
 }
 
 function renderUpgradeEvents(events) {
