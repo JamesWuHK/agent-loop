@@ -547,6 +547,46 @@ describe('agent-loop upgrade coordination', () => {
     expect(autoUpgradeAttempts).toBe(1)
     expect(scheduledPolls).toBe(0)
   })
+
+  test('logs a fresh upgrade notice when the announced target changes inside the reminder cooldown', () => {
+    const warnings: string[] = []
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: true,
+      },
+    }) as any
+
+    daemon.logger = {
+      log() {},
+      warn(message: string) {
+        warnings.push(message)
+      },
+      error() {},
+    }
+    daemon.lastUpgradeReminderAt = Date.now()
+    daemon.lastUpgradeReminderTargetKey = 'master:0.1.1:1111111111111111111111111111111111111111'
+
+    daemon.maybeLogAgentLoopUpgradeNotice({
+      enabled: true,
+      repo: 'JamesWuHK/agent-loop',
+      channel: 'master',
+      checkedAt: '2026-04-11T12:00:00.000Z',
+      status: 'upgrade-available',
+      latestVersion: '0.1.2',
+      latestRevision: '2222222222222222222222222222222222222222',
+      latestCommitAt: '2026-04-11T11:59:50.000Z',
+      safeToUpgradeNow: false,
+      message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+    })
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('auto-apply is enabled; this daemon will restart into the latest build once it goes idle')
+  })
 })
 
 describe('daemon merge recovery helpers', () => {

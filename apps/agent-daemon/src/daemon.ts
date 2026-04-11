@@ -287,6 +287,7 @@ export class AgentDaemon {
   private agentLoopUpgrade: AgentLoopUpgradeMetadata
   private upgradeCheckPromise: Promise<void> | null = null
   private lastUpgradeReminderAt: number | null = null
+  private lastUpgradeReminderTargetKey: string | null = null
   private autoUpgradePromise: Promise<boolean> | null = null
   private lastAutoUpgradeAttemptAt: number | null = null
   private lastAutoUpgradeAttemptTarget: string | null = null
@@ -3484,6 +3485,7 @@ export class AgentDaemon {
   private readPresenceRuntimeState(): ManagedDaemonPresenceRuntimeState {
     const runtime = this.buildRuntimeStatus()
     const upgrade = this.buildUpgradeStatus()
+    const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
     return {
       activeLeaseCount: runtime.activeLeaseCount,
       activeWorktreeCount: this.activeWorktrees.size,
@@ -3491,10 +3493,12 @@ export class AgentDaemon {
       agentLoopVersion: this.agentLoopBuild.version,
       agentLoopRevision: this.agentLoopBuild.revision,
       upgradeStatus: upgrade.status,
+      upgradeAutoApplyEnabled: policy.autoApply,
       safeToUpgradeNow: upgrade.safeToUpgradeNow,
       latestVersion: upgrade.latestVersion,
       latestRevision: upgrade.latestRevision,
       upgradeCheckedAt: upgrade.checkedAt,
+      upgradeMessage: upgrade.message,
     }
   }
 
@@ -3815,20 +3819,37 @@ export class AgentDaemon {
     }
 
     const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const reminderTargetKey = this.getUpgradeAnnouncementKey(upgrade)
     const now = Date.now()
     if (
-      this.lastUpgradeReminderAt !== null
+      reminderTargetKey !== null
+      && reminderTargetKey === this.lastUpgradeReminderTargetKey
+      && this.lastUpgradeReminderAt !== null
       && this.lastUpgradeReminderAt + policy.reminderIntervalMs > now
     ) {
       return
     }
 
     this.lastUpgradeReminderAt = now
+    this.lastUpgradeReminderTargetKey = reminderTargetKey
     const local = `v${this.agentLoopBuild.version}@${abbreviateRevision(this.agentLoopBuild.revision)}`
     const latest = `v${upgrade.latestVersion ?? 'unknown'}@${abbreviateRevision(upgrade.latestRevision)}`
     this.logger.warn(
-      `[daemon] agent-loop upgrade available on ${upgrade.channel ?? 'default'}: ${local} -> ${latest}; ${upgrade.safeToUpgradeNow ? 'safe to upgrade now' : 'defer upgrade until this daemon is idle'}`,
+      `[daemon] agent-loop upgrade available on ${upgrade.channel ?? 'default'}: ${local} -> ${latest}; ${this.describeAgentLoopUpgradeNoticeAction(upgrade, policy.autoApply)}`,
     )
+  }
+
+  private describeAgentLoopUpgradeNoticeAction(
+    upgrade: Pick<AgentLoopUpgradeMetadata, 'safeToUpgradeNow'>,
+    autoApplyEnabled: boolean,
+  ): string {
+    if (!autoApplyEnabled) {
+      return 'auto-apply is disabled on this machine; manual restart is required'
+    }
+    if (upgrade.safeToUpgradeNow) {
+      return 'auto-apply is enabled and this daemon can restart into the latest build now'
+    }
+    return 'auto-apply is enabled; this daemon will restart into the latest build once it goes idle'
   }
 
   private syncRuntimeMetrics(): void {

@@ -73,10 +73,12 @@ function buildPresence(overrides: Partial<ManagedDaemonPresence> = {}): ManagedD
     agentLoopVersion: '0.1.0',
     agentLoopRevision: 'abcdef1234567890',
     upgradeStatus: 'up-to-date',
+    upgradeAutoApplyEnabled: true,
     safeToUpgradeNow: true,
     latestVersion: '0.1.0',
     latestRevision: 'abcdef1234567890',
     upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
+    upgradeMessage: 'local and latest versions match',
     ...overrides,
   }
 }
@@ -264,10 +266,12 @@ describe('managed daemon presence publisher', () => {
       agentLoopVersion: '0.1.0',
       agentLoopRevision: 'abcdef1234567890',
       upgradeStatus: 'up-to-date',
+      upgradeAutoApplyEnabled: true,
       safeToUpgradeNow: true,
       latestVersion: '0.1.0',
       latestRevision: 'abcdef1234567890',
       upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
+      upgradeMessage: 'local and latest versions match',
     }
 
     const publisher = new ManagedDaemonPresencePublisher({
@@ -287,16 +291,20 @@ describe('managed daemon presence publisher', () => {
     runtime.activeWorktreeCount = 1
     runtime.effectiveActiveTasks = 1
     runtime.upgradeStatus = 'upgrade-available'
+    runtime.upgradeAutoApplyEnabled = false
     runtime.safeToUpgradeNow = false
     runtime.latestVersion = '0.1.1'
     runtime.latestRevision = 'fedcba9876543210'
+    runtime.upgradeMessage = 'channel master is newer: local v0.1.0, latest v0.1.1'
 
     await publisher.flushHeartbeat()
     expect(comments).toHaveLength(1)
     expect(comments[0]?.body).toContain('"status":"busy"')
     expect(comments[0]?.body).toContain('"activeLeaseCount":1')
     expect(comments[0]?.body).toContain('"upgradeStatus":"upgrade-available"')
+    expect(comments[0]?.body).toContain('"upgradeAutoApplyEnabled":false')
     expect(comments[0]?.body).toContain('"safeToUpgradeNow":false')
+    expect(comments[0]?.body).toContain('"upgradeMessage":"channel master is newer: local v0.1.0, latest v0.1.1"')
 
     await publisher.stop()
     expect(comments[0]?.body).toContain('"status":"stopped"')

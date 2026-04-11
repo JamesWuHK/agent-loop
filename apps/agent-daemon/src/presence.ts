@@ -34,10 +34,12 @@ export interface ManagedDaemonPresence {
   agentLoopVersion: string
   agentLoopRevision: string | null
   upgradeStatus: AgentLoopUpgradeStatusKind
+  upgradeAutoApplyEnabled: boolean
   safeToUpgradeNow: boolean
   latestVersion: string | null
   latestRevision: string | null
   upgradeCheckedAt: string | null
+  upgradeMessage: string | null
 }
 
 export interface ManagedDaemonPresenceComment extends IssueComment {
@@ -51,10 +53,12 @@ export interface ManagedDaemonPresenceRuntimeState {
   agentLoopVersion: string
   agentLoopRevision: string | null
   upgradeStatus: AgentLoopUpgradeStatusKind
+  upgradeAutoApplyEnabled: boolean
   safeToUpgradeNow: boolean
   latestVersion: string | null
   latestRevision: string | null
   upgradeCheckedAt: string | null
+  upgradeMessage: string | null
 }
 
 export interface ManagedDaemonUpgradeAnnouncement {
@@ -319,9 +323,11 @@ export function buildManagedDaemonPresenceComment(presence: ManagedDaemonPresenc
 - Effective tasks: ${presence.effectiveActiveTasks}
 - Agent Loop: v${presence.agentLoopVersion} (${presence.agentLoopRevision ?? 'unknown'})
 - Upgrade status: ${presence.upgradeStatus}
+- Auto-apply enabled: ${presence.upgradeAutoApplyEnabled ? 'yes' : 'no'}
 - Safe to upgrade now: ${presence.safeToUpgradeNow ? 'yes' : 'no'}
 - Latest known version: ${presence.latestVersion ?? 'unknown'}
-- Latest known revision: ${presence.latestRevision ?? 'unknown'}`
+- Latest known revision: ${presence.latestRevision ?? 'unknown'}
+- Upgrade message: ${presence.upgradeMessage ?? 'none'}`
 }
 
 export function buildManagedDaemonUpgradeAnnouncementComment(
@@ -374,6 +380,7 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       || parsed.upgradeStatus === 'error'
       ? parsed.upgradeStatus
       : 'unknown'
+    const upgradeAutoApplyEnabled = parsed.upgradeAutoApplyEnabled !== false
     const safeToUpgradeNow = parsed.safeToUpgradeNow === true
     const latestVersion = typeof parsed.latestVersion === 'string' && parsed.latestVersion.trim().length > 0
       ? parsed.latestVersion
@@ -383,6 +390,9 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       : null
     const upgradeCheckedAt = typeof parsed.upgradeCheckedAt === 'string' && parsed.upgradeCheckedAt.trim().length > 0
       ? parsed.upgradeCheckedAt
+      : null
+    const upgradeMessage = typeof parsed.upgradeMessage === 'string' && parsed.upgradeMessage.trim().length > 0
+      ? parsed.upgradeMessage
       : null
 
     return {
@@ -401,10 +411,12 @@ export function extractManagedDaemonPresenceComment(body: string): ManagedDaemon
       agentLoopVersion,
       agentLoopRevision,
       upgradeStatus,
+      upgradeAutoApplyEnabled,
       safeToUpgradeNow,
       latestVersion,
       latestRevision,
       upgradeCheckedAt,
+      upgradeMessage,
     }
   } catch {
     return null
@@ -755,10 +767,12 @@ export class ManagedDaemonPresencePublisher {
       agentLoopVersion: runtime.agentLoopVersion,
       agentLoopRevision: runtime.agentLoopRevision,
       upgradeStatus: runtime.upgradeStatus,
+      upgradeAutoApplyEnabled: runtime.upgradeAutoApplyEnabled,
       safeToUpgradeNow: runtime.safeToUpgradeNow,
       latestVersion: runtime.latestVersion,
       latestRevision: runtime.latestRevision,
       upgradeCheckedAt: runtime.upgradeCheckedAt,
+      upgradeMessage: runtime.upgradeMessage,
     }
   }
 
