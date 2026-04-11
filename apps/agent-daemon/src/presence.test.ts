@@ -79,6 +79,18 @@ function buildPresence(overrides: Partial<ManagedDaemonPresence> = {}): ManagedD
     latestRevision: 'abcdef1234567890',
     upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
     upgradeMessage: 'local and latest versions match',
+    autoUpgrade: {
+      attemptCount: 1,
+      successCount: 1,
+      failureCount: 0,
+      noChangeCount: 0,
+      lastAttemptAt: '2026-04-05T08:00:10.000Z',
+      lastSuccessAt: '2026-04-05T08:00:12.000Z',
+      lastOutcome: 'succeeded',
+      lastTargetVersion: '0.1.0',
+      lastTargetRevision: 'abcdef1234567890',
+      lastError: null,
+    },
     ...overrides,
   }
 }
@@ -142,6 +154,8 @@ describe('managed daemon presence helpers', () => {
     const body = buildManagedDaemonPresenceComment(presence)
 
     expect(extractManagedDaemonPresenceComment(body)).toEqual(presence)
+    expect(body).toContain('"autoUpgrade":{')
+    expect(body).toContain('Auto-upgrade outcome: succeeded')
   })
 
   test('round-trips managed daemon upgrade announcement comments and picks the newest one', () => {
@@ -272,6 +286,18 @@ describe('managed daemon presence publisher', () => {
       latestRevision: 'abcdef1234567890',
       upgradeCheckedAt: '2026-04-05T08:00:20.000Z',
       upgradeMessage: 'local and latest versions match',
+      autoUpgrade: {
+        attemptCount: 1,
+        successCount: 1,
+        failureCount: 0,
+        noChangeCount: 0,
+        lastAttemptAt: '2026-04-05T08:00:10.000Z',
+        lastSuccessAt: '2026-04-05T08:00:12.000Z',
+        lastOutcome: 'succeeded',
+        lastTargetVersion: '0.1.0',
+        lastTargetRevision: 'abcdef1234567890',
+        lastError: null,
+      },
     }
 
     const publisher = new ManagedDaemonPresencePublisher({
@@ -296,6 +322,18 @@ describe('managed daemon presence publisher', () => {
     runtime.latestVersion = '0.1.1'
     runtime.latestRevision = 'fedcba9876543210'
     runtime.upgradeMessage = 'channel master is newer: local v0.1.0, latest v0.1.1'
+    runtime.autoUpgrade = {
+      attemptCount: 2,
+      successCount: 1,
+      failureCount: 1,
+      noChangeCount: 0,
+      lastAttemptAt: '2026-04-05T08:00:40.000Z',
+      lastSuccessAt: '2026-04-05T08:00:12.000Z',
+      lastOutcome: 'failed',
+      lastTargetVersion: '0.1.1',
+      lastTargetRevision: 'fedcba9876543210',
+      lastError: 'git pull failed',
+    }
 
     await publisher.flushHeartbeat()
     expect(comments).toHaveLength(1)
@@ -305,6 +343,8 @@ describe('managed daemon presence publisher', () => {
     expect(comments[0]?.body).toContain('"upgradeAutoApplyEnabled":false')
     expect(comments[0]?.body).toContain('"safeToUpgradeNow":false')
     expect(comments[0]?.body).toContain('"upgradeMessage":"channel master is newer: local v0.1.0, latest v0.1.1"')
+    expect(comments[0]?.body).toContain('"lastOutcome":"failed"')
+    expect(comments[0]?.body).toContain('Auto-upgrade last error: git pull failed')
 
     await publisher.stop()
     expect(comments[0]?.body).toContain('"status":"stopped"')

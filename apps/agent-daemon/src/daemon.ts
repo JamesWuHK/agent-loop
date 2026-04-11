@@ -3513,6 +3513,7 @@ export class AgentDaemon {
       latestRevision: upgrade.latestRevision,
       upgradeCheckedAt: upgrade.checkedAt,
       upgradeMessage: upgrade.message,
+      autoUpgrade: runtime.autoUpgrade ?? null,
     }
   }
 

@@ -101,6 +101,18 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
     latestRevision: 'abcdef1234567890',
     upgradeCheckedAt: '2026-04-05T09:10:00.000Z',
     upgradeMessage: 'local and latest versions match',
+    autoUpgrade: {
+      attemptCount: 1,
+      successCount: 1,
+      failureCount: 0,
+      noChangeCount: 0,
+      lastAttemptAt: '2026-04-05T09:09:10.000Z',
+      lastSuccessAt: '2026-04-05T09:09:12.000Z',
+      lastOutcome: 'succeeded',
+      lastTargetVersion: '0.1.0',
+      lastTargetRevision: 'abcdef1234567890',
+      lastError: null,
+    },
     source: 'github',
     ...overrides,
   }
@@ -262,6 +274,7 @@ describe('dashboard machine aggregation', () => {
       upgradeBlockedMachineCount: 0,
       upgradeManualMachineCount: 0,
       upgradeErrorMachineCount: 0,
+      upgradeFailedMachineCount: 0,
     })
   })
 
@@ -305,6 +318,18 @@ describe('dashboard machine aggregation', () => {
           upgradeStatus: 'upgrade-available',
           safeToUpgradeNow: false,
           latestVersion: '0.1.2',
+          autoUpgrade: {
+            attemptCount: 2,
+            successCount: 0,
+            failureCount: 1,
+            noChangeCount: 1,
+            lastAttemptAt: '2026-04-05T09:10:20.000Z',
+            lastSuccessAt: null,
+            lastOutcome: 'failed',
+            lastTargetVersion: '0.1.2',
+            lastTargetRevision: 'fedcba9876543210',
+            lastError: 'git pull failed',
+          },
         }),
         buildPresence({
           machineId: 'machine-manual',
@@ -340,6 +365,7 @@ describe('dashboard machine aggregation', () => {
       upgradeBlockedMachineCount: 1,
       upgradeManualMachineCount: 1,
       upgradeErrorMachineCount: 1,
+      upgradeFailedMachineCount: 1,
     })
 
     expect(machines.find((machine) => machine.machineId === 'machine-ready')?.warnings).toContain(
@@ -347,6 +373,9 @@ describe('dashboard machine aggregation', () => {
     )
     expect(machines.find((machine) => machine.machineId === 'machine-busy')?.warnings).toContain(
       'agent-loop upgrade available on machine-busy; wait for the machine to go idle before restarting',
+    )
+    expect(machines.find((machine) => machine.machineId === 'machine-busy')?.warnings).toContain(
+      'automatic agent-loop upgrade last failed on machine-busy: git pull failed',
     )
     expect(machines.find((machine) => machine.machineId === 'machine-manual')?.warnings).toContain(
       'agent-loop upgrade available on machine-manual, but auto-apply is disabled on this machine; manual restart is required',
@@ -374,6 +403,7 @@ describe('dashboard localization', () => {
     expect(script).toContain('机器数')
     expect(script).toContain('待升级机器')
     expect(script).toContain('可立刻升级')
+    expect(script).toContain('升级执行失败')
     expect(script).toContain('手动升级机器')
     expect(script).toContain('本地运行时')
     expect(script).toContain('可认领')
