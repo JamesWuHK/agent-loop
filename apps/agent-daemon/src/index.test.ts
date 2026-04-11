@@ -8,12 +8,14 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
+  executeIssueRewriteCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveIssueLintTarget,
+  resolveIssueRewriteTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -62,6 +64,18 @@ describe('index helpers', () => {
     })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
   })
 
+  test('resolves rewrite targets and rejects empty rewrite paths', () => {
+    expect(resolveIssueRewriteTarget({
+      'rewrite-file': 'docs/issues/ready-draft.md',
+    })).toEqual({
+      path: 'docs/issues/ready-draft.md',
+    })
+
+    expect(() => resolveIssueRewriteTarget({
+      'rewrite-file': '   ',
+    })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
   test('executes local issue lint without loading remote config', async () => {
     const report = await executeIssueLintCommand({
       target: {
@@ -101,6 +115,94 @@ describe('index helpers', () => {
       valid: true,
       readyGateBlocked: false,
     })
+  })
+
+  test('executes local issue rewrite by reading a draft file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-rewrite-test-'))
+    const draftPath = join(draftDir, 'draft.md')
+    writeFileSync(draftPath, '修复 ready gate 对 Validation 缺失路径的提示，并补测试\n')
+
+    const result = await executeIssueRewriteCommand({
+      target: {
+        path: draftPath,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      rewriteIssueDraft: async ({ issueText, repoRoot, config }) => {
+        expect(issueText).toContain('修复 ready gate')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          markdown: '## 用户故事\n\n作为维护者，我希望 rewrite CLI 输出 canonical contract。',
+          validation: {
+            valid: true,
+            score: 100,
+            errors: [],
+            warnings: [],
+          },
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## 用户故事')).toBe(true)
+    expect(result.validation.valid).toBe(true)
   })
 
   test('executes remote issue lint with repo-aware config and supports json output', async () => {
