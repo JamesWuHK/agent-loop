@@ -27,7 +27,9 @@ import {
 } from './background'
 import {
   listActiveManagedDaemonPresence,
+  listActiveManagedDaemonUpgradeFailureAlerts,
   type ManagedDaemonPresenceComment,
+  type ManagedDaemonUpgradeFailureAlertComment,
 } from './presence'
 
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
@@ -284,6 +286,20 @@ export async function collectDashboardSnapshot(
     errors.push(`GitHub presence 不可用：${formatError(error)}`)
   }
 
+  try {
+    const alerts = await listActiveManagedDaemonUpgradeFailureAlerts({
+      ...options.config,
+      repo,
+    })
+    errors.push(...buildDashboardUpgradeFailureAlertMessages(
+      alerts,
+      remotePresences,
+      Date.parse(generatedAt),
+    ))
+  } catch (error) {
+    errors.push(`GitHub 升级告警不可用：${formatError(error)}`)
+  }
+
   const machines = buildDashboardMachineCards(localSnapshots, remoteLeases, remotePresences)
 
   return {
@@ -430,6 +446,45 @@ export function buildDashboardSummary(
     upgradeErrorMachineCount,
     upgradeFailedMachineCount,
   }
+}
+
+export function buildDashboardUpgradeFailureAlertMessages(
+  alerts: ManagedDaemonUpgradeFailureAlertComment[],
+  presences: DashboardPresenceView[],
+  now = Date.now(),
+): string[] {
+  const presenceByMachine = new Map<string, DashboardPresenceView>()
+  for (const presence of presences) {
+    const current = presenceByMachine.get(presence.machineId)
+    if (!current || (presence.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY) <= (current.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY)) {
+      presenceByMachine.set(presence.machineId, presence)
+    }
+  }
+
+  const messages: string[] = []
+  for (const comment of alerts) {
+    const pausedUntilMs = Date.parse(comment.alert.pausedUntil ?? '')
+    if (!Number.isFinite(pausedUntilMs) || pausedUntilMs <= now) {
+      continue
+    }
+
+    const presence = presenceByMachine.get(comment.alert.machineId)
+    const confirmedActive = !presence || (
+      presence.autoUpgrade?.lastOutcome === 'failed'
+      && presence.autoUpgrade?.pausedUntil === comment.alert.pausedUntil
+      && presence.autoUpgrade?.lastTargetVersion === comment.alert.targetVersion
+      && presence.autoUpgrade?.lastTargetRevision === comment.alert.targetRevision
+    )
+    if (!confirmedActive) {
+      continue
+    }
+
+    messages.push(
+      `GitHub 升级告警：${comment.alert.machineId} 自动升级连续失败 ${comment.alert.consecutiveFailureCount} 次，暂停到 ${comment.alert.pausedUntil}${comment.alert.lastError ? `，最近错误：${comment.alert.lastError}` : ''}`,
+    )
+  }
+
+  return [...new Set(messages)]
 }
 
 export function readDashboardLog(

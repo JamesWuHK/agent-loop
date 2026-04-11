@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildDashboardMachineCards,
   buildDashboardSummary,
+  buildDashboardUpgradeFailureAlertMessages,
   type DashboardIssueView,
   type DashboardLeaseView,
   type DashboardLocalMachineSnapshot,
@@ -10,6 +11,7 @@ import {
   renderDashboardAppScript,
   renderDashboardHtml,
 } from './dashboard'
+import type { ManagedDaemonUpgradeFailureAlertComment } from './presence'
 
 function buildLease(overrides: Partial<DashboardLeaseView> = {}): DashboardLeaseView {
   return {
@@ -388,6 +390,61 @@ describe('dashboard machine aggregation', () => {
     expect(machines.find((machine) => machine.machineId === 'machine-error')?.warnings).toContain(
       'agent-loop upgrade check is failing on machine-error: agent-loop upgrade repo could not be resolved; inspect this daemon before relying on auto-upgrade',
     )
+  })
+
+  test('formats active GitHub upgrade failure alerts confirmed by current presence state', () => {
+    const alerts: ManagedDaemonUpgradeFailureAlertComment[] = [
+      {
+        commentId: 501,
+        body: 'ignored',
+        createdAt: '2026-04-05T09:10:21.000Z',
+        updatedAt: '2026-04-05T09:10:21.000Z',
+        alert: {
+          repo: 'JamesWuHK/digital-employee',
+          machineId: 'machine-busy',
+          daemonInstanceId: 'daemon-busy',
+          channel: 'master',
+          targetVersion: '0.1.2',
+          targetRevision: 'fedcba9876543210',
+          consecutiveFailureCount: 2,
+          pausedUntil: '2026-04-05T09:25:20.000Z',
+          lastAttemptAt: '2026-04-05T09:10:20.000Z',
+          lastError: 'git pull failed',
+          alertedAt: '2026-04-05T09:10:21.000Z',
+        },
+      },
+    ]
+
+    const messages = buildDashboardUpgradeFailureAlertMessages(
+      alerts,
+      [
+        buildPresence({
+          machineId: 'machine-busy',
+          daemonInstanceId: 'daemon-busy',
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+          autoUpgrade: {
+            attemptCount: 2,
+            successCount: 0,
+            failureCount: 2,
+            noChangeCount: 0,
+            consecutiveFailureCount: 2,
+            lastAttemptAt: '2026-04-05T09:10:20.000Z',
+            lastSuccessAt: null,
+            lastOutcome: 'failed',
+            lastTargetVersion: '0.1.2',
+            lastTargetRevision: 'fedcba9876543210',
+            lastError: 'git pull failed',
+            pausedUntil: '2026-04-05T09:25:20.000Z',
+          },
+        }),
+      ],
+      Date.parse('2026-04-05T09:11:00.000Z'),
+    )
+
+    expect(messages).toEqual([
+      'GitHub 升级告警：machine-busy 自动升级连续失败 2 次，暂停到 2026-04-05T09:25:20.000Z，最近错误：git pull failed',
+    ])
   })
 })
 
