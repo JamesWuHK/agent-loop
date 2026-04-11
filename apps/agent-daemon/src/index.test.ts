@@ -180,6 +180,9 @@ describe('index helpers', () => {
           },
         }
       },
+      buildLocalIssueRewriteConfig: () => {
+        throw new Error('should not build local rewrite config when repo-aware overrides are provided')
+      },
       readTextFile: (path) => {
         expect(path).toBe(draftPath)
         return readFileSync(path, 'utf-8')
@@ -191,6 +194,95 @@ describe('index helpers', () => {
 
         return {
           markdown: '## 用户故事\n\n作为维护者，我希望 rewrite CLI 输出 canonical contract。',
+          validation: {
+            valid: true,
+            score: 100,
+            errors: [],
+            warnings: [],
+          },
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## 用户故事')).toBe(true)
+    expect(result.validation.valid).toBe(true)
+  })
+
+  test('executes local issue rewrite without repo or PAT config loading', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-rewrite-local-test-'))
+    const draftPath = join(draftDir, 'draft.md')
+    writeFileSync(draftPath, '把 issue 草稿重写成 canonical contract，并保持 stdout 输出\n')
+
+    const result = await executeIssueRewriteCommand({
+      target: {
+        path: draftPath,
+      },
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: () => {
+        throw new Error('should not load remote config for local rewrite')
+      },
+      buildLocalIssueRewriteConfig: ({ repo, pat, cwd }) => {
+        expect(repo).toBeUndefined()
+        expect(pat).toBeUndefined()
+        expect(cwd).toBe('/tmp/repo')
+
+        return {
+          repo: 'local/rewrite',
+          pat: '',
+          machineId: 'local-rewrite',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      rewriteIssueDraft: async ({ issueText, repoRoot, config }) => {
+        expect(issueText).toContain('stdout 输出')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('local/rewrite')
+        expect(config!.pat).toBe('')
+
+        return {
+          markdown: '## 用户故事\n\n作为维护者，我希望 rewrite CLI 在无 PAT 时也能处理本地草稿。',
           validation: {
             valid: true,
             score: 100,

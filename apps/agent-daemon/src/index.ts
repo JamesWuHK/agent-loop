@@ -11,8 +11,11 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { resolve } from 'node:path'
+import type { AgentConfig } from '@agent/shared'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
-import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
+import { loadConfig, loadRepoLocalConfig, readConfigFile, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
 import { appendWakeRequest, buildWakeQueuePath, type WakeRequest } from './wake-queue'
 import { readWakeRequestFromGitHubEventContext } from './github-event-wake'
@@ -191,6 +194,11 @@ interface IssueLintCommandDependencies {
 
 interface IssueRewriteCommandDependencies {
   loadConfig: typeof loadConfig
+  buildLocalIssueRewriteConfig: (input: {
+    repo?: string
+    pat?: string
+    cwd: string
+  }) => AgentConfig
   readTextFile: (path: string) => string
   rewriteIssueDraft: typeof rewriteIssueDraft
 }
@@ -223,6 +231,7 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
 
 const DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES: IssueRewriteCommandDependencies = {
   loadConfig,
+  buildLocalIssueRewriteConfig,
   readTextFile: (path) => readFileSync(path, 'utf-8'),
   rewriteIssueDraft,
 }
@@ -1012,16 +1021,139 @@ export async function executeIssueRewriteCommand(
   input: ExecuteIssueRewriteInput,
   deps: IssueRewriteCommandDependencies = DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES,
 ): Promise<RewriteIssueDraftResult> {
-  const config = deps.loadConfig({
-    repo: input.repo,
-    pat: input.pat,
-  })
+  const config = input.repo || input.pat
+    ? deps.loadConfig({
+      repo: input.repo,
+      pat: input.pat,
+    })
+    : deps.buildLocalIssueRewriteConfig({
+      repo: input.repo,
+      pat: input.pat,
+      cwd: input.repoRoot,
+    })
 
   return deps.rewriteIssueDraft({
     issueText: deps.readTextFile(input.target.path),
     repoRoot: input.repoRoot,
     config,
   })
+}
+
+function buildLocalIssueRewriteConfig(input: {
+  repo?: string
+  pat?: string
+  cwd: string
+}): AgentConfig {
+  const fileConfig = readConfigFile()
+  const repoConfig = loadRepoLocalConfig(input.cwd)
+  const identity = resolveLocalIssueRewriteIdentity(input.repo, fileConfig)
+  const requestedConcurrency = fileConfig.concurrency ?? 1
+  const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
+  const scheduling = {
+    concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
+    concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
+  }
+  const repoCap = scheduling.concurrencyByRepo[identity.repo] ?? null
+  const profileCap = scheduling.concurrencyByProfile[projectProfile] ?? null
+  const projectCap = repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency ?? null
+  const concurrencyCap = [repoCap, profileCap, projectCap]
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    .reduce<number | null>((lowest, value) => (lowest === null ? value : Math.min(lowest, value)), null)
+  const effectiveConcurrency = concurrencyCap === null
+    ? requestedConcurrency
+    : Math.min(requestedConcurrency, concurrencyCap)
+  const agentFallback =
+    repoConfig.agent && Object.prototype.hasOwnProperty.call(repoConfig.agent, 'fallback')
+      ? (repoConfig.agent.fallback ?? null)
+      : fileConfig.agent && Object.prototype.hasOwnProperty.call(fileConfig.agent, 'fallback')
+        ? (fileConfig.agent.fallback ?? null)
+        : 'claude'
+
+  return {
+    machineId: identity.machineId,
+    repo: identity.repo,
+    pat: resolveLocalIssueRewritePat(input.pat, fileConfig.pat),
+    pollIntervalMs: fileConfig.pollIntervalMs ?? 60_000,
+    idlePollIntervalMs: Math.max(
+      fileConfig.pollIntervalMs ?? 60_000,
+      fileConfig.idlePollIntervalMs ?? 300_000,
+    ),
+    concurrency: Math.max(1, effectiveConcurrency),
+    requestedConcurrency,
+    concurrencyPolicy: {
+      requested: requestedConcurrency,
+      effective: Math.max(1, effectiveConcurrency),
+      repoCap,
+      profileCap,
+      projectCap,
+    },
+    scheduling,
+    recovery: {
+      heartbeatIntervalMs: fileConfig.recovery?.heartbeatIntervalMs ?? 30_000,
+      leaseTtlMs: fileConfig.recovery?.leaseTtlMs ?? 60_000,
+      workerIdleTimeoutMs: fileConfig.recovery?.workerIdleTimeoutMs ?? 300_000,
+      leaseAdoptionBackoffMs: fileConfig.recovery?.leaseAdoptionBackoffMs ?? 5_000,
+      leaseNoProgressTimeoutMs: fileConfig.recovery?.leaseNoProgressTimeoutMs ?? 360_000,
+    },
+    worktreesBase: resolve(homedir(), '.agent-worktrees', identity.repo.replace('/', '-')),
+    project: {
+      profile: projectProfile,
+      promptGuidance: repoConfig.project?.promptGuidance ?? fileConfig.project?.promptGuidance,
+      maxConcurrency: projectCap ?? undefined,
+    },
+    agent: {
+      primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
+      fallback: agentFallback,
+      claudePath: fileConfig.agent?.claudePath ?? 'claude',
+      codexPath: fileConfig.agent?.codexPath ?? 'codex',
+      codexBaseUrl:
+        process.env.OPENAI_BASE_URL
+        ?? process.env.OPENAI_API_BASE
+        ?? process.env.OPENAI_API_URL
+        ?? process.env.OPENAI_BASE
+        ?? fileConfig.agent?.codexBaseUrl,
+      timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000,
+    },
+    git: {
+      defaultBranch: repoConfig.git?.defaultBranch ?? fileConfig.git?.defaultBranch ?? 'main',
+      authorName: fileConfig.git?.authorName ?? 'agent-loop',
+      authorEmail: fileConfig.git?.authorEmail ?? 'agent-loop@local',
+    },
+    upgrade: fileConfig.upgrade,
+  }
+}
+
+function resolveLocalIssueRewriteIdentity(
+  repo: string | undefined,
+  fileConfig: Partial<AgentConfig>,
+): { repo: string; machineId: string } {
+  try {
+    return resolveLocalDaemonIdentity(
+      {
+        repo,
+      },
+      {
+        fileConfig,
+        persistGeneratedMachineId: false,
+      },
+    )
+  } catch {
+    return {
+      repo: repo ?? fileConfig.repo ?? 'local/rewrite',
+      machineId: fileConfig.machineId ?? 'local-rewrite',
+    }
+  }
+}
+
+function resolveLocalIssueRewritePat(
+  cliPat: string | undefined,
+  filePat: string | undefined,
+): string {
+  return cliPat
+    ?? process.env.GITHUB_TOKEN
+    ?? process.env.GH_TOKEN
+    ?? filePat
+    ?? ''
 }
 
 export function formatIssueLintOutput(
