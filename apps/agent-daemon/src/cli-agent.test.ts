@@ -157,6 +157,116 @@ describe('cli-agent', () => {
     }
   })
 
+  test('runs Codex with isolated base_url config while deprecated OPENAI base-url env vars stay unset', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-codex-env-test-'))
+    const scriptPath = join(tempDir, 'fake-codex.sh')
+    const envCapturePath = join(tempDir, 'captured-env.txt')
+    const configCapturePath = join(tempDir, 'captured-config.toml')
+    const worktreePath = join(tempDir, 'worktree')
+
+    try {
+      writeFileSync(
+        scriptPath,
+        `#!/bin/sh
+response_file=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    response_file="$1"
+  fi
+  shift
+done
+cat >/dev/null
+cp "$CODEX_HOME/config.toml" ${JSON.stringify(configCapturePath)}
+{
+  printf 'OPENAI_BASE_URL=%s\n' "\${OPENAI_BASE_URL-__UNSET__}"
+  printf 'OPENAI_API_BASE=%s\n' "\${OPENAI_API_BASE-__UNSET__}"
+  printf 'OPENAI_API_URL=%s\n' "\${OPENAI_API_URL-__UNSET__}"
+  printf 'OPENAI_BASE=%s\n' "\${OPENAI_BASE-__UNSET__}"
+  printf 'PATH=%s\n' "\${PATH-__UNSET__}"
+  printf 'HTTPS_PROXY=%s\n' "\${HTTPS_PROXY-__UNSET__}"
+} > ${JSON.stringify(envCapturePath)}
+printf 'fake codex ok\n' > "$response_file"
+`,
+        'utf-8',
+      )
+      chmodSync(scriptPath, 0o755)
+      mkdirSync(worktreePath, { recursive: true })
+
+      const originalOpenaiBaseUrl = process.env.OPENAI_BASE_URL
+      const originalOpenaiApiBase = process.env.OPENAI_API_BASE
+      const originalOpenaiApiUrl = process.env.OPENAI_API_URL
+      const originalOpenaiBase = process.env.OPENAI_BASE
+      const originalHttpsProxy = process.env.HTTPS_PROXY
+
+      process.env.OPENAI_BASE_URL = 'https://runtime-openai-base-url.example/v1'
+      process.env.OPENAI_API_BASE = 'https://runtime-openai-api-base.example/v1'
+      process.env.OPENAI_API_URL = 'https://runtime-openai-api-url.example/v1'
+      process.env.OPENAI_BASE = 'https://runtime-openai-base.example/v1'
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:7890'
+
+      try {
+        const result = await runConfiguredAgent({
+          prompt: 'noop',
+          worktreePath,
+          timeoutMs: 5_000,
+          config: {
+            ...baseConfig,
+            agent: {
+              ...baseConfig.agent,
+              primary: 'codex',
+              fallback: null,
+              codexPath: scriptPath,
+              codexBaseUrl: 'http://127.0.0.1:18777/v1',
+            },
+          },
+        })
+
+        expect(result.ok).toBe(true)
+        expect(result.exitCode).toBe(0)
+        expect(result.responseText).toBe('fake codex ok')
+
+        expect(readFileSync(configCapturePath, 'utf-8')).toBe(
+          buildIsolatedCodexConfig('http://127.0.0.1:18777/v1'),
+        )
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_BASE_URL=__UNSET__')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_API_BASE=__UNSET__')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_API_URL=__UNSET__')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_BASE=__UNSET__')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('PATH=')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('HTTPS_PROXY=http://127.0.0.1:7890')
+      } finally {
+        if (originalOpenaiBaseUrl === undefined) {
+          delete process.env.OPENAI_BASE_URL
+        } else {
+          process.env.OPENAI_BASE_URL = originalOpenaiBaseUrl
+        }
+        if (originalOpenaiApiBase === undefined) {
+          delete process.env.OPENAI_API_BASE
+        } else {
+          process.env.OPENAI_API_BASE = originalOpenaiApiBase
+        }
+        if (originalOpenaiApiUrl === undefined) {
+          delete process.env.OPENAI_API_URL
+        } else {
+          process.env.OPENAI_API_URL = originalOpenaiApiUrl
+        }
+        if (originalOpenaiBase === undefined) {
+          delete process.env.OPENAI_BASE
+        } else {
+          process.env.OPENAI_BASE = originalOpenaiBase
+        }
+        if (originalHttpsProxy === undefined) {
+          delete process.env.HTTPS_PROXY
+        } else {
+          process.env.HTTPS_PROXY = originalHttpsProxy
+        }
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   test('marks hung agent runs as idle_timeout when no output or git progress occurs', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-hung-test-'))
     const scriptPath = join(tempDir, 'fake-claude.sh')
