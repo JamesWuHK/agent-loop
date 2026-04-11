@@ -20,6 +20,12 @@ interface PushBranchDependencies {
   }) => Promise<void> | void
 }
 
+interface CreateOrFindPrDependencies {
+  checkPrExists: typeof checkPrExists
+  createPr: typeof createPr
+  pushBranch: typeof pushBranch
+}
+
 const MAX_PUSH_ATTEMPTS = 3
 
 interface ManagedBranchPushPlan {
@@ -181,13 +187,18 @@ export async function createOrFindPr(
   issueTitle: string,
   config: AgentConfig,
   logger = console,
+  dependencies: CreateOrFindPrDependencies = {
+    checkPrExists,
+    createPr,
+    pushBranch,
+  },
 ): Promise<{ prNumber: number; prUrl: string }> {
   // Check idempotency: PR might already exist
-  const existing = await checkPrExists(branch, config)
+  const existing = await dependencies.checkPrExists(branch, config)
 
   if (existing.prNumber !== null && existing.prState === 'open') {
     const url = existing.prUrl ?? ''
-    await pushBranch(worktreePath, branch, logger)
+    await dependencies.pushBranch(worktreePath, branch, logger)
     logger.log(`[pr] PR already exists: #${existing.prNumber} (${url})`)
     return { prNumber: existing.prNumber, prUrl: url }
   }
@@ -199,16 +210,14 @@ export async function createOrFindPr(
   }
 
   if (existing.prNumber !== null && existing.prState === 'closed') {
-    logger.warn(`[pr] PR was closed, not creating new PR`)
-    const url = existing.prUrl ?? ''
-    return { prNumber: existing.prNumber, prUrl: url }
+    logger.warn(`[pr] PR was closed: #${existing.prNumber}; pushing branch and creating a fresh PR`)
   }
 
   // Push branch first if not pushed yet
-  await pushBranch(worktreePath, branch, logger)
+  await dependencies.pushBranch(worktreePath, branch, logger)
 
   const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
-  const pr = await createPr(branch, issueNumber, issueTitle, body, config)
+  const pr = await dependencies.createPr(branch, issueNumber, issueTitle, body, config)
 
   logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)
   return { prNumber: pr.number, prUrl: pr.url }
