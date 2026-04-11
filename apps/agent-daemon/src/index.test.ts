@@ -9,6 +9,7 @@ import {
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
   executeIssueRewriteCommand,
+  executeIssueSplitCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
@@ -16,6 +17,7 @@ import {
   readManagedRuntimeLog,
   resolveIssueLintTarget,
   resolveIssueRewriteTarget,
+  resolveIssueSplitTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -74,6 +76,31 @@ describe('index helpers', () => {
     expect(() => resolveIssueRewriteTarget({
       'rewrite-file': '   ',
     })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
+  test('resolves split targets, start numbers, and rejects detached split numbering', () => {
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+      'split-start-number': '41',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 41,
+    })
+
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 1,
+    })
+
+    expect(() => resolveIssueSplitTarget({
+      'split-file': '   ',
+    })).toThrow('--split-file must be a non-empty path')
+
+    expect(() => resolveIssueSplitTarget({
+      'split-start-number': '41',
+    })).toThrow('--split-start-number can only be used with --split-file')
   })
 
   test('executes local issue lint without loading remote config', async () => {
@@ -203,6 +230,91 @@ describe('index helpers', () => {
 
     expect(result.markdown.startsWith('## 用户故事')).toBe(true)
     expect(result.validation.valid).toBe(true)
+  })
+
+  test('executes local issue split by reading a parent file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-split-test-'))
+    const draftPath = join(draftDir, 'parent.md')
+    writeFileSync(draftPath, '父 issue 负责串起 lint、rewrite、split 三条子线。\n')
+
+    const result = await executeIssueSplitCommand({
+      target: {
+        path: draftPath,
+        startNumber: 41,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      splitTrackingIssue: async ({ issueText, repoRoot, config, issueNumberAllocator }) => {
+        expect(issueText).toContain('父 issue 负责串起')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+        expect(issueNumberAllocator!()).toBe(41)
+
+        return {
+          parentSummary: '按 lint -> rewrite -> split 的顺序推进 child issues。',
+          children: [],
+          markdown: '## Parent Summary\n\n按 lint -> rewrite -> split 的顺序推进 child issues。',
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## Parent Summary')).toBe(true)
   })
 
   test('executes remote issue lint with repo-aware config and supports json output', async () => {
