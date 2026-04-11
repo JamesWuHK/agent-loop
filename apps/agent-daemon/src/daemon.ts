@@ -1072,9 +1072,10 @@ export class AgentDaemon {
         return
       }
 
-      void this.maybeProcessRemoteUpgradeAnnouncement().catch((error) => {
-        this.logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
-      })
+      void runRemoteUpgradeAnnouncementSafely(
+        () => this.maybeProcessRemoteUpgradeAnnouncement(),
+        this.logger,
+      )
     }, intervalMs)
   }
 
@@ -1170,7 +1171,10 @@ export class AgentDaemon {
     })
 
     void this.maybeRefreshAgentLoopUpgradeStatus(true)
-    void this.maybeProcessRemoteUpgradeAnnouncement()
+    void runRemoteUpgradeAnnouncementSafely(
+      () => this.maybeProcessRemoteUpgradeAnnouncement(),
+      this.logger,
+    )
 
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
@@ -4918,6 +4922,17 @@ export class AgentDaemon {
         `[daemon] failed to publish blocked resume escalation for issue #${issueNumber}: ${formatDaemonError(error)}`,
       )
     }
+  }
+}
+
+export async function runRemoteUpgradeAnnouncementSafely(
+  run: () => Promise<void>,
+  logger: Pick<Console, 'warn'>,
+): Promise<void> {
+  try {
+    await run()
+  } catch (error) {
+    logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
   }
 }
 
