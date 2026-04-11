@@ -50,9 +50,11 @@ export interface DashboardSummary {
   failedIssueCount: number
   openPrCount: number
   upgradePendingMachineCount: number
+  upgradeCurrentMachineCount: number
   upgradeReadyMachineCount: number
   upgradeBlockedMachineCount: number
   upgradeManualMachineCount: number
+  upgradeAheadMachineCount: number
   upgradeErrorMachineCount: number
   upgradeFailedMachineCount: number
 }
@@ -397,9 +399,11 @@ export function buildDashboardSummary(
   let localRuntimeCount = 0
   let managedPresenceCount = 0
   let upgradePendingMachineCount = 0
+  let upgradeCurrentMachineCount = 0
   let upgradeReadyMachineCount = 0
   let upgradeBlockedMachineCount = 0
   let upgradeManualMachineCount = 0
+  let upgradeAheadMachineCount = 0
   let upgradeErrorMachineCount = 0
   let upgradeFailedMachineCount = 0
 
@@ -411,6 +415,9 @@ export function buildDashboardSummary(
 
     if (machine.presence) {
       managedPresenceCount += 1
+      if (machine.presence.upgradeStatus === 'up-to-date') {
+        upgradeCurrentMachineCount += 1
+      }
       if (machine.presence.upgradeStatus === 'upgrade-available') {
         upgradePendingMachineCount += 1
         if (!machine.presence.upgradeAutoApplyEnabled) {
@@ -423,6 +430,9 @@ export function buildDashboardSummary(
       }
       if (machine.presence.upgradeStatus === 'error') {
         upgradeErrorMachineCount += 1
+      }
+      if (machine.presence.upgradeStatus === 'ahead-of-channel') {
+        upgradeAheadMachineCount += 1
       }
       if (machine.presence.autoUpgrade?.lastOutcome === 'failed') {
         upgradeFailedMachineCount += 1
@@ -440,9 +450,11 @@ export function buildDashboardSummary(
     failedIssueCount: issues.filter((issue) => issue.state === 'failed').length,
     openPrCount: prs.length,
     upgradePendingMachineCount,
+    upgradeCurrentMachineCount,
     upgradeReadyMachineCount,
     upgradeBlockedMachineCount,
     upgradeManualMachineCount,
+    upgradeAheadMachineCount,
     upgradeErrorMachineCount,
     upgradeFailedMachineCount,
   }
@@ -1791,9 +1803,11 @@ function renderSummary(snapshot) {
     { label: '受管心跳', value: snapshot.summary.managedPresenceCount, tone: snapshot.summary.managedPresenceCount > 0 ? 'accent' : '' },
     { label: '活跃租约', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
     { label: '待升级机器', value: snapshot.summary.upgradePendingMachineCount, tone: snapshot.summary.upgradePendingMachineCount > 0 ? 'gold' : '' },
+    { label: '已升级最新', value: snapshot.summary.upgradeCurrentMachineCount, tone: snapshot.summary.upgradeCurrentMachineCount > 0 ? 'accent' : '' },
     { label: '可立刻升级', value: snapshot.summary.upgradeReadyMachineCount, tone: snapshot.summary.upgradeReadyMachineCount > 0 ? 'accent' : '' },
     { label: '升级被阻塞', value: snapshot.summary.upgradeBlockedMachineCount, tone: snapshot.summary.upgradeBlockedMachineCount > 0 ? 'gold' : '' },
     { label: '手动升级机器', value: snapshot.summary.upgradeManualMachineCount, tone: snapshot.summary.upgradeManualMachineCount > 0 ? 'gold' : '' },
+    { label: '超前 Channel', value: snapshot.summary.upgradeAheadMachineCount, tone: snapshot.summary.upgradeAheadMachineCount > 0 ? 'gold' : '' },
     { label: '升级检查错误', value: snapshot.summary.upgradeErrorMachineCount, tone: snapshot.summary.upgradeErrorMachineCount > 0 ? 'error' : '' },
     { label: '升级执行失败', value: snapshot.summary.upgradeFailedMachineCount, tone: snapshot.summary.upgradeFailedMachineCount > 0 ? 'error' : '' },
     { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
@@ -2035,7 +2049,7 @@ function renderPresenceItem(presence) {
     renderChip(localizePresenceStatus(presence.status), presence.status === 'busy' ? 'accent' : 'gold'),
     renderChip(shortDaemonId(presence.daemonInstanceId), ''),
     renderChip('v' + presence.agentLoopVersion, ''),
-    renderChip(presence.upgradeStatus, presence.upgradeStatus === 'upgrade-available' ? 'danger' : ''),
+    renderChip(localizeUpgradeStatus(presence.upgradeStatus), presence.upgradeStatus === 'upgrade-available' ? 'danger' : ''),
     autoUpgradeOutcome ? renderChip('自动升级' + autoUpgradeOutcome, autoUpgradeOutcomeTone) : '',
     renderChip(presence.upgradeAutoApplyEnabled ? '自动升级开' : '自动升级关', presence.upgradeAutoApplyEnabled ? 'accent' : 'gold'),
     renderChip('工作树 ' + presence.activeWorktreeCount, ''),
@@ -2145,6 +2159,25 @@ function localizeAutoUpgradeOutcome(outcome) {
       return '无变化'
     default:
       return outcome || '未知'
+  }
+}
+
+function localizeUpgradeStatus(status) {
+  switch (status) {
+    case 'disabled':
+      return '已禁用'
+    case 'unknown':
+      return '未知'
+    case 'up-to-date':
+      return '已是最新'
+    case 'upgrade-available':
+      return '可升级'
+    case 'ahead-of-channel':
+      return '超前 channel'
+    case 'error':
+      return '检查失败'
+    default:
+      return status || '未知'
   }
 }
 

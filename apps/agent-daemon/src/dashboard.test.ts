@@ -274,9 +274,11 @@ describe('dashboard machine aggregation', () => {
       failedIssueCount: 1,
       openPrCount: 1,
       upgradePendingMachineCount: 0,
+      upgradeCurrentMachineCount: 0,
       upgradeReadyMachineCount: 0,
       upgradeBlockedMachineCount: 0,
       upgradeManualMachineCount: 0,
+      upgradeAheadMachineCount: 0,
       upgradeErrorMachineCount: 0,
       upgradeFailedMachineCount: 0,
     })
@@ -368,9 +370,11 @@ describe('dashboard machine aggregation', () => {
       failedIssueCount: 0,
       openPrCount: 0,
       upgradePendingMachineCount: 3,
+      upgradeCurrentMachineCount: 0,
       upgradeReadyMachineCount: 1,
       upgradeBlockedMachineCount: 1,
       upgradeManualMachineCount: 1,
+      upgradeAheadMachineCount: 0,
       upgradeErrorMachineCount: 1,
       upgradeFailedMachineCount: 1,
     })
@@ -389,6 +393,52 @@ describe('dashboard machine aggregation', () => {
     )
     expect(machines.find((machine) => machine.machineId === 'machine-error')?.warnings).toContain(
       'agent-loop upgrade check is failing on machine-error: agent-loop upgrade repo could not be resolved; inspect this daemon before relying on auto-upgrade',
+    )
+  })
+
+  test('counts machines already upgraded or ahead of the tracked channel', () => {
+    const machines = buildDashboardMachineCards(
+      [],
+      [],
+      [
+        buildPresence({
+          machineId: 'machine-current',
+          daemonInstanceId: 'daemon-current',
+          upgradeStatus: 'up-to-date',
+          latestVersion: '0.1.2',
+          latestRevision: '2222222222222222222222222222222222222222',
+        }),
+        buildPresence({
+          machineId: 'machine-ahead',
+          daemonInstanceId: 'daemon-ahead',
+          upgradeStatus: 'ahead-of-channel',
+          latestVersion: '0.1.2',
+          latestRevision: '2222222222222222222222222222222222222222',
+        }),
+      ],
+    )
+
+    expect(buildDashboardSummary(machines, [], [])).toEqual({
+      machineCount: 2,
+      localRuntimeCount: 0,
+      managedPresenceCount: 2,
+      activeLeaseCount: 0,
+      readyIssueCount: 0,
+      workingIssueCount: 0,
+      failedIssueCount: 0,
+      openPrCount: 0,
+      upgradePendingMachineCount: 0,
+      upgradeCurrentMachineCount: 1,
+      upgradeReadyMachineCount: 0,
+      upgradeBlockedMachineCount: 0,
+      upgradeManualMachineCount: 0,
+      upgradeAheadMachineCount: 1,
+      upgradeErrorMachineCount: 0,
+      upgradeFailedMachineCount: 0,
+    })
+
+    expect(machines.find((machine) => machine.machineId === 'machine-ahead')?.warnings).toContain(
+      'agent-loop build on machine-ahead is ahead of the tracked channel; verify this machine is pinned intentionally',
     )
   })
 
@@ -464,9 +514,13 @@ describe('dashboard localization', () => {
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
     expect(script).toContain('机器数')
     expect(script).toContain('待升级机器')
+    expect(script).toContain('已升级最新')
     expect(script).toContain('可立刻升级')
+    expect(script).toContain('超前 Channel')
     expect(script).toContain('升级执行失败')
     expect(script).toContain('手动升级机器')
+    expect(script).toContain('已是最新')
+    expect(script).toContain('可升级')
     expect(script).toContain('本地运行时')
     expect(script).toContain('可认领')
     expect(script).toContain('阻塞原因')
