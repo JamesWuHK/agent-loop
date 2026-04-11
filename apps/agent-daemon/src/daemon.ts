@@ -20,7 +20,7 @@ import type {
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
 } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber, setGitHubApiRequestObserver } from '@agent/shared'
 import { claimSpecificIssue, pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
@@ -39,6 +39,7 @@ import {
   recordPrCreated,
   setActiveWorktrees,
   setActivePrReviews,
+  recordGitHubApiRequest,
   setConcurrencyLimit,
   setConcurrencyPolicy,
   setDaemonUptime,
@@ -780,6 +781,14 @@ export class AgentDaemon {
   }
 
   async start(): Promise<void> {
+    setGitHubApiRequestObserver((observation) => {
+      recordGitHubApiRequest(
+        observation.transport,
+        observation.mode,
+        observation.outcome,
+        observation.durationMs,
+      )
+    })
     this.logger.log(`[daemon] starting agent-loop v${this.agentLoopBuild.version} (${abbreviateRevision(this.agentLoopBuild.revision)})`)
     this.logger.log(`[daemon] machineId: ${this.config.machineId}`)
     this.logger.log(`[daemon] repo: ${this.config.repo}`)
@@ -1006,6 +1015,7 @@ export class AgentDaemon {
 
     this.running = false
     this.syncRuntimeMetrics()
+    setGitHubApiRequestObserver(null)
     this.logger.log(`[daemon] stopped. Worktrees preserved for debugging.`)
   }
 

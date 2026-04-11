@@ -36,6 +36,33 @@ const GH_PROXY_ENV_KEYS = [
   'http_proxy',
 ] as const
 
+export type GitHubApiTransport = 'graphql' | 'rest'
+export type GitHubApiMode = 'direct' | 'gh_cli'
+export type GitHubApiOutcome = 'success' | 'error' | 'timeout' | 'rate_limited'
+
+export interface GitHubApiRequestObservation {
+  transport: GitHubApiTransport
+  mode: GitHubApiMode
+  outcome: GitHubApiOutcome
+  durationMs: number
+}
+
+let githubApiRequestObserver: ((observation: GitHubApiRequestObservation) => void) | null = null
+
+export function setGitHubApiRequestObserver(
+  observer: ((observation: GitHubApiRequestObservation) => void) | null,
+): void {
+  githubApiRequestObserver = observer
+}
+
+function observeGitHubApiRequest(observation: GitHubApiRequestObservation): void {
+  try {
+    githubApiRequestObserver?.(observation)
+  } catch {
+    // Metrics hooks must never break GitHub API callers.
+  }
+}
+
 // ─── gh CLI wrapper ───────────────────────────────────────────────────────────
 
 export function buildGhEnv(config: Pick<AgentConfig, 'pat'>): Record<string, string> {
@@ -221,15 +248,46 @@ export async function ghApiRaw(
   config: AgentConfig,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const qualifiedArgs = qualifyGhApiArgs(args, config)
+  const transport = inferGitHubApiTransportFromArgs(qualifiedArgs)
   if (config.pat) {
     try {
       buildDirectGitHubApiRequest(qualifiedArgs, config)
-      return await runDirectGitHubApi(qualifiedArgs, config)
+      const startedAt = Date.now()
+      const result = await runDirectGitHubApi(qualifiedArgs, config)
+      observeGitHubApiRequest({
+        transport,
+        mode: 'direct',
+        outcome: inferGitHubApiOutcome({
+          transport,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+        }),
+        durationMs: Date.now() - startedAt,
+      })
+      return result
     } catch {
       // Fall back to gh api for argument shapes that direct mode does not support yet.
     }
   }
-  return runBoundedGhCommand(['api', ...qualifiedArgs], config)
+
+  const startedAt = Date.now()
+  const result = await runBoundedGhCommand(['api', ...qualifiedArgs], config)
+  observeGitHubApiRequest({
+    transport,
+    mode: 'gh_cli',
+    outcome: inferGitHubApiOutcome({
+      transport,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+    }),
+    durationMs: Date.now() - startedAt,
+  })
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+  }
 }
 
 interface DirectGitHubApiRequest {
@@ -607,6 +665,44 @@ export function qualifyGhApiArgs(
 
   const normalizedEndpoint = endpoint.replace(/^\/+/, '')
   return [`repos/${config.repo}/${normalizedEndpoint}`, ...rest]
+}
+
+function inferGitHubApiTransportFromArgs(args: string[]): GitHubApiTransport {
+  return args[0]?.trim() === 'graphql' ? 'graphql' : 'rest'
+}
+
+function inferGitHubApiOutcome(input: {
+  transport: GitHubApiTransport
+  stderr: string
+  exitCode: number
+  timedOut?: boolean
+}): GitHubApiOutcome {
+  if (input.timedOut || input.stderr.toLowerCase().includes('timed out')) {
+    return 'timeout'
+  }
+  if (input.exitCode === 0) {
+    return 'success'
+  }
+  if (isGitHubApiRateLimitErrorMessage(input.transport, input.stderr)) {
+    return 'rate_limited'
+  }
+  return 'error'
+}
+
+function isGitHubApiRateLimitErrorMessage(
+  transport: GitHubApiTransport,
+  message: string,
+): boolean {
+  if (transport === 'graphql') {
+    return isGraphQlRateLimitErrorMessage(message)
+  }
+
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('api rate limit')
+    || normalized.includes('secondary rate limit')
+    || normalized.includes('rate limit exceeded')
+  )
 }
 
 function shouldQualifyGhApiEndpoint(endpoint: string): boolean {

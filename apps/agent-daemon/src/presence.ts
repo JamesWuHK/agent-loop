@@ -4,9 +4,11 @@ import { join } from 'node:path'
 import {
   runBoundedGhCommand,
   type AgentConfig,
+  type GitHubApiOutcome,
   type AgentLoopUpgradeStatusKind,
   type IssueComment,
 } from '@agent/shared'
+import { recordGitHubApiRequest } from './metrics'
 
 const MANAGED_DAEMON_PRESENCE_ISSUE_TITLE = 'Agent Loop Presence'
 const MANAGED_DAEMON_PRESENCE_ISSUE_MARKER = '<!-- agent-loop:presence-registry -->'
@@ -123,9 +125,9 @@ function withTempJsonFile<T>(
 async function runGhCommand(
   args: string[],
   config: AgentConfig,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const { stdout, stderr, exitCode } = await runBoundedGhCommand(args, config)
-  return { stdout, stderr, exitCode }
+): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
+  const { stdout, stderr, exitCode, timedOut } = await runBoundedGhCommand(args, config)
+  return { stdout, stderr, exitCode, timedOut }
 }
 
 async function runGitHubRestRequest(
@@ -138,6 +140,7 @@ async function runGitHubRestRequest(
 ): Promise<string> {
   const normalizedPath = path.replace(/^\/+/, '')
   const method = options.method ?? 'GET'
+  const startedAt = Date.now()
 
   if (!config.pat) {
     const args = ['api', normalizedPath]
@@ -150,6 +153,12 @@ async function runGitHubRestRequest(
         options.body,
         async (payloadPath) => {
           const response = await runGhCommand([...args, '--input', payloadPath], config)
+          recordGitHubApiRequest(
+            'rest',
+            'gh_cli',
+            classifyGitHubApiOutcome(response.stderr, response.exitCode, response.timedOut),
+            Date.now() - startedAt,
+          )
           if (response.exitCode !== 0) {
             throw new Error(`gh api ${normalizedPath} failed (exit ${response.exitCode}): ${response.stderr}`)
           }
@@ -159,26 +168,45 @@ async function runGitHubRestRequest(
     }
 
     const response = await runGhCommand(args, config)
+    recordGitHubApiRequest(
+      'rest',
+      'gh_cli',
+      classifyGitHubApiOutcome(response.stderr, response.exitCode, response.timedOut),
+      Date.now() - startedAt,
+    )
     if (response.exitCode !== 0) {
       throw new Error(`gh api ${normalizedPath} failed (exit ${response.exitCode}): ${response.stderr}`)
     }
     return response.stdout
   }
 
-  const response = await fetchWithTimeout(`https://api.github.com/${normalizedPath}`, {
-    method,
-    headers: {
-      Authorization: `token ${config.pat}`,
-      Accept: 'application/vnd.github+json',
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  })
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`GitHub REST ${method} ${normalizedPath} failed (HTTP ${response.status}): ${parseGitHubRestErrorMessage(text)}`)
+  try {
+    const response = await fetchWithTimeout(`https://api.github.com/${normalizedPath}`, {
+      method,
+      headers: {
+        Authorization: `token ${config.pat}`,
+        Accept: 'application/vnd.github+json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    })
+    const text = await response.text()
+    recordGitHubApiRequest(
+      'rest',
+      'direct',
+      classifyGitHubApiOutcome(parseGitHubRestErrorMessage(text), response.ok ? 0 : 1, false),
+      Date.now() - startedAt,
+    )
+    if (!response.ok) {
+      throw new Error(`GitHub REST ${method} ${normalizedPath} failed (HTTP ${response.status}): ${parseGitHubRestErrorMessage(text)}`)
+    }
+    return text
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('timed out')) {
+      recordGitHubApiRequest('rest', 'direct', 'timeout', Date.now() - startedAt)
+    }
+    throw error
   }
-  return text
 }
 
 async function fetchWithTimeout(
@@ -220,6 +248,30 @@ function parseGitHubRestErrorMessage(body: string): string {
   }
 
   return trimmed
+}
+
+function classifyGitHubApiOutcome(
+  message: string,
+  exitCode: number,
+  timedOut: boolean,
+): GitHubApiOutcome {
+  if (timedOut || message.toLowerCase().includes('timed out')) {
+    return 'timeout'
+  }
+  if (exitCode === 0) {
+    return 'success'
+  }
+
+  const normalized = message.toLowerCase()
+  if (
+    normalized.includes('api rate limit')
+    || normalized.includes('secondary rate limit')
+    || normalized.includes('rate limit exceeded')
+  ) {
+    return 'rate_limited'
+  }
+
+  return 'error'
 }
 
 function mapIssueCommentRecord(
