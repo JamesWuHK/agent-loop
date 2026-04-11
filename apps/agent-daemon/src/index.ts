@@ -11,6 +11,7 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
+import type { AgentConfig } from '@agent/shared'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
@@ -187,7 +188,6 @@ interface IssueLintCommandDependencies {
 }
 
 interface BootstrapGateCommandDependencies {
-  loadConfig: typeof loadConfig
   buildBootstrapGateReportForRepo: typeof buildBootstrapGateReportForRepo
 }
 
@@ -218,7 +218,6 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
 }
 
 const DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES: BootstrapGateCommandDependencies = {
-  loadConfig,
   buildBootstrapGateReportForRepo,
 }
 
@@ -994,13 +993,8 @@ export async function executeBootstrapGateCommand(
   input: ExecuteBootstrapGateInput,
   deps: BootstrapGateCommandDependencies = DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES,
 ): Promise<BootstrapGateReport> {
-  const config = deps.loadConfig({
-    repo: input.repo,
-    pat: input.pat,
-  })
-
   return deps.buildBootstrapGateReportForRepo({
-    config,
+    config: buildBootstrapGateReadOnlyConfig(input),
   })
 }
 
@@ -1009,6 +1003,59 @@ export function formatBootstrapGateOutput(
   asJson = false,
 ): string {
   return asJson ? formatBootstrapGateReportJson(report) : formatBootstrapGateReport(report)
+}
+
+function buildBootstrapGateReadOnlyConfig(
+  input: ExecuteBootstrapGateInput,
+): AgentConfig {
+  const repo = input.repo?.trim()
+  if (!repo) {
+    throw new Error('--bootstrap-gate requires --repo owner/repo')
+  }
+
+  return {
+    machineId: 'bootstrap-gate-readonly',
+    repo,
+    pat: input.pat ?? '',
+    pollIntervalMs: 60_000,
+    idlePollIntervalMs: 300_000,
+    concurrency: 1,
+    requestedConcurrency: 1,
+    concurrencyPolicy: {
+      requested: 1,
+      effective: 1,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
+    },
+    scheduling: {
+      concurrencyByRepo: {},
+      concurrencyByProfile: {},
+    },
+    recovery: {
+      heartbeatIntervalMs: 30_000,
+      leaseTtlMs: 60_000,
+      workerIdleTimeoutMs: 300_000,
+      leaseAdoptionBackoffMs: 5_000,
+      leaseNoProgressTimeoutMs: 360_000,
+    },
+    worktreesBase: '.agent-worktrees',
+    project: {
+      profile: 'generic',
+    },
+    agent: {
+      primary: 'codex',
+      fallback: 'claude',
+      claudePath: 'claude',
+      codexPath: 'codex',
+      timeoutMs: 300_000,
+    },
+    git: {
+      defaultBranch: 'main',
+      authorName: 'agent-loop',
+      authorEmail: 'agent-loop@example.com',
+    },
+  }
 }
 
 export function buildWakeRequestFromCli(

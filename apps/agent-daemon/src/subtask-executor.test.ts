@@ -80,6 +80,29 @@ async function createGitRepo(): Promise<string> {
   return dir
 }
 
+async function createGitRepoWithRemote(defaultBranch: 'main' | 'master'): Promise<string> {
+  const remoteDir = mkdtempSync(join(tmpdir(), 'subtask-executor-remote-'))
+  const seedDir = mkdtempSync(join(tmpdir(), 'subtask-executor-seed-'))
+  const cloneDir = mkdtempSync(join(tmpdir(), 'subtask-executor-clone-'))
+  tempDirs.push(remoteDir, seedDir, cloneDir)
+
+  await Bun.$`git -C ${remoteDir} init --bare --initial-branch=${defaultBranch}`.quiet()
+  await Bun.$`git -C ${seedDir} init -b ${defaultBranch}`.quiet()
+  await Bun.$`git -C ${seedDir} config user.name ${TEST_CONFIG.git.authorName}`.quiet()
+  await Bun.$`git -C ${seedDir} config user.email ${TEST_CONFIG.git.authorEmail}`.quiet()
+  writeFileSync(join(seedDir, 'demo.txt'), 'before\n', 'utf-8')
+  await Bun.$`git -C ${seedDir} add demo.txt`.quiet()
+  await Bun.$`git -C ${seedDir} commit -m "chore: init"`.quiet()
+  await Bun.$`git -C ${seedDir} remote add origin ${remoteDir}`.quiet()
+  await Bun.$`git -C ${seedDir} push -u origin ${defaultBranch}`.quiet()
+
+  await Bun.$`git clone --branch ${defaultBranch} ${remoteDir} ${cloneDir}`.quiet()
+  await Bun.$`git -C ${cloneDir} config user.name ${TEST_CONFIG.git.authorName}`.quiet()
+  await Bun.$`git -C ${cloneDir} config user.email ${TEST_CONFIG.git.authorEmail}`.quiet()
+
+  return cloneDir
+}
+
 describe('salvageDirtyWorktree', () => {
   it('returns null when the worktree is already clean', async () => {
     const dir = await createGitRepo()
@@ -181,6 +204,26 @@ describe('buildIssueRecoveryPrompt', () => {
     expect(prompt).toContain('cd apps/desktop && bun run --bun test src/App.test.tsx')
     expect(prompt).toContain('Prefer Bun-native execution to avoid host Node mismatches')
   })
+
+  it('uses the configured default branch in recovery guidance', () => {
+    const prompt = buildIssueRecoveryPrompt(
+      46,
+      '[US1-2] AppContext 增加最小 auth/navigation 接口',
+      'body',
+      TEST_CONFIG.repo,
+      null,
+      [],
+      {
+        ...TEST_CONFIG.project,
+      },
+      'master',
+    )
+
+    expect(prompt).toContain('prefer restoring it toward `origin/master`')
+    expect(prompt).toContain('Run `git log origin/master..HEAD --oneline`')
+    expect(prompt).toContain('Run `git diff --stat origin/master...HEAD`')
+    expect(prompt).not.toContain('origin/main')
+  })
 })
 
 describe('resolveAgentExecutionTimeoutMs', () => {
@@ -272,6 +315,21 @@ describe('buildReviewAutoFixPrompt', () => {
     expect(prompt).toContain('Forbidden files')
     expect(prompt).toContain('Never modify files listed under `ForbiddenFiles`')
     expect(prompt).toContain('git diff --name-only origin/main...HEAD')
+  })
+
+  it('uses the configured default branch in review auto-fix guidance', () => {
+    const prompt = buildReviewAutoFixPrompt(
+      46,
+      61,
+      'https://example.com/pr/61',
+      'Fix the unauthenticated login route regression.',
+      '',
+      TEST_CONFIG.project,
+      'master',
+    )
+
+    expect(prompt).toContain('git diff --name-only origin/master...HEAD')
+    expect(prompt).not.toContain('origin/main')
   })
 
   it('falls back to generic toolchain guidance when no project profile is provided', () => {
@@ -429,5 +487,39 @@ describe('runIssueBranchPreflight', () => {
         process.env.HOME = previousHome
       }
     }
+  })
+
+  it('normalizes legacy origin/main diff and log validation commands to the configured default branch', async () => {
+    const dir = await createGitRepoWithRemote('master')
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const result = await runIssueBranchPreflight(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### Validation
+- \`git diff --stat origin/main...HEAD\`
+- \`git log origin/main..HEAD --oneline\`
+- \`sh -lc 'git diff --stat origin/main...HEAD >/dev/null && case "keep-main-literal" in *main*) exit 0 ;; *) exit 1 ;; esac'\``,
+      {
+        ...TEST_CONFIG,
+        git: {
+          ...TEST_CONFIG.git,
+          defaultBranch: 'master',
+        },
+      },
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.validationFailures).toEqual([])
+    expect(result.executableValidationCommands).toEqual([
+      'git diff --stat origin/main...HEAD',
+      'git log origin/main..HEAD --oneline',
+      `sh -lc 'git diff --stat origin/main...HEAD >/dev/null && case "keep-main-literal" in *main*) exit 0 ;; *) exit 1 ;; esac'`,
+    ])
   })
 })

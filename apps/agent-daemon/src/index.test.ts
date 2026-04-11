@@ -345,58 +345,10 @@ describe('index helpers', () => {
       repo: 'JamesWuHK/agent-loop',
       pat: 'ghp_test',
     }, {
-      loadConfig: (args = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_test',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_test',
-          machineId: 'codex-dev',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        }
-      },
       buildBootstrapGateReportForRepo: async ({ config }) => {
         expect(config.repo).toBe('JamesWuHK/agent-loop')
+        expect(config.pat).toBe('ghp_test')
+        expect(config.machineId).toBe('bootstrap-gate-readonly')
 
         return {
           version: 'v0.2',
@@ -443,6 +395,12 @@ describe('index helpers', () => {
       ],
     })
     expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
+  })
+
+  test('requires an explicit repo for the bootstrap gate command', async () => {
+    await expect(executeBootstrapGateCommand({})).rejects.toThrow(
+      '--bootstrap-gate requires --repo owner/repo',
+    )
   })
 
   test('builds stable wake requests from CLI commands', () => {
