@@ -25,6 +25,7 @@ import {
   setLastTransientLoopErrorAgeSeconds,
   setNextPollDelaySeconds,
   setPendingWakeRequests,
+  setAutoUpgradeSnapshot,
   setInFlightIssueProcesses,
   setInFlightPrReviews,
   setLeaseHeartbeatAgeSeconds,
@@ -200,6 +201,29 @@ describe('metrics', () => {
       expect(metrics).toContain('outcome="success"')
       expect(metrics).toContain('outcome="rate_limited"')
       expect(metrics).toContain('agent_loop_github_api_request_duration_seconds')
+    })
+
+    test('tracks persisted auto-upgrade counts and ages', async () => {
+      setAutoUpgradeSnapshot({
+        attemptCount: 3,
+        successCount: 1,
+        failureCount: 1,
+        noChangeCount: 1,
+        lastAttemptAt: '2026-04-11T12:10:00.000Z',
+        lastSuccessAt: '2026-04-11T12:00:00.000Z',
+        lastOutcome: 'failed',
+        lastTargetVersion: '0.1.2',
+        lastTargetRevision: '2222222222222222222222222222222222222222',
+        lastError: 'git pull failed',
+      }, Date.parse('2026-04-11T12:15:00.000Z'))
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_auto_upgrade_attempts 3')
+      expect(metrics).toContain('agent_loop_auto_upgrade_successes 1')
+      expect(metrics).toContain('agent_loop_auto_upgrade_failures 1')
+      expect(metrics).toContain('agent_loop_auto_upgrade_no_changes 1')
+      expect(metrics).toContain('agent_loop_auto_upgrade_last_attempt_age_seconds 300')
+      expect(metrics).toContain('agent_loop_auto_upgrade_last_success_age_seconds 900')
     })
 
     test('tracks wake queue and handling outcomes', async () => {
