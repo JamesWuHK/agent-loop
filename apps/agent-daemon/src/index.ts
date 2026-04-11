@@ -58,6 +58,11 @@ import {
   rewriteIssueDraft,
   type RewriteIssueDraftResult,
 } from './issue-authoring'
+import {
+  createSequentialIssueNumberAllocator,
+  splitTrackingIssue,
+  type SplitTrackingIssueResult,
+} from './issue-splitter'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -77,6 +82,11 @@ export interface IssueLintTarget {
 
 export interface IssueRewriteTarget {
   path: string
+}
+
+export interface IssueSplitTarget {
+  path: string
+  startNumber: number
 }
 
 export interface ExecuteWakeCommandInput {
@@ -107,6 +117,13 @@ export interface ExecuteIssueLintInput {
 
 export interface ExecuteIssueRewriteInput {
   target: IssueRewriteTarget
+  repo?: string
+  pat?: string
+  repoRoot: string
+}
+
+export interface ExecuteIssueSplitInput {
+  target: IssueSplitTarget
   repo?: string
   pat?: string
   repoRoot: string
@@ -195,6 +212,12 @@ interface IssueRewriteCommandDependencies {
   rewriteIssueDraft: typeof rewriteIssueDraft
 }
 
+interface IssueSplitCommandDependencies {
+  loadConfig: typeof loadConfig
+  readTextFile: (path: string) => string
+  splitTrackingIssue: typeof splitTrackingIssue
+}
+
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   platform: process.platform,
   resolveLocalDaemonIdentity,
@@ -225,6 +248,12 @@ const DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES: IssueRewriteCommandDependencie
   loadConfig,
   readTextFile: (path) => readFileSync(path, 'utf-8'),
   rewriteIssueDraft,
+}
+
+const DEFAULT_ISSUE_SPLIT_COMMAND_DEPENDENCIES: IssueSplitCommandDependencies = {
+  loadConfig,
+  readTextFile: (path) => readFileSync(path, 'utf-8'),
+  splitTrackingIssue,
 }
 
 async function main() {
@@ -267,6 +296,8 @@ async function main() {
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
       'rewrite-file': { type: 'string' },
+      'split-file': { type: 'string' },
+      'split-start-number': { type: 'string' },
       json: { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -296,6 +327,10 @@ async function main() {
   const issueRewriteTarget = resolveIssueRewriteTarget({
     'rewrite-file': args['rewrite-file'] as string | undefined,
   })
+  const issueSplitTarget = resolveIssueSplitTarget({
+    'split-file': args['split-file'] as string | undefined,
+    'split-start-number': args['split-start-number'] as string | undefined,
+  })
 
   if (wakeCommand) {
     assertWakeCommandCompatible(args)
@@ -309,6 +344,10 @@ async function main() {
     assertIssueRewriteCompatible(args)
   }
 
+  if (issueSplitTarget) {
+    assertIssueSplitCompatible(args)
+  }
+
   if (args['wake-from-github-event']) {
     if (wakeCommand) {
       throw new Error('--wake-from-github-event cannot be combined with --wake-now, --wake-issue, or --wake-pr')
@@ -318,6 +357,9 @@ async function main() {
     }
     if (issueRewriteTarget) {
       throw new Error('--wake-from-github-event cannot be combined with --rewrite-file')
+    }
+    if (issueSplitTarget) {
+      throw new Error('--wake-from-github-event cannot be combined with --split-file')
     }
     assertWakeCommandCompatible(args)
   }
@@ -332,6 +374,18 @@ async function main() {
 
   if (issueLintTarget && issueRewriteTarget) {
     throw new Error('--rewrite-file cannot be combined with --lint-issue or --lint-file')
+  }
+
+  if (wakeCommand && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with wake commands')
+  }
+
+  if (issueLintTarget && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with --lint-issue or --lint-file')
+  }
+
+  if (issueRewriteTarget && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with --rewrite-file')
   }
 
   if (args['repo-cap'] && !args['join-project']) {
@@ -403,6 +457,17 @@ async function main() {
   if (issueRewriteTarget) {
     const result = await executeIssueRewriteCommand({
       target: issueRewriteTarget,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(result.markdown)
+    process.exit(0)
+  }
+
+  if (issueSplitTarget) {
+    const result = await executeIssueSplitCommand({
+      target: issueSplitTarget,
       repo: args.repo as string | undefined,
       pat: args.pat as string | undefined,
       repoRoot: process.cwd(),
@@ -769,6 +834,7 @@ Usage:
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
   agent-loop --rewrite-file <path> [--repo owner/repo]
+  agent-loop --split-file <path> [--split-start-number <number> --repo owner/repo]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -804,6 +870,8 @@ Options:
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
       --rewrite-file <path>   Rewrite a local issue draft into canonical executable contract markdown
+      --split-file <path>     Split a tracking parent issue into ordered child issue contracts
+      --split-start-number    First child issue number to allocate when building dependsOn arrays (default: 1)
       --json                  Print machine-readable JSON for lint commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
@@ -849,6 +917,7 @@ Examples:
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
   agent-loop --rewrite-file docs/issues/ready-gate-draft.md --repo owner/repo
+  agent-loop --split-file docs/issues/quality-parent.md --split-start-number 41 --repo owner/repo
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
@@ -989,6 +1058,31 @@ export function resolveIssueRewriteTarget(args: {
   return { path }
 }
 
+export function resolveIssueSplitTarget(args: {
+  'split-file'?: string
+  'split-start-number'?: string
+}): IssueSplitTarget | null {
+  if (typeof args['split-file'] !== 'string') {
+    if (typeof args['split-start-number'] === 'string') {
+      throw new Error('--split-start-number can only be used with --split-file')
+    }
+
+    return null
+  }
+
+  const path = args['split-file'].trim()
+  if (!path) {
+    throw new Error('--split-file must be a non-empty path')
+  }
+
+  return {
+    path,
+    startNumber: typeof args['split-start-number'] === 'string'
+      ? parseWakeTargetNumber(args['split-start-number'], '--split-start-number')
+      : 1,
+  }
+}
+
 export async function executeIssueLintCommand(
   input: ExecuteIssueLintInput,
   deps: IssueLintCommandDependencies = DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES,
@@ -1021,6 +1115,23 @@ export async function executeIssueRewriteCommand(
     issueText: deps.readTextFile(input.target.path),
     repoRoot: input.repoRoot,
     config,
+  })
+}
+
+export async function executeIssueSplitCommand(
+  input: ExecuteIssueSplitInput,
+  deps: IssueSplitCommandDependencies = DEFAULT_ISSUE_SPLIT_COMMAND_DEPENDENCIES,
+): Promise<SplitTrackingIssueResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+
+  return deps.splitTrackingIssue({
+    issueText: deps.readTextFile(input.target.path),
+    repoRoot: input.repoRoot,
+    config,
+    issueNumberAllocator: createSequentialIssueNumberAllocator(input.target.startNumber),
   })
 }
 
@@ -1429,6 +1540,84 @@ function assertIssueRewriteCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Issue rewrite cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertIssueSplitCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  'rewrite-file'?: string
+  json?: boolean
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    args.json ? '--json' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Issue split cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 
