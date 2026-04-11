@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -196,5 +197,41 @@ describe('buildRepoAuthoringContext', () => {
       ],
     })
     expect(firstContext.candidateForbiddenFiles.some((value) => value.startsWith('/'))).toBe(false)
+  })
+  test('adds a repo-grounded git diff validation command for the remote default branch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-git-'))
+    const remote = join(root, 'remote.git')
+    const seed = join(root, 'seed')
+    const repo = join(root, 'repo')
+
+    execFileSync('git', ['init', '--bare', remote])
+    execFileSync('git', ['init', seed], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'checkout', '-b', 'master'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'config', 'user.name', 'agent-loop'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'config', 'user.email', 'agent-loop@example.com'], { stdio: 'ignore' })
+
+    writeFileSync(join(seed, 'package.json'), JSON.stringify({
+      name: 'fixture-repo',
+      scripts: {
+        test: 'bun test',
+      },
+    }))
+    writeFileSync(join(seed, 'README.md'), '# fixture\n')
+
+    execFileSync('git', ['-C', seed, 'add', '.'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'commit', '-m', 'seed'], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', remote], { stdio: 'ignore' })
+    execFileSync('git', ['-C', seed, 'push', '-u', 'origin', 'master'], { stdio: 'ignore' })
+    execFileSync('git', ['clone', remote, repo], { stdio: 'ignore' })
+
+    const context = await buildRepoAuthoringContext({
+      repoRoot: repo,
+      issueText: '更新 README 并补测试',
+      repoRelativeFilePaths: ['README.md'],
+      rootPackageJsonPath: 'package.json',
+      workspacePackageJsonPaths: [],
+    })
+
+    expect(context.candidateValidationCommands).toContain('git diff --stat origin/master...HEAD')
   })
 })

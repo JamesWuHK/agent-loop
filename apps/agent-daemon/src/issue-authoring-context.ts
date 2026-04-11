@@ -1,6 +1,22 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
-import type { BuildRepoAuthoringContextInput, RepoAuthoringContext } from '@agent/shared'
+
+export interface BuildRepoAuthoringContextInput {
+  repoRoot: string
+  issueText: string
+  issueTitle?: string
+  issueBody?: string
+  repoRelativeFilePaths?: string[]
+  rootPackageJsonPath?: string
+  workspacePackageJsonPaths?: string[]
+}
+
+export interface RepoAuthoringContext {
+  candidateValidationCommands: string[]
+  candidateAllowedFiles: string[]
+  candidateForbiddenFiles: string[]
+}
 
 interface PackageManifestRecord {
   scripts?: Record<string, unknown>
@@ -75,6 +91,11 @@ function collectCandidateValidationCommands(
   manifests: PackageManifest[],
 ): string[] {
   const commands = new Set<string>()
+  const gitDiffCommand = resolveGitDiffValidationCommand(repoRoot)
+
+  if (gitDiffCommand) {
+    commands.add(gitDiffCommand)
+  }
 
   for (const manifest of manifests) {
     for (const [scriptName, scriptCommand] of Object.entries(manifest.scripts).sort(([left], [right]) =>
@@ -94,6 +115,42 @@ function collectCandidateValidationCommands(
   return [...commands].sort((left, right) => left.localeCompare(right))
 }
 
+function resolveGitDiffValidationCommand(repoRoot: string): string | null {
+  const remoteBranch = resolveOriginDefaultBranch(repoRoot)
+  if (!remoteBranch) {
+    return null
+  }
+
+  return `git diff --stat origin/${remoteBranch}...HEAD`
+}
+
+function resolveOriginDefaultBranch(repoRoot: string): string | null {
+  const symbolicRef = runGitCommand(repoRoot, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
+  const symbolicMatch = symbolicRef.match(/^refs\/remotes\/origin\/(.+)$/)
+  if (symbolicMatch?.[1]) {
+    return symbolicMatch[1]
+  }
+
+  for (const branch of ['main', 'master']) {
+    if (runGitCommand(repoRoot, ['rev-parse', '--verify', `refs/remotes/origin/${branch}`])) {
+      return branch
+    }
+  }
+
+  return null
+}
+
+function runGitCommand(repoRoot: string, args: string[]): string {
+  try {
+    return execFileSync('git', args, {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return ''
+  }
+}
 function looksLikeValidationScript(name: string, command: string): boolean {
   return VALIDATION_SCRIPT_PATTERN.test(name) || VALIDATION_SCRIPT_PATTERN.test(command)
 }
