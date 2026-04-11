@@ -23,6 +23,7 @@ import {
   isManagedLeaseProgressStale,
   mergePaginatedRestBodies,
   parseManagedLeaseComments,
+  parseIssueNumberFromManagedBranch,
   parseGhApiErrorMessage,
   parseMergePrResponse,
   qualifyGhApiArgs,
@@ -507,6 +508,14 @@ describe('derivePullRequestStateFromRaw', () => {
 
   test('returns closed when a closed pull request has not merged', () => {
     expect(derivePullRequestStateFromRaw('closed', null)).toBe('closed')
+  })
+})
+
+describe('parseIssueNumberFromManagedBranch', () => {
+  test('extracts the linked issue number from managed PR branches', () => {
+    expect(parseIssueNumberFromManagedBranch('agent/125/codex-20260403')).toBe(125)
+    expect(parseIssueNumberFromManagedBranch('agent/70')).toBe(70)
+    expect(parseIssueNumberFromManagedBranch('feature/manual-branch')).toBeNull()
   })
 })
 

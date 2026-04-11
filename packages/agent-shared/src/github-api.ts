@@ -1532,6 +1532,14 @@ function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | nul
   }
 }
 
+export function parseIssueNumberFromManagedBranch(headRefName: string): number | null {
+  const match = headRefName.match(/^agent\/(\d+)(?:\/|$)/)
+  if (!match) return null
+
+  const parsed = Number.parseInt(match[1] ?? '', 10)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
 async function checkPrExistsRest(
   branch: string,
   config: AgentConfig,
