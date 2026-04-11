@@ -162,6 +162,8 @@ describe('cli-agent', () => {
     const scriptPath = join(tempDir, 'fake-codex.sh')
     const envCapturePath = join(tempDir, 'captured-env.txt')
     const configCapturePath = join(tempDir, 'captured-config.toml')
+    const bootstrapCapturePath = join(tempDir, 'captured-shell-env.sh')
+    const argvCapturePath = join(tempDir, 'captured-argv.txt')
     const worktreePath = join(tempDir, 'worktree')
 
     try {
@@ -169,6 +171,10 @@ describe('cli-agent', () => {
         scriptPath,
         `#!/bin/sh
 response_file=''
+argv_file=${JSON.stringify(argvCapturePath)}
+for arg in "$@"; do
+  printf '%s\n' "$arg" >> "$argv_file"
+done
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then
     shift
@@ -178,6 +184,7 @@ while [ "$#" -gt 0 ]; do
 done
 cat >/dev/null
 cp "$CODEX_HOME/config.toml" ${JSON.stringify(configCapturePath)}
+cp "$HOME/.agent-loop-shell-env" ${JSON.stringify(bootstrapCapturePath)}
 {
   printf 'OPENAI_BASE_URL=%s\n' "\${OPENAI_BASE_URL-__UNSET__}"
   printf 'OPENAI_API_BASE=%s\n' "\${OPENAI_API_BASE-__UNSET__}"
@@ -185,6 +192,8 @@ cp "$CODEX_HOME/config.toml" ${JSON.stringify(configCapturePath)}
   printf 'OPENAI_BASE=%s\n' "\${OPENAI_BASE-__UNSET__}"
   printf 'PATH=%s\n' "\${PATH-__UNSET__}"
   printf 'HTTPS_PROXY=%s\n' "\${HTTPS_PROXY-__UNSET__}"
+  printf 'BUN_INSTALL=%s\n' "\${BUN_INSTALL-__UNSET__}"
+  printf 'NVM_DIR=%s\n' "\${NVM_DIR-__UNSET__}"
 } > ${JSON.stringify(envCapturePath)}
 printf 'fake codex ok\n' > "$response_file"
 `,
@@ -198,12 +207,16 @@ printf 'fake codex ok\n' > "$response_file"
       const originalOpenaiApiUrl = process.env.OPENAI_API_URL
       const originalOpenaiBase = process.env.OPENAI_BASE
       const originalHttpsProxy = process.env.HTTPS_PROXY
+      const originalBunInstall = process.env.BUN_INSTALL
+      const originalNvmDir = process.env.NVM_DIR
 
       process.env.OPENAI_BASE_URL = 'https://runtime-openai-base-url.example/v1'
       process.env.OPENAI_API_BASE = 'https://runtime-openai-api-base.example/v1'
       process.env.OPENAI_API_URL = 'https://runtime-openai-api-url.example/v1'
       process.env.OPENAI_BASE = 'https://runtime-openai-base.example/v1'
       process.env.HTTPS_PROXY = 'http://127.0.0.1:7890'
+      process.env.BUN_INSTALL = '/opt/bun'
+      process.env.NVM_DIR = '/opt/nvm'
 
       try {
         const result = await runConfiguredAgent({
@@ -229,12 +242,33 @@ printf 'fake codex ok\n' > "$response_file"
         expect(readFileSync(configCapturePath, 'utf-8')).toBe(
           buildIsolatedCodexConfig('http://127.0.0.1:18777/v1'),
         )
+        const argv = readFileSync(argvCapturePath, 'utf-8').trim().split('\n')
+        expect(argv[0]).toBe('exec')
+        expect(argv[1]).toBe('--color')
+        expect(argv[2]).toBe('never')
+        expect(argv[3]).toBe('--output-last-message')
+        expect(argv[4]).toEndWith('/last-message.txt')
+        expect(argv[5]).toBe('-c')
+        expect(argv[6]).toBe('model_reasoning_effort="medium"')
+        expect(argv[7]).toBe('--dangerously-bypass-approvals-and-sandbox')
+        expect(argv[8]).toBe('-')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_BASE_URL=__UNSET__')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_API_BASE=__UNSET__')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_API_URL=__UNSET__')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('OPENAI_BASE=__UNSET__')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('PATH=')
         expect(readFileSync(envCapturePath, 'utf-8')).toContain('HTTPS_PROXY=http://127.0.0.1:7890')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('BUN_INSTALL=/opt/bun')
+        expect(readFileSync(envCapturePath, 'utf-8')).toContain('NVM_DIR=/opt/nvm')
+        expect(readFileSync(bootstrapCapturePath, 'utf-8')).toContain(
+          "export HTTPS_PROXY='http://127.0.0.1:7890'",
+        )
+        expect(readFileSync(bootstrapCapturePath, 'utf-8')).toContain(
+          "export BUN_INSTALL='/opt/bun'",
+        )
+        expect(readFileSync(bootstrapCapturePath, 'utf-8')).toContain(
+          "export NVM_DIR='/opt/nvm'",
+        )
       } finally {
         if (originalOpenaiBaseUrl === undefined) {
           delete process.env.OPENAI_BASE_URL
@@ -260,6 +294,16 @@ printf 'fake codex ok\n' > "$response_file"
           delete process.env.HTTPS_PROXY
         } else {
           process.env.HTTPS_PROXY = originalHttpsProxy
+        }
+        if (originalBunInstall === undefined) {
+          delete process.env.BUN_INSTALL
+        } else {
+          process.env.BUN_INSTALL = originalBunInstall
+        }
+        if (originalNvmDir === undefined) {
+          delete process.env.NVM_DIR
+        } else {
+          process.env.NVM_DIR = originalNvmDir
         }
       }
     } finally {
