@@ -3,10 +3,9 @@ import {
   parseIssueContract,
   type AgentConfig,
   type IssueQualityReport,
-  type RepoAuthoringContext,
 } from '@agent/shared'
 import { runConfiguredAgent } from './cli-agent'
-import { buildRepoAuthoringContext } from './issue-authoring-context'
+import { buildRepoAuthoringContext, type RepoAuthoringContext } from './issue-authoring-context'
 
 export interface IssueAuthoringAgentRunInput {
   prompt: string

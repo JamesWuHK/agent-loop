@@ -1,6 +1,21 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
-import type { BuildRepoAuthoringContextInput, RepoAuthoringContext } from '@agent/shared'
+
+export interface BuildRepoAuthoringContextInput {
+  repoRoot: string
+  issueText: string
+  issueTitle?: string
+  issueBody?: string
+  repoRelativeFilePaths?: string[]
+  rootPackageJsonPath?: string
+  workspacePackageJsonPaths?: string[]
+}
+
+export interface RepoAuthoringContext {
+  candidateValidationCommands: string[]
+  candidateAllowedFiles: string[]
+  candidateForbiddenFiles: string[]
+}
 
 interface PackageManifestRecord {
   scripts?: Record<string, unknown>

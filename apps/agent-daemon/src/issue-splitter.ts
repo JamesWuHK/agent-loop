@@ -5,11 +5,10 @@ import {
   renderIssueContractForPrompt,
   type AgentConfig,
   type IssueQualityReport,
-  type RepoAuthoringContext,
 } from '@agent/shared'
 import { runConfiguredAgent } from './cli-agent'
 import { rewriteIssueDraft, type RewriteIssueDraftInput, type RewriteIssueDraftResult } from './issue-authoring'
-import { buildRepoAuthoringContext } from './issue-authoring-context'
+import { buildRepoAuthoringContext, type RepoAuthoringContext } from './issue-authoring-context'
 
 type DependencyReference = string | number
 
@@ -296,7 +295,7 @@ export function formatTrackingIssueSplitResult(input: {
     input.parentSummary.trim(),
     '### Planned Children',
     input.children
-      .map((child, index) => `${index + 1}. #${child.number} ${child.title} (dependsOn: ${JSON.stringify(child.dependsOn)})`)
+      .map((child, index) => `${index + 1}. #${child.number} ${child.title}`)
       .join('\n'),
     ...childBlocks,
   ].filter(Boolean).join('\n\n')

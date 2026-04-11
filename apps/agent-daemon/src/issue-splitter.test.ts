@@ -40,6 +40,7 @@ describe('splitTrackingIssue', () => {
     expect(result.children[2]?.body).toContain('"dependsOn":[17,18]')
     expect(result.children.every((child) => child.body.includes('## RED 测试'))).toBe(true)
     expect(result.markdown).toContain('## Parent Summary')
+    expect(result.markdown.split('## Child Issue #17:')[0]).not.toContain('dependsOn')
   })
 
   test('uses explicit dependency ids from strict JSON plans', async () => {
