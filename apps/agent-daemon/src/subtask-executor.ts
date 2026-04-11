@@ -296,6 +296,7 @@ export async function runIssueRecovery(
     existingPr ?? null,
     recentBlockingReasons,
     config.project,
+    config.git.defaultBranch,
   )
   monitor?.setPhase?.('issue-recovery')
   const result = await runConfiguredAgent({
@@ -420,6 +421,7 @@ export async function runReviewAutoFix(
     reviewReason,
     issueBody,
     config.project,
+    config.git.defaultBranch,
   )
   monitor?.setPhase?.('review-auto-fix')
   const result = await runConfiguredAgent({
@@ -508,6 +510,7 @@ export function buildReviewAutoFixPrompt(
   reviewReason: string,
   issueBody = '',
   project: AgentConfig['project'] = { profile: 'generic' },
+  defaultBranch = 'main',
 ): string {
   const projectGuidance = getProjectPromptGuidance(project, 'reviewFix')
   const issueContractBlock = issueBody.trim().length > 0
@@ -538,7 +541,7 @@ Requirements:
 - Do not create a new branch.
 - Do not create or modify PR metadata.
 - Make the minimal code changes necessary.
-- Before committing, run \`git diff --name-only origin/main...HEAD\` and confirm the changed file set stays inside \`AllowedFiles\` and outside \`ForbiddenFiles\`.
+- Before committing, run \`git diff --name-only origin/${defaultBranch}...HEAD\` and confirm the changed file set stays inside \`AllowedFiles\` and outside \`ForbiddenFiles\`.
 - Commit your changes if you make any fixes.
 - If no code change is needed, do not fake a commit.
 ${projectGuidance.length > 0 ? `${projectGuidance.map((line) => `- ${line}`).join('\n')}
@@ -690,6 +693,7 @@ async function runValidationCommand(
   command: string,
   config: AgentConfig,
 ): Promise<IssueBranchValidationCommandResult> {
+  const normalizedCommand = normalizeLegacyDefaultBranchCommand(command, config.git.defaultBranch)
   const env: Record<string, string> = {
     ...process.env,
     PWD: worktreePath,
@@ -707,7 +711,7 @@ async function runValidationCommand(
     delete env.GITHUB_TOKEN
   }
 
-  const proc = Bun.spawn(['/bin/sh', '-c', command], {
+  const proc = Bun.spawn(['/bin/sh', '-c', normalizedCommand], {
     cwd: worktreePath,
     env,
     stdout: 'pipe',
@@ -742,6 +746,15 @@ function summarizeValidationFailureOutput(stdout: string, stderr: string): strin
   return text.length > 240 ? `${text.slice(0, 237)}...` : text
 }
 
+function normalizeLegacyDefaultBranchCommand(command: string, defaultBranch: string): string {
+  if (defaultBranch === 'main') return command
+
+  return command.replace(
+    /\borigin\/main(?=(?:\.\.\.?HEAD)\b)/g,
+    `origin/${defaultBranch}`,
+  )
+}
+
 function matchesContractFilePattern(path: string, pattern: string): boolean {
   const normalizedPath = path.trim().replace(/^\.\//, '')
   const normalizedPattern = pattern.trim().replace(/^\.\//, '')
@@ -764,6 +777,7 @@ export function buildIssueRecoveryPrompt(
   existingPr: { number: number; url: string; branch: string } | null,
   recentBlockingReasons: string[],
   project: AgentConfig['project'] = { profile: 'generic' },
+  defaultBranch = 'main',
 ): string {
   const projectGuidance = getProjectPromptGuidance(project, 'recovery')
   const blockingReasonsSection = recentBlockingReasons.length > 0
@@ -791,7 +805,7 @@ Your job:
 3. Treat the latest blocking review feedback as input, but verify it against the issue scope before changing code.
 4. If a blocker conflicts with the issue's explicit constraints or asks for later-scope work, do not expand scope just to satisfy that blocker.
 5. Preserve the issue's explicit acceptance semantics. Do not "fix" review feedback by changing required behavior from the issue body or RED tests.
-6. Remove unrelated branch drift instead of building on top of it. If a file or behavior is outside this issue's scope, prefer restoring it toward \`origin/main\` unless the issue explicitly requires otherwise.
+6. Remove unrelated branch drift instead of building on top of it. If a file or behavior is outside this issue's scope, prefer restoring it toward \`origin/${defaultBranch}\` unless the issue explicitly requires otherwise.
 7. Do not introduce new API logic, persistence, gateway handlers, or broader app rewrites unless the issue explicitly requires them.
 8. Finish the smallest remaining code changes needed to make this issue merge-ready.
 9. Stay on the current branch and in the current worktree.
@@ -802,9 +816,9 @@ ${blockingReasonsSection}
 
 Helpful checks:
 - Run \`git status --short\`
-- Run \`git log origin/main..HEAD --oneline\`
+- Run \`git log origin/${defaultBranch}..HEAD --oneline\`
 - If review feedback includes structured JSON, treat \`mustFix\`, \`mustNotDo\`, \`validation\`, and \`scopeRationale\` as the recovery contract.
-- Run \`git diff --stat origin/main...HEAD\` and sanity-check that the changed files still match the issue scope.
+- Run \`git diff --stat origin/${defaultBranch}...HEAD\` and sanity-check that the changed files still match the issue scope.
 ${projectGuidance.map((line) => `- ${line}`).join('\n')}
 ${existingPr ? `- Run \`git log HEAD..origin/${existingPr.branch} --oneline\` to see whether the remote PR branch is ahead of you` : ''}
 ${existingPr ? `- Run \`gh api repos/${repo}/issues/${existingPr.number}/comments --paginate\` if you need the full review history` : ''}
