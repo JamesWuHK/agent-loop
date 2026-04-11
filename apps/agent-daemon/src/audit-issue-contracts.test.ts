@@ -1,13 +1,51 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  auditIssues,
   buildGhIssueViewArgs,
   buildIssueLintReport,
   fetchRemoteIssueDocument,
+  formatAuditOutput,
   formatAuditLine,
   formatInvalidReadySection,
   formatIssueLintReport,
   formatIssueLintReportJson,
 } from './audit-issue-contracts'
+
+const VALID_CONTRACT = [
+  '## 用户故事',
+  '作为维护者，我希望批量审计 issue contract。',
+  '',
+  '## Context',
+  '### Dependencies',
+  '```json',
+  '{ "dependsOn": [] }',
+  '```',
+  '### AllowedFiles',
+  '- apps/agent-daemon/src/audit-issue-contracts.ts',
+  '### ForbiddenFiles',
+  '- apps/agent-daemon/src/dashboard.ts',
+  '### MustPreserve',
+  '- 默认 human-readable 输出仍可用',
+  '### OutOfScope',
+  '- dashboard 可视化',
+  '### RequiredSemantics',
+  '- 支持 repo-level 审计摘要',
+  '### ReviewHints',
+  '- 检查 JSON 输出是否稳定',
+  '### Validation',
+  '- `bun test apps/agent-daemon/src/audit-issue-contracts.test.ts`',
+  '',
+  '## RED 测试',
+  '```ts',
+  'expect(true).toBe(false)',
+  '```',
+  '',
+  '## 实现步骤',
+  '1. 增加 repo-level summary',
+  '',
+  '## 验收',
+  '- [ ] repo-level summary 可用',
+].join('\n')
 
 describe('audit-issue-contracts', () => {
   test('builds a lint report that keeps warnings separate from hard errors', () => {
@@ -107,12 +145,30 @@ describe('audit-issue-contracts', () => {
         number: 51,
         title: '[CI-A1] 固定登录相关 smoke tests',
         state: 'ready',
+        labels: ['agent:ready'],
         isClaimable: false,
         hasExecutableContract: false,
         claimBlockedBy: [49, 50],
         contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
         qualityScore: 75,
         contractWarnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+        contract: {
+          source: {
+            kind: 'issue',
+            issueNumber: 51,
+            repo: 'JamesWuHK/agent-loop',
+          },
+          valid: false,
+          readyGateBlocked: true,
+          readyGateStatus: 'blocked',
+          readyGateSummary: 'ready gate would still block on hard validation errors',
+          score: 75,
+          errors: ['missing ## RED 测试 / RED Tests'],
+          warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+          contract: {
+            allowedFiles: ['frontend files'],
+          },
+        } as any,
       }),
     ).toBe(
       '#51 state=ready claimable=false contract=false score=75 warnings=1 blockedBy=49,50 errors=missing ## RED 测试 / RED Tests',
@@ -125,6 +181,7 @@ describe('audit-issue-contracts', () => {
         number: 52,
         title: '[CI-A2] Sprint A 发布前最小检查清单',
         state: 'ready',
+        labels: ['agent:ready'],
         isClaimable: false,
         hasExecutableContract: false,
         claimBlockedBy: [],
@@ -136,6 +193,28 @@ describe('audit-issue-contracts', () => {
         contractWarnings: [
           'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
         ],
+        contract: {
+          source: {
+            kind: 'issue',
+            issueNumber: 52,
+            repo: 'JamesWuHK/agent-loop',
+          },
+          valid: false,
+          readyGateBlocked: true,
+          readyGateStatus: 'blocked',
+          readyGateSummary: 'ready gate would still block on hard validation errors',
+          score: 40,
+          errors: [
+            'missing ### Dependencies JSON block',
+            'missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)',
+          ],
+          warnings: [
+            'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
+          ],
+          contract: {
+            allowedFiles: ['frontend files'],
+          },
+        } as any,
       },
     ])
 
@@ -219,6 +298,54 @@ describe('audit-issue-contracts', () => {
       title: '[AL-6] 引入 issue quality report 与 lint CLI',
       body: '## 用户故事\n作为维护者，我希望 lint 输出稳定 JSON。',
       url: 'https://github.com/JamesWuHK/agent-loop/issues/36',
+    })
+  })
+
+  test('returns stable repo summary and issue quality findings in json mode', async () => {
+    const result = await auditIssues({
+      issues: [
+        {
+          number: 71,
+          title: '[AL-X] invalid contract',
+          body: '## 用户故事\n只有用户故事',
+          state: 'ready',
+          labels: ['agent:ready'],
+          isClaimable: true,
+          claimBlockedBy: [],
+          hasExecutableContract: false,
+          contractValidationErrors: ['missing ### Dependencies JSON block'],
+        },
+        {
+          number: 72,
+          title: '[AL-Y] valid contract',
+          body: VALID_CONTRACT,
+          state: 'ready',
+          labels: ['agent:ready'],
+          isClaimable: true,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        },
+      ],
+      repo: 'JamesWuHK/agent-loop',
+      includeSimulation: false,
+    })
+
+    expect(result.summary).toEqual({
+      auditedIssueCount: 2,
+      invalidIssueCount: 1,
+      invalidReadyIssueCount: 1,
+      lowScoreIssueCount: 1,
+      warningIssueCount: 0,
+    })
+    expect(result.issues[0]?.contract.errors).toContain('missing ### Dependencies JSON block')
+    const parsed = JSON.parse(formatAuditOutput(result, true))
+    expect(parsed.summary).toMatchObject({
+      invalidIssueCount: 1,
+    })
+    expect(parsed.issues[0]).toMatchObject({
+      number: 71,
+      state: 'ready',
     })
   })
 })

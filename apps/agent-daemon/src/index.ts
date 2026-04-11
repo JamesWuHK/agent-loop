@@ -49,11 +49,15 @@ import {
   startDashboardServer,
 } from './dashboard'
 import {
+  auditIssues,
   buildIssueLintReportFromMarkdownFile,
   buildIssueLintReportFromRemoteIssue,
   fetchRemoteIssueDocument,
+  formatAuditOutput,
   formatIssueLintReport,
   formatIssueLintReportJson,
+  loadIssuesForAudit,
+  type AuditIssuesReport,
   type IssueLintReport,
 } from './audit-issue-contracts'
 import {
@@ -90,6 +94,11 @@ export interface IssueLintTarget {
   issueNumber?: number
 }
 
+export interface AuditIssuesCommandInput {
+  issueNumbers: number[]
+  includeSimulation: boolean
+}
+
 export interface IssueSimulationTarget {
   kind: 'file' | 'issue'
   path?: string
@@ -120,6 +129,14 @@ export interface ExecuteIssueLintInput {
   target: IssueLintTarget
   repo?: string
   pat?: string
+}
+
+export interface ExecuteAuditIssuesInput {
+  issueNumbers?: number[]
+  includeSimulation?: boolean
+  repo?: string
+  pat?: string
+  repoRoot?: string
 }
 
 export interface ExecuteIssueSimulationInput {
@@ -198,6 +215,11 @@ export type ManagedRuntimeCleanupResult =
   | 'not-owned'
   | 'unreadable'
 
+export interface ExecuteAuditIssuesResult {
+  report: AuditIssuesReport
+  explicitIssueNumbers: number[]
+}
+
 export interface ExecuteIssueSimulationResult {
   source: {
     kind: 'file' | 'issue'
@@ -233,6 +255,13 @@ interface IssueLintCommandDependencies {
   loadConfig: typeof loadConfig
   buildIssueLintReportFromMarkdownFile: typeof buildIssueLintReportFromMarkdownFile
   buildIssueLintReportFromRemoteIssue: typeof buildIssueLintReportFromRemoteIssue
+}
+
+interface AuditIssuesCommandDependencies {
+  loadConfig: typeof loadConfig
+  loadIssuesForAudit: typeof loadIssuesForAudit
+  auditIssues: typeof auditIssues
+  runConfiguredAgent: typeof runConfiguredAgent
 }
 
 interface IssueSimulationCommandDependencies {
@@ -281,6 +310,13 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
   loadConfig,
   buildIssueLintReportFromMarkdownFile,
   buildIssueLintReportFromRemoteIssue,
+}
+
+const DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES: AuditIssuesCommandDependencies = {
+  loadConfig,
+  loadIssuesForAudit,
+  auditIssues,
+  runConfiguredAgent,
 }
 
 const DEFAULT_ISSUE_SIMULATION_COMMAND_DEPENDENCIES: IssueSimulationCommandDependencies = {
@@ -342,6 +378,9 @@ async function main() {
       'wake-from-github-event': { type: 'boolean' },
       'github-event-name': { type: 'string' },
       'github-event-path': { type: 'string' },
+      'audit-issues': { type: 'boolean' },
+      issue: { type: 'string', multiple: true },
+      simulate: { type: 'boolean' },
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
       'simulate-issue': { type: 'string' },
@@ -375,6 +414,11 @@ async function main() {
     'lint-issue': args['lint-issue'] as string | undefined,
     'lint-file': args['lint-file'] as string | undefined,
   })
+  const auditIssuesInput = resolveAuditIssuesInput({
+    'audit-issues': args['audit-issues'] as boolean | undefined,
+    issue: args.issue as string[] | undefined,
+    simulate: args.simulate as boolean | undefined,
+  })
   const issueSimulationTarget = resolveIssueSimulationTarget({
     'simulate-issue': args['simulate-issue'] as string | undefined,
     'simulate-file': args['simulate-file'] as string | undefined,
@@ -393,6 +437,48 @@ async function main() {
 
   if (issueLintTarget) {
     assertIssueLintCompatible(args)
+  }
+
+  if (auditIssuesInput) {
+    assertAuditIssuesCompatible({
+      'wake-now': args['wake-now'] as boolean | undefined,
+      'wake-issue': args['wake-issue'] as string | undefined,
+      'wake-pr': args['wake-pr'] as string | undefined,
+      'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
+      'lint-issue': args['lint-issue'] as string | undefined,
+      'lint-file': args['lint-file'] as string | undefined,
+      'simulate-issue': args['simulate-issue'] as string | undefined,
+      'simulate-file': args['simulate-file'] as string | undefined,
+      'rewrite-file': args['rewrite-file'] as string | undefined,
+      'split-file': args['split-file'] as string | undefined,
+      'split-start-number': args['split-start-number'] as string | undefined,
+      concurrency: args.concurrency as string | undefined,
+      'poll-interval': args['poll-interval'] as string | undefined,
+      'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
+      'machine-id': args['machine-id'] as string | undefined,
+      'dry-run': args['dry-run'] as boolean | undefined,
+      'metrics-port': args['metrics-port'] as string | undefined,
+      dashboard: args.dashboard as boolean | undefined,
+      'dashboard-host': args['dashboard-host'] as string | undefined,
+      'dashboard-port': args['dashboard-port'] as string | undefined,
+      daemonize: args.daemonize as boolean | undefined,
+      'join-project': args['join-project'] as boolean | undefined,
+      'repo-cap': args['repo-cap'] as string | undefined,
+      runtimes: args.runtimes as boolean | undefined,
+      start: args.start as boolean | undefined,
+      logs: args.logs as boolean | undefined,
+      reconcile: args.reconcile as boolean | undefined,
+      restart: args.restart as boolean | undefined,
+      'launchd-install': args['launchd-install'] as boolean | undefined,
+      'launchd-uninstall': args['launchd-uninstall'] as boolean | undefined,
+      'launchd-status': args['launchd-status'] as boolean | undefined,
+      stop: args.stop as boolean | undefined,
+      once: args.once as boolean | undefined,
+      status: args.status as boolean | undefined,
+      doctor: args.doctor as boolean | undefined,
+      'health-host': args['health-host'] as string | undefined,
+      'health-port': args['health-port'] as string | undefined,
+    })
   }
 
   if (issueRewritePath) {
@@ -529,6 +615,9 @@ async function main() {
     if (issueSplitInput) {
       throw new Error('--wake-from-github-event cannot be combined with --split-file')
     }
+    if (auditIssuesInput) {
+      throw new Error('--wake-from-github-event cannot be combined with --audit-issues')
+    }
     if (issueSimulationTarget) {
       throw new Error('--wake-from-github-event cannot be combined with --simulate-issue or --simulate-file')
     }
@@ -629,6 +718,18 @@ async function main() {
     })
     console.log(formatIssueSplitOutput(result))
     process.exit(0)
+  }
+
+  if (auditIssuesInput) {
+    const result = await executeAuditIssuesCommand({
+      issueNumbers: auditIssuesInput.issueNumbers,
+      includeSimulation: auditIssuesInput.includeSimulation,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(formatAuditIssuesOutput(result.report, args.json as boolean | undefined))
+    process.exit(shouldFailAuditIssuesCommand(result) ? 1 : 0)
   }
 
   if (issueSimulationTarget) {
@@ -997,6 +1098,7 @@ Usage:
   agent-loop --wake-issue <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-pr <number> [--repo owner/repo --machine-id my-dev-machine --health-port 9310]
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
+  agent-loop --audit-issues [--issue <number> ...] [--simulate] [--repo owner/repo --json]
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
   agent-loop --simulate-file <path> [--repo owner/repo --json]
@@ -1035,6 +1137,9 @@ Options:
                               Translate the current GitHub Actions event into a local wake request
       --github-event-name     Override the GitHub event name used by --wake-from-github-event
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
+      --audit-issues          Audit open managed issues or an explicit repeated --issue set
+      --issue <number>        With --audit-issues, restrict auditing to the selected issue numbers
+      --simulate              With --audit-issues, include read-only simulation findings
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
       --simulate-file <path>  Run read-only executability simulation for a local issue markdown file
@@ -1086,6 +1191,8 @@ Examples:
   agent-loop --wake-now --repo owner/repo
   agent-loop --wake-issue 374 --repo owner/repo --machine-id macbook-pro-b
   agent-loop --wake-pr 381 --health-port 9311
+  agent-loop --audit-issues --json
+  agent-loop --audit-issues --issue 50 --issue 53 --simulate --repo owner/repo --json
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
   agent-loop --simulate-file docs/issues/ready-gate.md --json
@@ -1217,6 +1324,39 @@ export function resolveIssueLintTarget(args: {
   return targets[0] ?? null
 }
 
+export function resolveAuditIssuesInput(args: {
+  'audit-issues'?: boolean
+  issue?: string[]
+  simulate?: boolean
+}): AuditIssuesCommandInput | null {
+  const rawIssueArgs = Array.isArray(args.issue) ? args.issue : []
+
+  if (!args['audit-issues']) {
+    if (rawIssueArgs.length > 0) {
+      throw new Error('--issue requires --audit-issues')
+    }
+    if (args.simulate) {
+      throw new Error('--simulate requires --audit-issues')
+    }
+    return null
+  }
+
+  const seen = new Set<number>()
+  const issueNumbers: number[] = []
+
+  for (const value of rawIssueArgs) {
+    const issueNumber = parseWakeTargetNumber(value, '--issue')
+    if (seen.has(issueNumber)) continue
+    seen.add(issueNumber)
+    issueNumbers.push(issueNumber)
+  }
+
+  return {
+    issueNumbers,
+    includeSimulation: Boolean(args.simulate),
+  }
+}
+
 export function resolveIssueSimulationTarget(args: {
   'simulate-issue'?: string
   'simulate-file'?: string
@@ -1306,6 +1446,53 @@ export async function executeIssueLintCommand(
     issueNumber: input.target.issueNumber!,
     config,
   })
+}
+
+export async function executeAuditIssuesCommand(
+  input: ExecuteAuditIssuesInput,
+  deps: AuditIssuesCommandDependencies = DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES,
+): Promise<ExecuteAuditIssuesResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+  const explicitIssueNumbers = input.issueNumbers ?? []
+  const issues = await deps.loadIssuesForAudit({
+    config,
+    issueNumbers: explicitIssueNumbers,
+  })
+  const repoRoot = input.repoRoot ?? process.cwd()
+  const report = await deps.auditIssues({
+    issues,
+    repo: config.repo,
+    includeSimulation: input.includeSimulation,
+    repoRoot,
+    runPlanner: input.includeSimulation
+      ? async ({ prompt, repoRoot: worktreePath }) => {
+          const result = await deps.runConfiguredAgent({
+            prompt,
+            worktreePath,
+            timeoutMs: config.agent.timeoutMs,
+            config,
+            logger: console,
+            allowWrites: false,
+          })
+
+          if (!result.ok) {
+            throw new Error(result.stderr || result.stdout || 'Issue audit agent execution failed')
+          }
+
+          return {
+            responseText: result.responseText,
+          }
+        }
+      : undefined,
+  })
+
+  return {
+    report,
+    explicitIssueNumbers,
+  }
 }
 
 export async function executeIssueRewriteCommand(
@@ -1466,10 +1653,23 @@ export function formatIssueLintOutput(
   return asJson ? formatIssueLintReportJson(report) : formatIssueLintReport(report)
 }
 
+export function formatAuditIssuesOutput(
+  report: AuditIssuesReport,
+  asJson = false,
+): string {
+  return formatAuditOutput(report, asJson)
+}
+
 export function formatIssueSplitOutput(
   result: SplitTrackingIssueResult,
 ): string {
   return formatSplitTrackingIssueResult(result)
+}
+
+export function shouldFailAuditIssuesCommand(
+  result: ExecuteAuditIssuesResult,
+): boolean {
+  return result.explicitIssueNumbers.length > 0 && result.report.summary.invalidIssueCount > 0
 }
 
 export function formatIssueSimulationOutput(
@@ -1813,6 +2013,90 @@ function assertIssueLintCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Issue lint cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertAuditIssuesCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  'simulate-issue'?: string
+  'simulate-file'?: string
+  'rewrite-file'?: string
+  'split-file'?: string
+  'split-start-number'?: string
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['simulate-issue'] === 'string' ? '--simulate-issue' : null,
+    typeof args['simulate-file'] === 'string' ? '--simulate-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    typeof args['split-file'] === 'string' ? '--split-file' : null,
+    typeof args['split-start-number'] === 'string' ? '--split-start-number' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Issue audit cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 

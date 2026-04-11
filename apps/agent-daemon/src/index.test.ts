@@ -7,16 +7,19 @@ import {
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeAuditIssuesCommand,
   executeIssueLintCommand,
   executeIssueSimulationCommand,
   executeIssueRewriteCommand,
   executeIssueSplitCommand,
   executeWakeCommand,
   executeWakeRequest,
+  formatAuditIssuesOutput,
   formatIssueLintOutput,
   formatIssueSimulationOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
+  resolveAuditIssuesInput,
   resolveIssueLintTarget,
   resolveIssueRewritePath,
   resolveIssueSimulationTarget,
@@ -27,6 +30,7 @@ import {
   formatLaunchdStatus,
   formatRuntimeListing,
   restartManagedRuntime,
+  shouldFailAuditIssuesCommand,
   shouldRemoveManagedRuntimeRecord,
   stopManagedRuntime,
 } from './index'
@@ -67,6 +71,324 @@ describe('index helpers', () => {
       'lint-issue': '36',
       'lint-file': 'docs/issues/ready.md',
     })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
+  })
+
+  test('resolves audit-issues selections and validates dependent flags', () => {
+    expect(resolveAuditIssuesInput({
+      'audit-issues': true,
+    })).toEqual({
+      issueNumbers: [],
+      includeSimulation: false,
+    })
+
+    expect(resolveAuditIssuesInput({
+      'audit-issues': true,
+      issue: ['50', '51', '50'],
+      simulate: true,
+    })).toEqual({
+      issueNumbers: [50, 51],
+      includeSimulation: true,
+    })
+
+    expect(() => resolveAuditIssuesInput({
+      issue: ['50'],
+    })).toThrow('--issue requires --audit-issues')
+
+    expect(() => resolveAuditIssuesInput({
+      simulate: true,
+    })).toThrow('--simulate requires --audit-issues')
+  })
+
+  test('executes audit-issues against default open managed issues without simulation', async () => {
+    const result = await executeAuditIssuesCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      loadIssuesForAudit: async ({ config, issueNumbers }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+        expect(issueNumbers).toEqual([])
+
+        return [{
+          number: 50,
+          title: '[AL-11] 增加 repo issue audit report CLI 与 JSON 输出',
+          body: 'body',
+          state: 'ready',
+          labels: ['agent:ready'],
+          isClaimable: true,
+          updatedAt: '2026-04-12T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: true,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+          assignee: null,
+        }]
+      },
+      auditIssues: async ({ issues, repo, includeSimulation, repoRoot, runPlanner }) => {
+        expect(repo).toBe('JamesWuHK/agent-loop')
+        expect(includeSimulation).toBeUndefined()
+        expect(repoRoot).toBe('/tmp/repo-root')
+        expect(runPlanner).toBeUndefined()
+        expect(issues).toHaveLength(1)
+
+        return {
+          summary: {
+            auditedIssueCount: 1,
+            invalidIssueCount: 0,
+            invalidReadyIssueCount: 0,
+            lowScoreIssueCount: 0,
+            warningIssueCount: 0,
+          },
+          issues: [],
+        }
+      },
+      runConfiguredAgent: async () => {
+        throw new Error('audit without --simulate should not invoke the agent')
+      },
+    })
+
+    expect(result).toEqual({
+      report: {
+        summary: {
+          auditedIssueCount: 1,
+          invalidIssueCount: 0,
+          invalidReadyIssueCount: 0,
+          lowScoreIssueCount: 0,
+          warningIssueCount: 0,
+        },
+        issues: [],
+      },
+      explicitIssueNumbers: [],
+    })
+    expect(shouldFailAuditIssuesCommand(result)).toBe(false)
+  })
+
+  test('executes audit-issues for an explicit issue set with simulation and exposes failure exit semantics', async () => {
+    const result = await executeAuditIssuesCommand({
+      issueNumbers: [50, 53],
+      includeSimulation: true,
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      loadIssuesForAudit: async ({ config, issueNumbers }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+        expect(issueNumbers).toEqual([50, 53])
+
+        return [{
+          number: 53,
+          title: '[AL-13] 增加 issue repair CLI 并消费 lint / simulate findings',
+          body: 'body',
+          state: 'ready',
+          labels: ['agent:ready'],
+          isClaimable: false,
+          updatedAt: '2026-04-12T10:01:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: true,
+          dependencyParseError: false,
+          claimBlockedBy: [50],
+          hasExecutableContract: false,
+          contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
+          assignee: null,
+        }]
+      },
+      auditIssues: async ({ issues, repo, includeSimulation, repoRoot, runPlanner }) => {
+        expect(repo).toBe('JamesWuHK/agent-loop')
+        expect(includeSimulation).toBe(true)
+        expect(repoRoot).toBe('/tmp/repo-root')
+        expect(issues).toHaveLength(1)
+
+        const response = await runPlanner!({
+          prompt: 'audit simulate prompt',
+          repoRoot: '/tmp/repo-root',
+        })
+
+        expect(response.responseText).toBe('1. Simulate the issue audit plan')
+
+        return {
+          summary: {
+            auditedIssueCount: 1,
+            invalidIssueCount: 1,
+            invalidReadyIssueCount: 1,
+            lowScoreIssueCount: 1,
+            warningIssueCount: 1,
+          },
+          issues: [
+            {
+              number: 53,
+              title: '[AL-13] 增加 issue repair CLI 并消费 lint / simulate findings',
+              state: 'ready',
+              labels: ['agent:ready'],
+              isClaimable: false,
+              hasExecutableContract: false,
+              claimBlockedBy: [50],
+              contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
+              qualityScore: 70,
+              contractWarnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+              contract: {
+                source: {
+                  kind: 'issue',
+                  issueNumber: 53,
+                  repo: 'JamesWuHK/agent-loop',
+                },
+                valid: false,
+                readyGateBlocked: true,
+                readyGateStatus: 'blocked',
+                readyGateSummary: 'ready gate would still block on hard validation errors',
+                score: 70,
+                errors: ['missing ## RED 测试 / RED Tests'],
+                warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+                contract: {
+                  allowedFiles: ['frontend files'],
+                },
+              } as any,
+              simulation: {
+                valid: false,
+                failures: ['planning output does not contain commit-shaped subtasks'],
+                plannerOutput: response.responseText,
+                checks: {
+                  commitShapedPlan: false,
+                  scopedAllowedFiles: true,
+                  specificValidation: true,
+                },
+              },
+            },
+          ],
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.prompt).toBe('audit simulate prompt')
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: '1. Simulate the issue audit plan',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result.explicitIssueNumbers).toEqual([50, 53])
+    expect(shouldFailAuditIssuesCommand(result)).toBe(true)
+    expect(JSON.parse(formatAuditIssuesOutput(result.report, true))).toMatchObject({
+      summary: {
+        invalidIssueCount: 1,
+      },
+      issues: [
+        {
+          number: 53,
+          state: 'ready',
+        },
+      ],
+    })
   })
 
   test('executes local issue lint without loading remote config', async () => {

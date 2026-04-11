@@ -8,29 +8,62 @@ import {
 import { parseIssueContract, summarizeIssueContract } from '../../../packages/agent-shared/src/issue-contract'
 import { buildIssueQualityReport } from '../../../packages/agent-shared/src/issue-quality'
 import { loadConfig, type CliArgs } from './config'
+import { runConfiguredAgent } from './cli-agent'
+import {
+  simulateIssueExecutability,
+  type IssueSimulationPlannerRunner,
+  type IssueSimulationResult,
+} from './issue-simulate'
+
+export const LOW_ISSUE_QUALITY_SCORE_THRESHOLD = 80
 
 export interface AuditedIssue {
   number: number
   title: string
   state: string
+  labels: string[]
   isClaimable: boolean
   hasExecutableContract: boolean
   claimBlockedBy: number[]
   contractValidationErrors: string[]
   qualityScore: number
   contractWarnings: string[]
+  contract: IssueLintReport
+  simulation?: IssueSimulationResult
 }
 
-export interface AuditIssueContractsJsonReport {
-  totals: {
-    managedIssues: number
-    readyIssues: number
-    invalidReadyIssues: number
-    issuesWithWarnings: number
-  }
-  issues: Array<AuditedIssue & {
-    readyGateBlocked: boolean
-  }>
+export interface AuditIssuesSummary {
+  auditedIssueCount: number
+  invalidIssueCount: number
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
+}
+
+export interface AuditIssuesReport {
+  summary: AuditIssuesSummary
+  issues: AuditedIssue[]
+}
+
+export type AuditIssueContractsJsonReport = AuditIssuesReport
+
+export interface AuditIssuesInput {
+  issues: Array<Pick<
+    AgentIssue,
+    | 'number'
+    | 'title'
+    | 'body'
+    | 'state'
+    | 'labels'
+    | 'isClaimable'
+    | 'claimBlockedBy'
+    | 'hasExecutableContract'
+    | 'contractValidationErrors'
+  >>
+  repo: string
+  includeSimulation?: boolean
+  repoRoot?: string
+  runPlanner?: IssueSimulationPlannerRunner
 }
 
 export type IssueLintSource =
@@ -64,6 +97,11 @@ export interface RemoteIssueDocument {
   url: string
 }
 
+interface LoadIssuesForAuditDependencies {
+  listOpenAgentIssues: typeof listOpenAgentIssues
+  getAgentIssueByNumber: typeof getAgentIssueByNumber
+}
+
 interface RemoteIssueViewCommandResult {
   stdout: string
   stderr: string
@@ -75,6 +113,11 @@ interface RemoteIssueFetchDependencies {
     args: string[],
     config: AgentConfig,
   ) => Promise<RemoteIssueViewCommandResult>
+}
+
+const DEFAULT_LOAD_ISSUES_FOR_AUDIT_DEPENDENCIES: LoadIssuesForAuditDependencies = {
+  listOpenAgentIssues,
+  getAgentIssueByNumber,
 }
 
 const DEFAULT_REMOTE_ISSUE_FETCH_DEPENDENCIES: RemoteIssueFetchDependencies = {
@@ -109,31 +152,82 @@ export function buildIssueLintReport(
   }
 }
 
-export function buildAuditedIssue(
-  issue: Pick<AgentIssue, 'number' | 'title' | 'state' | 'isClaimable' | 'hasExecutableContract' | 'claimBlockedBy' | 'contractValidationErrors' | 'body'>,
-): AuditedIssue {
-  const report = buildIssueLintReport(issue.body, {
-    kind: 'issue',
-    issueNumber: issue.number,
-    repo: 'unknown',
-  }, issue.title)
+export async function loadIssuesForAudit(
+  input: {
+    config: AgentConfig
+    issueNumbers?: number[]
+  },
+  deps: LoadIssuesForAuditDependencies = DEFAULT_LOAD_ISSUES_FOR_AUDIT_DEPENDENCIES,
+): Promise<AgentIssue[]> {
+  const issueNumbers = dedupeIssueNumbers(input.issueNumbers ?? [])
+
+  if (issueNumbers.length === 0) {
+    return deps.listOpenAgentIssues(input.config)
+  }
+
+  const issues = await Promise.all(issueNumbers.map(async (issueNumber) => {
+    const issue = await deps.getAgentIssueByNumber(issueNumber, input.config)
+    if (!issue) {
+      throw new Error(`Issue #${issueNumber} was not found in ${input.config.repo}`)
+    }
+    return issue
+  }))
+
+  return issues
+}
+
+export async function auditIssues(
+  input: AuditIssuesInput,
+): Promise<AuditIssuesReport> {
+  if (input.includeSimulation && !input.runPlanner) {
+    throw new Error('auditIssues includeSimulation requires runPlanner')
+  }
+
+  const issues = await Promise.all(input.issues.map(async (issue) => {
+    const contract = buildIssueLintReport(issue.body, {
+      kind: 'issue',
+      issueNumber: issue.number,
+      repo: input.repo,
+    }, issue.title)
+    const simulation = input.includeSimulation
+      ? await simulateIssueExecutability({
+          issueTitle: issue.title,
+          issueBody: issue.body,
+          repoRoot: input.repoRoot,
+          runPlanner: input.runPlanner!,
+        })
+      : undefined
+
+    return {
+      number: issue.number,
+      title: issue.title,
+      state: issue.state,
+      labels: [...issue.labels],
+      isClaimable: issue.isClaimable,
+      hasExecutableContract: contract.valid,
+      claimBlockedBy: [...issue.claimBlockedBy],
+      contractValidationErrors: [...contract.errors],
+      qualityScore: contract.score,
+      contractWarnings: [...contract.warnings],
+      contract,
+      simulation,
+    }
+  }))
 
   return {
-    number: issue.number,
-    title: issue.title,
-    state: issue.state,
-    isClaimable: issue.isClaimable,
-    hasExecutableContract: issue.hasExecutableContract,
-    claimBlockedBy: [...issue.claimBlockedBy],
-    contractValidationErrors: [...issue.contractValidationErrors],
-    qualityScore: report.score,
-    contractWarnings: report.warnings,
+    summary: buildAuditSummary(issues),
+    issues,
   }
 }
 
 export function formatAuditLine(issue: AuditedIssue): string {
+  const simulationStatus = issue.simulation
+    ? ` simulate=${issue.simulation.valid ? 'pass' : 'fail'}`
+    : ''
+
   return `#${issue.number} state=${issue.state} claimable=${issue.isClaimable} `
-    + `contract=${issue.hasExecutableContract} score=${issue.qualityScore} warnings=${issue.contractWarnings.length} `
+    + `contract=${issue.hasExecutableContract} score=${issue.qualityScore} warnings=${issue.contractWarnings.length}`
+    + `${simulationStatus} `
     + `blockedBy=${issue.claimBlockedBy.join(',') || '-'} `
     + `errors=${issue.contractValidationErrors.join(' | ') || '-'}`
 }
@@ -149,29 +243,60 @@ export function formatInvalidReadySection(issues: AuditedIssue[]): string {
       `#${issue.number} ${issue.title}`,
       ...issue.contractValidationErrors.map((error) => `- ${error}`),
       ...issue.contractWarnings.map((warning) => `- warning: ${warning}`),
+      ...(issue.simulation?.valid === false
+        ? issue.simulation.failures.map((failure) => `- simulate: ${failure}`)
+        : []),
     ]),
   ].join('\n')
 }
 
 export function buildAuditIssueContractsJsonReport(
-  issues: AuditedIssue[],
+  input: AuditedIssue[] | AuditIssuesReport,
 ): AuditIssueContractsJsonReport {
+  if ('summary' in input) {
+    return input
+  }
+
   return {
-    totals: {
-      managedIssues: issues.length,
-      readyIssues: issues.filter((issue) => issue.state === 'ready').length,
-      invalidReadyIssues: issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract).length,
-      issuesWithWarnings: issues.filter((issue) => issue.contractWarnings.length > 0).length,
-    },
-    issues: issues.map((issue) => ({
-      ...issue,
-      readyGateBlocked: issue.contractValidationErrors.length > 0,
-    })),
+    summary: buildAuditSummary(input),
+    issues: input,
   }
 }
 
-export function formatAuditJsonReport(issues: AuditedIssue[]): string {
-  return JSON.stringify(buildAuditIssueContractsJsonReport(issues), null, 2)
+export function formatAuditJsonReport(
+  input: AuditedIssue[] | AuditIssuesReport,
+): string {
+  return JSON.stringify(buildAuditIssueContractsJsonReport(input), null, 2)
+}
+
+export function formatAuditOutput(
+  report: AuditIssuesReport,
+  asJson = false,
+): string {
+  if (asJson) {
+    return formatAuditJsonReport(report)
+  }
+
+  const lines = [
+    `audited issues: ${report.summary.auditedIssueCount}`,
+    `invalid issues: ${report.summary.invalidIssueCount}`,
+    `invalid ready issues: ${report.summary.invalidReadyIssueCount}`,
+    `low score issues: ${report.summary.lowScoreIssueCount}`,
+    `warning issues: ${report.summary.warningIssueCount}`,
+  ]
+
+  if (report.issues.length > 0) {
+    lines.push('', ...report.issues.map(formatAuditLine))
+  }
+
+  const invalidReadySection = formatInvalidReadySection(
+    report.issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract),
+  )
+  if (invalidReadySection) {
+    lines.push('', invalidReadySection)
+  }
+
+  return lines.join('\n')
 }
 
 export function formatIssueLintReportJson(report: IssueLintReport): string {
@@ -268,9 +393,47 @@ export async function buildIssueLintReportFromRemoteIssue(input: {
   }, issue.title)
 }
 
-function parseArgs(argv: string[]): CliArgs & { json?: boolean } {
+function buildAuditSummary(issues: AuditedIssue[]): AuditIssuesSummary {
+  return {
+    auditedIssueCount: issues.length,
+    invalidIssueCount: issues.filter((issue) => !issue.contract.valid).length,
+    invalidReadyIssueCount: issues.filter((issue) => issue.state === 'ready' && !issue.contract.valid).length,
+    lowScoreIssueCount: issues.filter((issue) => issue.contract.score < LOW_ISSUE_QUALITY_SCORE_THRESHOLD).length,
+    warningIssueCount: issues.filter((issue) => issue.contract.warnings.length > 0).length,
+  }
+}
+
+function dedupeIssueNumbers(issueNumbers: number[]): number[] {
+  const seen = new Set<number>()
+  const deduped: number[] = []
+
+  for (const issueNumber of issueNumbers) {
+    if (seen.has(issueNumber)) continue
+    seen.add(issueNumber)
+    deduped.push(issueNumber)
+  }
+
+  return deduped
+}
+
+function parseIssueNumber(value: string, flag: string): number {
+  const trimmed = value.trim()
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${flag} must be a positive integer`)
+  }
+
+  return parseInt(trimmed, 10)
+}
+
+function parseArgs(argv: string[]): CliArgs & {
+  json?: boolean
+  issueNumbers?: number[]
+  simulate?: boolean
+} {
   let repo: string | undefined
   let json = false
+  let simulate = false
+  const issueNumbers: number[] = []
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -279,35 +442,64 @@ function parseArgs(argv: string[]): CliArgs & { json?: boolean } {
       index += 1
     } else if (arg === '--json') {
       json = true
+    } else if (arg === '--simulate') {
+      simulate = true
+    } else if (arg === '--issue') {
+      const value = argv[index + 1]
+      if (typeof value !== 'string') {
+        throw new Error('--issue requires a number')
+      }
+      issueNumbers.push(parseIssueNumber(value, '--issue'))
+      index += 1
     }
   }
 
-  return { repo, json }
+  return {
+    repo,
+    json,
+    simulate,
+    issueNumbers: dedupeIssueNumbers(issueNumbers),
+  }
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const config = loadConfig(args)
-  const issues = await listOpenAgentIssues(config)
-  const managedIssues = issues
-    .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
-    .map(buildAuditedIssue)
+  const issues = await loadIssuesForAudit({
+    config,
+    issueNumbers: args.issueNumbers,
+  })
+  const report = await auditIssues({
+    issues,
+    repo: config.repo,
+    includeSimulation: args.simulate,
+    repoRoot: process.cwd(),
+    runPlanner: args.simulate
+      ? async ({ prompt, repoRoot }) => {
+          const result = await runConfiguredAgent({
+            prompt,
+            worktreePath: repoRoot,
+            timeoutMs: config.agent.timeoutMs,
+            config,
+            logger: console,
+            allowWrites: false,
+          })
 
-  if (args.json) {
-    console.log(formatAuditJsonReport(managedIssues))
-    return
-  }
+          if (!result.ok) {
+            throw new Error(result.stderr || result.stdout || 'Issue audit simulation agent execution failed')
+          }
 
-  console.log(`managed issues: ${managedIssues.length}`)
+          return {
+            responseText: result.responseText,
+          }
+        }
+      : undefined,
+  })
 
-  for (const issue of managedIssues) {
-    console.log(formatAuditLine(issue))
-  }
+  console.log(formatAuditOutput(report, args.json))
 
-  const invalidReady = managedIssues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract)
-  const invalidReadySection = formatInvalidReadySection(invalidReady)
-  if (invalidReadySection) {
-    console.log(`\n${invalidReadySection}`)
+  if ((args.issueNumbers?.length ?? 0) > 0 && report.summary.invalidIssueCount > 0) {
+    process.exitCode = 1
   }
 }
 
