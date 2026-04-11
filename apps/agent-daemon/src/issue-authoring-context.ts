@@ -455,13 +455,19 @@ function collectPackageManifests(
   rootPackageJsonPath?: string,
   workspacePackageJsonPaths?: string[],
 ): PackageManifest[] {
-  const explicitRootPackageJsonPath = rootPackageJsonPath?.trim() || 'package.json'
-  const rootPackage = readPackageManifest(join(repoRoot, explicitRootPackageJsonPath))
+  const sanitizedRootPackageJsonPath = sanitizeManifestPath(repoRoot, rootPackageJsonPath?.trim() || 'package.json')
+  const rootPackage = sanitizedRootPackageJsonPath
+    ? readPackageManifest(join(repoRoot, sanitizedRootPackageJsonPath))
+    : null
   const manifests: PackageManifest[] = []
-  const packageJsonPaths = new Set<string>([explicitRootPackageJsonPath])
+  const packageJsonPaths = new Set<string>()
+
+  if (sanitizedRootPackageJsonPath) {
+    packageJsonPaths.add(sanitizedRootPackageJsonPath)
+  }
 
   for (const workspacePackageJsonPath of workspacePackageJsonPaths ?? []) {
-    const normalized = workspacePackageJsonPath.trim()
+    const normalized = sanitizeManifestPath(repoRoot, workspacePackageJsonPath)
     if (normalized) {
       packageJsonPaths.add(normalized)
     }
@@ -479,7 +485,7 @@ function collectPackageManifests(
   }
 
   for (const packageJsonPath of [...packageJsonPaths].sort((left, right) => left.localeCompare(right))) {
-    if (packageJsonPath === explicitRootPackageJsonPath) {
+    if (packageJsonPath === sanitizedRootPackageJsonPath) {
       continue
     }
 
@@ -500,6 +506,20 @@ function collectPackageManifests(
       allManifests.findIndex((candidate) => candidate.dir === manifest.dir) === index,
     )
     .sort((left, right) => left.dir.localeCompare(right.dir))
+}
+
+function sanitizeManifestPath(repoRoot: string, manifestPath: string): string | null {
+  const normalized = manifestPath.trim().replace(/\\/g, '/').replace(/^\.\/?/, '')
+  if (!normalized || normalized.startsWith('/')) {
+    return null
+  }
+
+  const absolutePath = resolve(repoRoot, normalized)
+  if (!isPathInsideRepo(repoRoot, absolutePath)) {
+    return null
+  }
+
+  return toRepoRelativePath(repoRoot, absolutePath)
 }
 
 function readPackageManifest(path: string): { raw: PackageManifestRecord; scripts: Record<string, string> } | null {
