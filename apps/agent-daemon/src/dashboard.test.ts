@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildDashboardIssueOpsSummary,
   buildDashboardMachineCards,
   buildDashboardUpgradeEvents,
   buildDashboardUpgradeRollout,
@@ -130,6 +131,29 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
 }
 
 describe('dashboard machine aggregation', () => {
+  test('derives dashboard issue ops summary counts from issue quality data', () => {
+    const summary = buildDashboardIssueOpsSummary([
+      {
+        state: 'ready',
+        readyGateBlocked: true,
+        qualityScore: 40,
+        warningCount: 0,
+      },
+      {
+        state: 'ready',
+        readyGateBlocked: false,
+        qualityScore: 75,
+        warningCount: 1,
+      },
+    ])
+
+    expect(summary).toEqual({
+      invalidReadyIssueCount: 1,
+      lowScoreIssueCount: 2,
+      warningIssueCount: 1,
+    })
+  })
+
   test('merges local and GitHub machine state and prefers local lease detail', () => {
     const localSnapshots = [buildLocalSnapshot()]
     const remoteLeases = [
@@ -209,6 +233,9 @@ describe('dashboard machine aggregation', () => {
         claimBlockedBy: [],
         hasExecutableContract: true,
         contractValidationErrors: [],
+        readyGateBlocked: false,
+        qualityScore: 100,
+        warningCount: 0,
         linkedPrNumbers: [226],
         activeLease: buildLease(),
       },
@@ -225,6 +252,9 @@ describe('dashboard machine aggregation', () => {
         claimBlockedBy: [],
         hasExecutableContract: true,
         contractValidationErrors: [],
+        readyGateBlocked: false,
+        qualityScore: 90,
+        warningCount: 0,
         linkedPrNumbers: [],
         activeLease: null,
       },
@@ -241,6 +271,9 @@ describe('dashboard machine aggregation', () => {
         claimBlockedBy: [92],
         hasExecutableContract: false,
         contractValidationErrors: ['missing RED test'],
+        readyGateBlocked: true,
+        qualityScore: 40,
+        warningCount: 1,
         linkedPrNumbers: [227],
         activeLease: null,
       },
@@ -279,6 +312,9 @@ describe('dashboard machine aggregation', () => {
       readyIssueCount: 1,
       workingIssueCount: 1,
       failedIssueCount: 1,
+      invalidReadyIssueCount: 0,
+      lowScoreIssueCount: 1,
+      warningIssueCount: 1,
       openPrCount: 1,
       upgradePendingMachineCount: 0,
       upgradeCurrentMachineCount: 0,
@@ -375,6 +411,9 @@ describe('dashboard machine aggregation', () => {
       readyIssueCount: 0,
       workingIssueCount: 0,
       failedIssueCount: 0,
+      invalidReadyIssueCount: 0,
+      lowScoreIssueCount: 0,
+      warningIssueCount: 0,
       openPrCount: 0,
       upgradePendingMachineCount: 3,
       upgradeCurrentMachineCount: 0,
@@ -433,6 +472,9 @@ describe('dashboard machine aggregation', () => {
       readyIssueCount: 0,
       workingIssueCount: 0,
       failedIssueCount: 0,
+      invalidReadyIssueCount: 0,
+      lowScoreIssueCount: 0,
+      warningIssueCount: 0,
       openPrCount: 0,
       upgradePendingMachineCount: 0,
       upgradeCurrentMachineCount: 1,

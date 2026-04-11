@@ -184,6 +184,72 @@ function createHistoricalLeaseComment(issueNumber: number, branch: string, workt
   }
 }
 
+describe('issue ops observability', () => {
+  test('updates issue contract quality gauges from managed issue bodies', async () => {
+    registry.resetMetrics()
+
+    const daemon = createTestDaemon()
+
+    ;(daemon as any).updateIssueOpsMetricsFromIssues([
+      {
+        number: 50,
+        title: '[AL-11] audit',
+        body: '## 用户故事\n只有用户故事',
+        state: 'ready',
+      },
+      {
+        number: 53,
+        title: '[AL-13] repair',
+        body: [
+          '## 用户故事',
+          '作为维护者，我希望 repair flow 能保留具体边界。',
+          '',
+          '## Context',
+          '### Dependencies',
+          '```json',
+          '{"dependsOn":[50]}',
+          '```',
+          '### Constraints',
+          '- 只修 contract',
+          '### AllowedFiles',
+          '- frontend files',
+          '- backend code',
+          '### ForbiddenFiles',
+          '- apps/agent-daemon/src/dashboard.ts',
+          '### MustPreserve',
+          '- narrow scope',
+          '### OutOfScope',
+          '- 远端写回',
+          '### RequiredSemantics',
+          '- repair 输出 canonical markdown',
+          '### ReviewHints',
+          '- 检查 broad allowed files',
+          '### Validation',
+          '- `bun test apps/agent-daemon/src/issue-repair.test.ts`',
+          '- manual smoke test',
+          '',
+          '## RED 测试',
+          '```ts',
+          'expect(true).toBe(false)',
+          '```',
+          '',
+          '## 实现步骤',
+          '1. 先补 repair',
+          '',
+          '## 验收',
+          '- [ ] warnings 可见',
+        ].join('\n'),
+        state: 'ready',
+      },
+    ])
+
+    const metrics = await getMetrics()
+    expect(metrics).toContain('agent_loop_issue_contract_invalid_ready 1')
+    expect(metrics).toContain('agent_loop_issue_contract_warning_issues 1')
+    expect(metrics).toContain('agent_loop_issue_contract_low_score_issues 2')
+  })
+})
+
 describe('issue preflight comments', () => {
   test('extracts the latest automated preflight blocker from issue comments', () => {
     const older = buildIssuePreflightFailureComment(

@@ -38,6 +38,9 @@
  * - agent_loop_pr_lineage_warnings: Gauge of currently tracked PR lineage warnings by kind
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
+ * - agent_loop_issue_contract_invalid_ready: Gauge of ready issues blocked by hard executable-contract validation
+ * - agent_loop_issue_contract_low_score_issues: Gauge of open issues below the low-score contract threshold
+ * - agent_loop_issue_contract_warning_issues: Gauge of open issues with contract warnings
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
  * - agent_loop_issue_processing_duration_seconds: Histogram of issue processing durations
  * - agent_loop_agent_execution_duration_seconds: Histogram of agent execution durations
@@ -59,6 +62,7 @@ import type {
   GitHubApiOutcome,
   GitHubApiTransport,
 } from '@agent/shared'
+import type { IssueOpsSummary } from './audit-issue-contracts'
 
 export const METRICS_PORT_DEFAULT = 9090
 export const METRICS_PATH = '/metrics'
@@ -453,6 +457,33 @@ export const blockedIssueResumeEscalations = new Gauge({
 export const blockedIssueResumeEscalationAgeSeconds = new Gauge({
   name: 'agent_loop_blocked_issue_resume_escalation_age_seconds',
   help: 'Age in seconds of the oldest GitHub escalation comment for a blocked failed issue resume',
+  registers: [registry],
+})
+
+/**
+ * Current number of ready issues that would fail hard executable-contract validation.
+ */
+export const invalidReadyIssueContracts = new Gauge({
+  name: 'agent_loop_issue_contract_invalid_ready',
+  help: 'Current number of ready issues that would fail hard executable-contract validation',
+  registers: [registry],
+})
+
+/**
+ * Current number of open managed issues whose contract quality score is below the low-score threshold.
+ */
+export const lowScoreIssueContracts = new Gauge({
+  name: 'agent_loop_issue_contract_low_score_issues',
+  help: 'Current number of open managed issues whose contract quality score is below the low-score threshold',
+  registers: [registry],
+})
+
+/**
+ * Current number of open managed issues whose contract still has warnings.
+ */
+export const warningIssueContracts = new Gauge({
+  name: 'agent_loop_issue_contract_warning_issues',
+  help: 'Current number of open managed issues whose contract still has warnings',
   registers: [registry],
 })
 
@@ -928,6 +959,15 @@ export function setBlockedIssueResumeEscalations(count: number): void {
  */
 export function setBlockedIssueResumeEscalationAgeSeconds(ageSeconds: number): void {
   blockedIssueResumeEscalationAgeSeconds.set(ageSeconds)
+}
+
+/**
+ * Update repo-level issue contract quality gauges.
+ */
+export function setIssueOpsSummaryMetrics(summary: IssueOpsSummary): void {
+  invalidReadyIssueContracts.set(summary.invalidReadyIssueCount)
+  lowScoreIssueContracts.set(summary.lowScoreIssueCount)
+  warningIssueContracts.set(summary.warningIssueCount)
 }
 
 /**

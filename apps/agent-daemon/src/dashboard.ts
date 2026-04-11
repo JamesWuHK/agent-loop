@@ -18,6 +18,12 @@ import {
   type DaemonObservabilitySnapshot,
 } from './status'
 import {
+  buildIssueLintReport,
+  buildIssueOpsSummary,
+  LOW_ISSUE_QUALITY_SCORE_THRESHOLD,
+  type IssueOpsSummary,
+} from './audit-issue-contracts'
+import {
   canResumeHumanNeededPrReview,
   extractLatestAutomatedPrReviewBlockerSummary,
 } from './pr-reviewer'
@@ -53,6 +59,9 @@ export interface DashboardSummary {
   readyIssueCount: number
   workingIssueCount: number
   failedIssueCount: number
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
   openPrCount: number
   upgradePendingMachineCount: number
   upgradeCurrentMachineCount: number
@@ -170,6 +179,9 @@ export interface DashboardIssueView {
   claimBlockedBy: number[]
   hasExecutableContract: boolean
   contractValidationErrors: string[]
+  readyGateBlocked: boolean
+  qualityScore: number
+  warningCount: number
   linkedPrNumbers: number[]
   activeLease: DashboardLeaseView | null
 }
@@ -273,6 +285,7 @@ interface DashboardGitHubCollection {
   issues: DashboardIssueView[]
   prs: DashboardPullRequestView[]
   remoteLeases: DashboardLeaseView[]
+  issueOpsErrors: string[]
 }
 
 export async function collectDashboardSnapshot(
@@ -316,6 +329,7 @@ export async function collectDashboardSnapshot(
     issues = githubCollection.issues
     prs = githubCollection.prs
     remoteLeases = githubCollection.remoteLeases
+    errors.push(...githubCollection.issueOpsErrors)
   } catch (error) {
     errors.push(`GitHub 快照不可用：${formatError(error)}`)
   }
@@ -478,6 +492,7 @@ export function buildDashboardSummary(
   issues: DashboardIssueView[],
   prs: DashboardPullRequestView[],
 ): DashboardSummary {
+  const issueOpsSummary = buildDashboardIssueOpsSummary(issues)
   const activeLeaseKeys = new Set<string>()
   let localRuntimeCount = 0
   let managedPresenceCount = 0
@@ -531,6 +546,9 @@ export function buildDashboardSummary(
     readyIssueCount: issues.filter((issue) => issue.state === 'ready').length,
     workingIssueCount: issues.filter((issue) => issue.state === 'working').length,
     failedIssueCount: issues.filter((issue) => issue.state === 'failed').length,
+    invalidReadyIssueCount: issueOpsSummary.invalidReadyIssueCount,
+    lowScoreIssueCount: issueOpsSummary.lowScoreIssueCount,
+    warningIssueCount: issueOpsSummary.warningIssueCount,
     openPrCount: prs.length,
     upgradePendingMachineCount,
     upgradeCurrentMachineCount,
@@ -541,6 +559,17 @@ export function buildDashboardSummary(
     upgradeErrorMachineCount,
     upgradeFailedMachineCount,
   }
+}
+
+export function buildDashboardIssueOpsSummary(
+  issues: Array<Pick<DashboardIssueView, 'state' | 'readyGateBlocked' | 'qualityScore' | 'warningCount'>>,
+): IssueOpsSummary {
+  return buildIssueOpsSummary(issues.map((issue) => ({
+    state: issue.state,
+    readyGateBlocked: issue.readyGateBlocked,
+    qualityScore: issue.qualityScore,
+    warningCount: issue.warningCount,
+  })))
 }
 
 export function buildDashboardUpgradeFailureAlertMessages(
@@ -1034,26 +1063,65 @@ async function collectGitHubDashboardData(input: {
     }
   }
 
+  const issueOpsErrors: string[] = []
+  const issueQualityByNumber = new Map<number, {
+    readyGateBlocked: boolean
+    qualityScore: number
+    warningCount: number
+  }>()
+  for (const issue of issues) {
+    try {
+      const report = buildIssueLintReport(issue.body, {
+        kind: 'issue',
+        issueNumber: issue.number,
+        repo: input.config.repo,
+      }, issue.title)
+      issueQualityByNumber.set(issue.number, {
+        readyGateBlocked: report.readyGateBlocked,
+        qualityScore: report.score,
+        warningCount: report.warnings.length,
+      })
+    } catch (error) {
+      issueOpsErrors.push(`Issue ops 质量快照不可用：#${issue.number} ${formatError(error)}`)
+      issueQualityByNumber.set(issue.number, {
+        readyGateBlocked: !issue.hasExecutableContract,
+        qualityScore: 0,
+        warningCount: 0,
+      })
+    }
+  }
+
   const issueViews = issues
-    .map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      url: buildGitHubIssueUrl(input.config.repo, issue.number),
-      state: issue.state,
-      labels: issue.labels,
-      assignee: issue.assignee,
-      isClaimable: issue.isClaimable,
-      updatedAt: issue.updatedAt,
-      dependencyIssueNumbers: issue.dependencyIssueNumbers,
-      claimBlockedBy: issue.claimBlockedBy,
-      hasExecutableContract: issue.hasExecutableContract,
-      contractValidationErrors: issue.contractValidationErrors,
-      linkedPrNumbers: (linkedPrsByIssue.get(issue.number) ?? []).map((pr) => pr.number).sort((left, right) => left - right),
-      activeLease: preferLocalLease(
-        input.localLeaseIndex,
-        issueLeaseMap.get(issue.number) ?? null,
-      ),
-    }) satisfies DashboardIssueView)
+    .map((issue) => {
+      const quality = issueQualityByNumber.get(issue.number) ?? {
+        readyGateBlocked: !issue.hasExecutableContract,
+        qualityScore: 0,
+        warningCount: 0,
+      }
+
+      return {
+        number: issue.number,
+        title: issue.title,
+        url: buildGitHubIssueUrl(input.config.repo, issue.number),
+        state: issue.state,
+        labels: issue.labels,
+        assignee: issue.assignee,
+        isClaimable: issue.isClaimable,
+        updatedAt: issue.updatedAt,
+        dependencyIssueNumbers: issue.dependencyIssueNumbers,
+        claimBlockedBy: issue.claimBlockedBy,
+        hasExecutableContract: issue.hasExecutableContract,
+        contractValidationErrors: issue.contractValidationErrors,
+        readyGateBlocked: quality.readyGateBlocked,
+        qualityScore: quality.qualityScore,
+        warningCount: quality.warningCount,
+        linkedPrNumbers: (linkedPrsByIssue.get(issue.number) ?? []).map((pr) => pr.number).sort((left, right) => left - right),
+        activeLease: preferLocalLease(
+          input.localLeaseIndex,
+          issueLeaseMap.get(issue.number) ?? null,
+        ),
+      } satisfies DashboardIssueView
+    })
     .sort(compareIssues)
 
   const prViews = prs
@@ -1095,6 +1163,7 @@ async function collectGitHubDashboardData(input: {
     issues: issueViews,
     prs: prViews,
     remoteLeases,
+    issueOpsErrors,
   }
 }
 
@@ -1506,6 +1575,7 @@ export function renderDashboardHtml(): string {
                   <th>Issue</th>
                   <th>状态</th>
                   <th>可认领</th>
+                  <th>质量</th>
                   <th>租约</th>
                   <th>更新时间</th>
                 </tr>
@@ -2188,6 +2258,9 @@ function renderSummary(snapshot) {
     { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
     { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
     { label: '失败 Issue', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },
+    { label: 'Invalid Ready', value: snapshot.summary.invalidReadyIssueCount, tone: snapshot.summary.invalidReadyIssueCount > 0 ? 'error' : '' },
+    { label: 'Low Score', value: snapshot.summary.lowScoreIssueCount, tone: snapshot.summary.lowScoreIssueCount > 0 ? 'gold' : '' },
+    { label: 'Warnings', value: snapshot.summary.warningIssueCount, tone: snapshot.summary.warningIssueCount > 0 ? 'gold' : '' },
     { label: '开放 PR', value: snapshot.summary.openPrCount, tone: '' },
   ];
 
@@ -2305,7 +2378,7 @@ function renderMachines(machines) {
 
 function renderIssues(issues) {
   if (!Array.isArray(issues) || issues.length === 0) {
-    issuesBodyEl.innerHTML = '<tr><td colspan="5"><div class="empty-state">当前仓库没有返回开放的 Agent Issue。</div></td></tr>';
+    issuesBodyEl.innerHTML = '<tr><td colspan="6"><div class="empty-state">当前仓库没有返回开放的 Agent Issue。</div></td></tr>';
     return;
   }
 
@@ -2321,6 +2394,11 @@ function renderIssues(issues) {
     const contract = issue.hasExecutableContract
       ? '合约通过'
       : '合约无效：' + issue.contractValidationErrors.join('; ');
+    const issueQuality = [
+      renderChip('Score ' + issue.qualityScore, issue.qualityScore < LOW_ISSUE_QUALITY_SCORE_THRESHOLD ? 'gold' : 'accent'),
+      issue.readyGateBlocked ? renderChip('Ready Gate 阻塞', 'error') : renderChip('Ready Gate 通过', 'accent'),
+      issue.warningCount > 0 ? renderChip('Warnings ' + issue.warningCount, 'gold') : renderChip('Warnings 0', ''),
+    ].join('');
     const lease = issue.activeLease ? renderInlineLease(issue.activeLease) : '<span class="muted">无</span>';
     const linkedPrs = issue.linkedPrNumbers.length > 0
       ? '<div class="chip-row">' + issue.linkedPrNumbers.map((number) => renderChip('PR #' + number, '')).join('') + '</div>'
@@ -2335,6 +2413,7 @@ function renderIssues(issues) {
       '</td>',
       '<td>' + renderChip(localizeIssueState(issue.state), issue.state === 'working' ? 'accent' : issue.state === 'failed' ? 'error' : issue.state === 'ready' ? 'gold' : '') + '</td>',
       '<td>' + claimability + '<div class="muted" style="margin-top:8px">' + escapeHtml(deps) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(contract) + '</div></td>',
+      '<td><div class="chip-row">' + issueQuality + '</div><div class="muted" style="margin-top:8px">warning count: ' + escapeHtml(String(issue.warningCount)) + '</div></td>',
       '<td>' + lease + '</td>',
       '<td><div>' + escapeHtml(formatTimestamp(issue.updatedAt)) + '</div><div class="muted" style="margin-top:6px">' + escapeHtml(formatRelative(issue.updatedAt)) + '</div></td>',
       '</tr>',

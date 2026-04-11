@@ -23,6 +23,7 @@ import {
   setBlockedIssueResumeAgeSeconds,
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
+  setIssueOpsSummaryMetrics,
   setLastTransientLoopErrorAgeSeconds,
   setNextPollDelaySeconds,
   setPendingWakeRequests,
@@ -69,6 +70,21 @@ describe('metrics', () => {
       expect(metrics).toContain('result="no_issues"')
       expect(metrics).toContain('result="skipped_concurrency"')
       expect(metrics).toContain('result="error"')
+    })
+  })
+
+  describe('issue ops summary gauges', () => {
+    test('sets repo-level issue contract quality gauges', async () => {
+      setIssueOpsSummaryMetrics({
+        invalidReadyIssueCount: 1,
+        lowScoreIssueCount: 2,
+        warningIssueCount: 1,
+      })
+
+      const metrics = await getMetrics()
+      expect(metrics).toContain('agent_loop_issue_contract_invalid_ready 1')
+      expect(metrics).toContain('agent_loop_issue_contract_warning_issues 1')
+      expect(metrics).toContain('agent_loop_issue_contract_low_score_issues 2')
     })
   })
 

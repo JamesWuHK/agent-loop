@@ -65,6 +65,7 @@ import {
   setBlockedIssueResumeAgeSeconds,
   setBlockedIssueResumeEscalations,
   setBlockedIssueResumeEscalationAgeSeconds,
+  setIssueOpsSummaryMetrics,
   setLastTransientLoopErrorAgeSeconds,
   setPendingWakeRequests,
   setPrLineageWarningSnapshot,
@@ -76,6 +77,10 @@ import {
   type PrLineageEventKind,
   type MetricsServer,
 } from './metrics'
+import {
+  buildIssueLintReport,
+  buildIssueOpsSummary,
+} from './audit-issue-contracts'
 import {
   computeAutoUpgradePauseUntil,
   isAutoUpgradePauseActiveForTarget,
@@ -519,6 +524,29 @@ export class AgentDaemon {
     this.lastTransientLoopErrorMessage = formatDaemonError(error)
     recordTransientLoopError(kind)
     this.syncRuntimeMetrics()
+  }
+
+  private updateIssueOpsMetricsFromIssues(issues: AgentIssue[]): void {
+    try {
+      const summary = buildIssueOpsSummary(issues.map((issue) => {
+        const report = buildIssueLintReport(issue.body, {
+          kind: 'issue',
+          issueNumber: issue.number,
+          repo: this.config.repo,
+        }, issue.title)
+
+        return {
+          state: issue.state,
+          readyGateBlocked: report.readyGateBlocked,
+          qualityScore: report.score,
+          warningCount: report.warnings.length,
+        }
+      }))
+
+      setIssueOpsSummaryMetrics(summary)
+    } catch (error) {
+      this.logger.warn(`[daemon] failed to refresh issue ops summary metrics: ${formatDaemonError(error)}`)
+    }
   }
 
   private refreshObservability(): void {
@@ -1086,6 +1114,11 @@ export class AgentDaemon {
       defaultBranch: this.config.git.defaultBranch,
       machineId: this.config.machineId,
     })
+    setIssueOpsSummaryMetrics({
+      invalidReadyIssueCount: 0,
+      lowScoreIssueCount: 0,
+      warningIssueCount: 0,
+    })
     this.syncRuntimeMetrics()
 
     // Start metrics server
@@ -1133,6 +1166,7 @@ export class AgentDaemon {
    */
   private async reconcileIssueStates(): Promise<void> {
     const issues = await listOpenAgentIssues(this.config)
+    this.updateIssueOpsMetricsFromIssues(issues)
 
     for (const issue of issues) {
       // Only act on working/claimed issues from this machine
@@ -1166,6 +1200,7 @@ export class AgentDaemon {
       listOpenAgentIssues(this.config),
       listOpenAgentPullRequests(this.config),
     ])
+    this.updateIssueOpsMetricsFromIssues(issues)
     const issueMap = new Map(issues.map((issue) => [issue.number, issue]))
 
     for (const pr of prs) {
@@ -1824,6 +1859,7 @@ export class AgentDaemon {
       listOpenAgentIssues(this.config),
       listOpenAgentPullRequests(this.config),
     ])
+    this.updateIssueOpsMetricsFromIssues(issues)
     const now = Date.now()
     const openPrIssueNumbers = new Set(
       prs
@@ -1923,6 +1959,7 @@ export class AgentDaemon {
     skipIssueNumbers: ReadonlySet<number> = new Set<number>(),
   ): Promise<ResumableIssueCandidate | null> {
     const issues = await listOpenAgentIssues(this.config)
+    this.updateIssueOpsMetricsFromIssues(issues)
     const prs = await listOpenAgentPullRequests(this.config)
     const now = Date.now()
     const blockedIssueNumbers = new Set<number>()

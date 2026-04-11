@@ -40,6 +40,12 @@ export interface AuditIssuesSummary {
   warningIssueCount: number
 }
 
+export interface IssueOpsSummary {
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
+}
+
 export interface AuditIssuesReport {
   summary: AuditIssuesSummary
   issues: AuditedIssue[]
@@ -393,13 +399,33 @@ export async function buildIssueLintReportFromRemoteIssue(input: {
   }, issue.title)
 }
 
+export function buildIssueOpsSummary(input: Array<{
+  state: string
+  readyGateBlocked: boolean
+  qualityScore: number
+  warningCount: number
+}>): IssueOpsSummary {
+  return {
+    invalidReadyIssueCount: input.filter((issue) => issue.state === 'ready' && issue.readyGateBlocked).length,
+    lowScoreIssueCount: input.filter((issue) => issue.qualityScore < LOW_ISSUE_QUALITY_SCORE_THRESHOLD).length,
+    warningIssueCount: input.filter((issue) => issue.warningCount > 0).length,
+  }
+}
+
 function buildAuditSummary(issues: AuditedIssue[]): AuditIssuesSummary {
+  const issueOpsSummary = buildIssueOpsSummary(issues.map((issue) => ({
+    state: issue.state,
+    readyGateBlocked: issue.contract.readyGateBlocked,
+    qualityScore: issue.qualityScore,
+    warningCount: issue.contractWarnings.length,
+  })))
+
   return {
     auditedIssueCount: issues.length,
     invalidIssueCount: issues.filter((issue) => !issue.contract.valid).length,
-    invalidReadyIssueCount: issues.filter((issue) => issue.state === 'ready' && !issue.contract.valid).length,
-    lowScoreIssueCount: issues.filter((issue) => issue.contract.score < LOW_ISSUE_QUALITY_SCORE_THRESHOLD).length,
-    warningIssueCount: issues.filter((issue) => issue.contract.warnings.length > 0).length,
+    invalidReadyIssueCount: issueOpsSummary.invalidReadyIssueCount,
+    lowScoreIssueCount: issueOpsSummary.lowScoreIssueCount,
+    warningIssueCount: issueOpsSummary.warningIssueCount,
   }
 }
 
