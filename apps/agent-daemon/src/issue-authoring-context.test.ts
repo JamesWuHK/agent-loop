@@ -100,10 +100,11 @@ describe('buildRepoAuthoringContext', () => {
         test: 'bun test',
       },
     }))
+    writeFileSync(join(root, 'outside.ts'), 'export {}\n')
 
     const context = await buildRepoAuthoringContext({
       repoRoot: root,
-      issueText: '修复 packages/agent-shared/src/project-profile.ts 的提示文案',
+      issueText: '修复 outside.ts 和 packages/agent-shared/src/project-profile.ts 的提示文案',
       repoRelativeFilePaths: [
         '/tmp/escape.ts',
         '../outside.ts',
@@ -118,7 +119,44 @@ describe('buildRepoAuthoringContext', () => {
       'packages/agent-shared/src/project-profile.ts',
       'packages/agent-shared/src/project-profile.test.ts',
     ])
+    expect(context.candidateAllowedFiles).not.toContain('outside.ts')
     expect(context.candidateAllowedFiles.some((value: string) => value.startsWith('/'))).toBe(false)
+  })
+
+  test('ignores outside-repo package manifest inputs when collecting validation commands', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-manifests-'))
+    mkdirSync(join(root, 'apps/web'), { recursive: true })
+
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      name: 'fixture-repo',
+      scripts: {
+        test: 'bun test',
+      },
+    }))
+    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({
+      name: 'web',
+      scripts: {
+        verify: 'bun test src/pages/LoginPage.test.tsx',
+      },
+    }))
+
+    const context = await buildRepoAuthoringContext({
+      repoRoot: root,
+      issueText: '更新 LoginPage 并补测试',
+      rootPackageJsonPath: '../outside/package.json',
+      workspacePackageJsonPaths: [
+        'apps/web/package.json',
+        '../outside/package.json',
+        '/tmp/outside/package.json',
+      ],
+    })
+
+    expect(context.candidateValidationCommands).toEqual([
+      'bun test',
+      'bun test apps/web/src/pages/LoginPage.test.tsx',
+    ])
+    expect(context.candidateValidationCommands.some((value: string) => value.includes('../outside'))).toBe(false)
+    expect(context.candidateValidationCommands.some((value: string) => value.startsWith('/'))).toBe(false)
   })
 
   test('keeps allowed and forbidden file ordering stable for unsorted repo-relative inputs', async () => {

@@ -430,7 +430,7 @@ function sanitizeRepoRelativeFilePaths(
   const sanitized: string[] = []
 
   for (const value of repoRelativeFilePaths) {
-    const normalized = value.trim().replace(/\\/g, '/').replace(/^\.\/?/, '')
+    const normalized = normalizeInjectedRepoPath(value)
     if (!normalized || normalized.startsWith('/')) {
       continue
     }
@@ -452,18 +452,39 @@ function sanitizeRepoRelativeFilePaths(
   return sanitized.sort((left, right) => left.localeCompare(right))
 }
 
+function sanitizePackageJsonPath(
+  repoRoot: string,
+  packageJsonPath: string | undefined,
+): string | null {
+  const normalized = normalizeInjectedRepoPath(packageJsonPath)
+  if (!normalized || normalized.startsWith('/')) {
+    return null
+  }
+
+  const absolutePath = resolve(repoRoot, normalized)
+  if (!isPathInsideRepo(repoRoot, absolutePath)) {
+    return null
+  }
+
+  return toRepoRelativePath(repoRoot, absolutePath)
+}
+
+function normalizeInjectedRepoPath(path: string | undefined): string {
+  return path?.trim().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '') ?? ''
+}
+
 function collectPackageManifests(
   repoRoot: string,
   rootPackageJsonPath?: string,
   workspacePackageJsonPaths?: string[],
 ): PackageManifest[] {
-  const explicitRootPackageJsonPath = rootPackageJsonPath?.trim() || 'package.json'
+  const explicitRootPackageJsonPath = sanitizePackageJsonPath(repoRoot, rootPackageJsonPath) ?? 'package.json'
   const rootPackage = readPackageManifest(join(repoRoot, explicitRootPackageJsonPath))
   const manifests: PackageManifest[] = []
   const packageJsonPaths = new Set<string>([explicitRootPackageJsonPath])
 
   for (const workspacePackageJsonPath of workspacePackageJsonPaths ?? []) {
-    const normalized = workspacePackageJsonPath.trim()
+    const normalized = sanitizePackageJsonPath(repoRoot, workspacePackageJsonPath)
     if (normalized) {
       packageJsonPaths.add(normalized)
     }
@@ -555,7 +576,7 @@ function expandWorkspacePatterns(repoRoot: string, patterns: string[]): string[]
   const matches = new Set<string>()
 
   for (const pattern of patterns) {
-    const normalizedPattern = pattern.trim().replace(/\\/g, '/').replace(/^\.\/?/, '').replace(/\/$/, '')
+    const normalizedPattern = normalizeInjectedRepoPath(pattern).replace(/\/$/, '')
     if (!normalizedPattern) {
       continue
     }
