@@ -157,6 +157,59 @@ describe('cli-agent', () => {
     }
   })
 
+  test('runs Codex with isolated config base URL and without deprecated base-url env vars', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-codex-env-test-'))
+    const scriptPath = join(tempDir, 'fake-codex.sh')
+    const worktreePath = join(tempDir, 'worktree')
+    const envDumpPath = join(worktreePath, 'codex-env.txt')
+
+    try {
+      mkdirSync(worktreePath, { recursive: true })
+      writeFileSync(
+        scriptPath,
+        [
+          '#!/bin/sh',
+          'cat >/dev/null',
+          'for key in OPENAI_BASE_URL OPENAI_API_BASE OPENAI_API_URL OPENAI_BASE; do',
+          '  eval "value=\\${' + '$key-__UNSET__}"',
+          '  printf \'%s=%s\\n\' "$key" "$value"',
+          `done > ${JSON.stringify(envDumpPath)}`,
+          "printf 'ok\\n'",
+          '',
+        ].join('\n'),
+        'utf-8',
+      )
+      chmodSync(scriptPath, 0o755)
+
+      const result = await runConfiguredAgent({
+        prompt: 'noop',
+        worktreePath,
+        timeoutMs: 5_000,
+        config: {
+          ...baseConfig,
+          agent: {
+            ...baseConfig.agent,
+            primary: 'codex',
+            fallback: null,
+            codexPath: scriptPath,
+            codexBaseUrl: 'http://127.0.0.1:18777/v1',
+          },
+        },
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.usedAgent).toBe('codex')
+      expect(readFileSync(envDumpPath, 'utf-8')).toBe(
+        'OPENAI_BASE_URL=__UNSET__\n'
+        + 'OPENAI_API_BASE=__UNSET__\n'
+        + 'OPENAI_API_URL=__UNSET__\n'
+        + 'OPENAI_BASE=__UNSET__\n',
+      )
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   test('marks hung agent runs as idle_timeout when no output or git progress occurs', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'cli-agent-hung-test-'))
     const scriptPath = join(tempDir, 'fake-claude.sh')

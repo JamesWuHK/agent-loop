@@ -629,6 +629,14 @@ function buildRuntimeEnv(
 
   const { homeDir, codexHomeDir } = createIsolatedCodexHome(tempDir, cleanEnv)
 
+  // Codex already reads the provider base URL from the isolated config.toml.
+  // Drop deprecated base-url env vars so child runs avoid warning noise and
+  // don't accidentally override the isolated config.
+  delete cleanEnv.OPENAI_BASE_URL
+  delete cleanEnv.OPENAI_API_BASE
+  delete cleanEnv.OPENAI_API_URL
+  delete cleanEnv.OPENAI_BASE
+
   return {
     ...cleanEnv,
     HOME: homeDir,
