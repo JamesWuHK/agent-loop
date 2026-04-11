@@ -778,6 +778,46 @@ export function listActiveManagedDaemonUpgradeFailureAlertComments(
   return [...deduped.values()]
 }
 
+export function listRecentManagedDaemonUpgradeAnnouncementComments(
+  comments: IssueComment[],
+  repo: string,
+  now = Date.now(),
+  lookbackMs = 60 * 60 * 1000,
+): ManagedDaemonUpgradeAnnouncementComment[] {
+  const earliest = now - Math.max(0, Math.floor(lookbackMs))
+  return parseManagedDaemonUpgradeAnnouncementComments(comments)
+    .filter((comment) => comment.announcement.repo === repo)
+    .filter((comment) => {
+      const announcedAt = Date.parse(comment.announcement.announcedAt)
+      return Number.isFinite(announcedAt) && announcedAt >= earliest && announcedAt <= now
+    })
+    .sort((left, right) => {
+      const announcedDiff = Date.parse(right.announcement.announcedAt) - Date.parse(left.announcement.announcedAt)
+      if (announcedDiff !== 0) return announcedDiff
+      return right.commentId - left.commentId
+    })
+}
+
+export function listRecentManagedDaemonUpgradeFailureAlertComments(
+  comments: IssueComment[],
+  repo: string,
+  now = Date.now(),
+  lookbackMs = 60 * 60 * 1000,
+): ManagedDaemonUpgradeFailureAlertComment[] {
+  const earliest = now - Math.max(0, Math.floor(lookbackMs))
+  return parseManagedDaemonUpgradeFailureAlertComments(comments)
+    .filter((comment) => comment.alert.repo === repo)
+    .filter((comment) => {
+      const alertedAt = Date.parse(comment.alert.alertedAt)
+      return Number.isFinite(alertedAt) && alertedAt >= earliest && alertedAt <= now
+    })
+    .sort((left, right) => {
+      const alertedDiff = Date.parse(right.alert.alertedAt) - Date.parse(left.alert.alertedAt)
+      if (alertedDiff !== 0) return alertedDiff
+      return right.commentId - left.commentId
+    })
+}
+
 export function listRecentManagedDaemonUpgradeSuccessComments(
   comments: IssueComment[],
   repo: string,
@@ -996,6 +1036,30 @@ export async function listActiveManagedDaemonUpgradeFailureAlerts(
   if (issueNumber === null) return []
   const comments = await api.listIssueComments(issueNumber, config)
   return listActiveManagedDaemonUpgradeFailureAlertComments(comments, config.repo, now)
+}
+
+export async function listRecentManagedDaemonUpgradeAnnouncements(
+  config: AgentConfig,
+  now = Date.now(),
+  lookbackMs = 60 * 60 * 1000,
+  api: PresenceApiAdapter = defaultPresenceApi,
+): Promise<ManagedDaemonUpgradeAnnouncementComment[]> {
+  const issueNumber = await findManagedDaemonPresenceIssue(config)
+  if (issueNumber === null) return []
+  const comments = await api.listIssueComments(issueNumber, config)
+  return listRecentManagedDaemonUpgradeAnnouncementComments(comments, config.repo, now, lookbackMs)
+}
+
+export async function listRecentManagedDaemonUpgradeFailureAlerts(
+  config: AgentConfig,
+  now = Date.now(),
+  lookbackMs = 60 * 60 * 1000,
+  api: PresenceApiAdapter = defaultPresenceApi,
+): Promise<ManagedDaemonUpgradeFailureAlertComment[]> {
+  const issueNumber = await findManagedDaemonPresenceIssue(config)
+  if (issueNumber === null) return []
+  const comments = await api.listIssueComments(issueNumber, config)
+  return listRecentManagedDaemonUpgradeFailureAlertComments(comments, config.repo, now, lookbackMs)
 }
 
 export async function listRecentManagedDaemonUpgradeSuccesses(

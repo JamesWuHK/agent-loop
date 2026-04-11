@@ -15,6 +15,8 @@ import {
   getLatestManagedDaemonUpgradeSuccess,
   listActiveManagedDaemonPresenceComments,
   listActiveManagedDaemonUpgradeFailureAlertComments,
+  listRecentManagedDaemonUpgradeAnnouncementComments,
+  listRecentManagedDaemonUpgradeFailureAlertComments,
   listRecentManagedDaemonUpgradeSuccessComments,
   ManagedDaemonPresencePublisher,
   type ManagedDaemonPresence,
@@ -210,6 +212,24 @@ describe('managed daemon presence helpers', () => {
     ], TEST_CONFIG.repo)
 
     expect(latest?.announcement.latestRevision).toBe(newer.latestRevision)
+    expect(listRecentManagedDaemonUpgradeAnnouncementComments(
+      [
+        {
+          commentId: 11,
+          body: buildManagedDaemonUpgradeAnnouncementComment(older),
+          createdAt: older.announcedAt,
+          updatedAt: older.announcedAt,
+        },
+        {
+          commentId: 12,
+          body: buildManagedDaemonUpgradeAnnouncementComment(newer),
+          createdAt: newer.announcedAt,
+          updatedAt: newer.announcedAt,
+        },
+      ],
+      TEST_CONFIG.repo,
+      Date.parse('2026-04-11T09:40:00.000Z'),
+    )).toHaveLength(2)
   })
 
   test('round-trips managed daemon upgrade failure alerts and filters active latest comments', () => {
@@ -254,6 +274,11 @@ describe('managed daemon presence helpers', () => {
 
     expect(getLatestManagedDaemonUpgradeFailureAlert(comments, TEST_CONFIG.repo, 'machine-a')?.alert.pausedUntil).toBe(newer.pausedUntil)
     expect(listActiveManagedDaemonUpgradeFailureAlertComments(comments, TEST_CONFIG.repo, Date.parse('2026-04-11T09:40:00.000Z'))).toHaveLength(1)
+    expect(listRecentManagedDaemonUpgradeFailureAlertComments(
+      comments,
+      TEST_CONFIG.repo,
+      Date.parse('2026-04-11T09:40:00.000Z'),
+    )).toHaveLength(2)
   })
 
   test('round-trips managed daemon upgrade success acknowledgements and filters recent latest comments', () => {
