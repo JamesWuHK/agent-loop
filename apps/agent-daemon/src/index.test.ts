@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildWakeRequestFromCli,
+  executeBootstrapGateCommand,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
-  executeBootstrapScenarioCommand,
   executeIssueLintCommand,
   executeWakeCommand,
   executeWakeRequest,
-  formatBootstrapScenarioOutput,
+  formatBootstrapGateOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
@@ -340,78 +340,109 @@ describe('index helpers', () => {
     expect(report.errors).toEqual(['missing ## RED 测试 / RED Tests'])
   })
 
-  test('executes bootstrap scenarios locally and supports json output', async () => {
-    const report = await executeBootstrapScenarioCommand({
-      fixturesDir: '/tmp/self-bootstrap-suite',
+  test('executes bootstrap gate with repo-aware config and supports json output', async () => {
+    const report = await executeBootstrapGateCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
     }, {
-      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
-        expect(fixturesDir).toBe('/tmp/self-bootstrap-suite')
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
 
         return {
-          suite: 'self-bootstrap-v0.2',
-          ok: false,
-          cases: [
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      buildBootstrapGateReportForRepo: async ({ config }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          version: 'v0.2',
+          ready: false,
+          blockers: [
             {
-              name: 'self-bootstrap-happy-path',
-              ok: true,
-              present: true,
-              mismatches: [],
-              actual: { claimable: 1, blocked: 0, invalid: 0 },
-              expected: { claimable: 1, blocked: 0, invalid: 0 },
-            },
-            {
-              name: 'self-bootstrap-checks-fail',
-              ok: false,
-              present: true,
-              mismatches: ['blocked: expected 0, received 1'],
-              actual: { claimable: 0, blocked: 1, invalid: 0 },
-              expected: { claimable: 0, blocked: 0, invalid: 0 },
+              issueNumber: 37,
+              state: 'working',
+              labels: ['agent:working'],
+              title: '[AL-7] repo grounded context',
             },
           ],
-          failedCases: ['self-bootstrap-checks-fail'],
-          summary: {
-            requiredCases: 4,
-            presentCases: 2,
-            passedCases: 1,
-            failedCases: 1,
-          },
+          requiredEvidence: [
+            {
+              code: 'self_bootstrap_suite_green',
+              satisfied: false,
+              sourceIssueNumber: 69,
+              summary: 'awaiting the deterministic self-bootstrap scenario suite tracked by #69',
+            },
+          ],
+          blockingReasons: [
+            'issue #37 is not done (state=working, labels=agent:working)',
+            'missing required evidence: self_bootstrap_suite_green',
+          ],
         }
       },
     })
 
-    expect(report.ok).toBe(false)
-    expect(JSON.parse(formatBootstrapScenarioOutput(report, true))).toMatchObject({
-      suite: 'self-bootstrap-v0.2',
-      ok: false,
-      failedCases: ['self-bootstrap-checks-fail'],
-      summary: {
-        requiredCases: 4,
-      },
+    expect(report.ready).toBe(false)
+    expect(JSON.parse(formatBootstrapGateOutput(report, true))).toMatchObject({
+      version: 'v0.2',
+      ready: false,
+      blockers: [
+        {
+          issueNumber: 37,
+          state: 'working',
+        },
+      ],
+      requiredEvidence: [
+        {
+          code: 'self_bootstrap_suite_green',
+          satisfied: false,
+        },
+      ],
     })
-    expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
-  })
-
-  test('resolves the default bootstrap fixture directory from the CLI module location', async () => {
-    const report = await executeBootstrapScenarioCommand({}, {
-      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
-        expect(fixturesDir).toBe(join(import.meta.dir, 'fixtures', 'replay'))
-
-        return {
-          suite: 'self-bootstrap-v0.2',
-          ok: true,
-          cases: [],
-          failedCases: [],
-          summary: {
-            requiredCases: 4,
-            presentCases: 4,
-            passedCases: 4,
-            failedCases: 0,
-          },
-        }
-      },
-    })
-
-    expect(report.ok).toBe(true)
+    expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
   })
 
   test('builds stable wake requests from CLI commands', () => {
