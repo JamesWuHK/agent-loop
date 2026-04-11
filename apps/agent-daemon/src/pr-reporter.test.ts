@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentConfig, PrLineageMetadata } from '@agent/shared'
 import { createOrFindPr, hasReusableOpenPr, isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
+import { buildPrLineageMetadata, renderPrLineageMetadataComment } from './pr-lineage'
 
 const TEST_CONFIG: AgentConfig = {
   machineId: 'codex-dev',
@@ -196,9 +197,11 @@ describe('createOrFindPr', () => {
     expect(hasReusableOpenPr({ prNumber: null, prState: null })).toBe(false)
   })
 
-  test('returns a terminal replacement-needed result for closed PR matches', async () => {
+  test('creates a replacement PR when the latest matching lineage is closed', async () => {
     let pushCalls = 0
     let createCalls = 0
+    let preparedBranch = ''
+    const supersedeComments: Array<{ prNumber: number; body: string }> = []
 
     const result = await createOrFindPr(
       '/tmp/agent-loop-terminal-pr',
@@ -208,35 +211,67 @@ describe('createOrFindPr', () => {
       TEST_CONFIG,
       console,
       {
-        checkPrExists: async () => ({
-          prNumber: 45,
-          prUrl: 'https://example.test/pr/45',
-          prState: 'closed',
+        listBranchPullRequests: async (requestedBranch) => {
+          if (requestedBranch === 'agent/37/codex-dev') {
+            return [{
+              number: 45,
+              prUrl: 'https://example.test/pr/45',
+              prState: 'closed',
+              headRefName: 'agent/37/codex-dev',
+              baseRefName: 'master',
+              body: '<!-- agent-loop:pr-lineage {"version":1,"issue":37,"headBranch":"agent/37/codex-dev","baseBranch":"master","baseSha":"0176283","attempt":1,"fingerprint":"old"} -->',
+            }]
+          }
+
+          return []
+        },
+        resolvePrLineageContext: async () => ({
+          baseBranch: 'master',
+          baseSha: '11fc78e',
         }),
         pushBranch: async () => {
           pushCalls += 1
         },
-        createPr: async () => {
+        prepareReplacementBranch: async (_worktreePath, branch) => {
+          preparedBranch = branch
+        },
+        commentOnPr: async (prNumber, body) => {
+          supersedeComments.push({ prNumber, body })
+        },
+        closePullRequest: async () => {},
+        createPr: async (replacementBranch, _issueNumber, _issueTitle, body) => {
           createCalls += 1
+          expect(replacementBranch).toBe('agent/37-rebuild/codex-dev')
+          expect(body).toContain('"attempt":2')
           return { number: 99, url: 'https://example.test/pr/99' }
         },
       },
     )
 
     expect(result).toEqual({
-      kind: 'terminal',
-      prNumber: 45,
-      prUrl: 'https://example.test/pr/45',
-      prState: 'closed',
-      replacementNeeded: true,
+      kind: 'created',
+      prNumber: 99,
+      prUrl: 'https://example.test/pr/99',
+      branch: 'agent/37-rebuild/codex-dev',
     })
-    expect(pushCalls).toBe(0)
-    expect(createCalls).toBe(0)
+    expect(preparedBranch).toBe('agent/37-rebuild/codex-dev')
+    expect(pushCalls).toBe(1)
+    expect(createCalls).toBe(1)
+    expect(supersedeComments).toHaveLength(1)
+    expect(supersedeComments[0]?.prNumber).toBe(45)
+    expect(supersedeComments[0]?.body).toContain('This PR has been superseded by #99.')
   })
 
   test('keeps the open PR idempotent path intact', async () => {
     let pushCalls = 0
     let createCalls = 0
+    const lineageMetadata = buildPrLineageMetadata({
+      issueNumber: 37,
+      headBranch: 'agent/37/codex-dev',
+      baseBranch: 'master',
+      baseSha: '11fc78e',
+      attempt: 1,
+    })
 
     const result = await createOrFindPr(
       '/tmp/agent-loop-open-pr',
@@ -246,10 +281,17 @@ describe('createOrFindPr', () => {
       TEST_CONFIG,
       console,
       {
-        checkPrExists: async () => ({
-          prNumber: 78,
+        listBranchPullRequests: async () => [{
+          number: 78,
           prUrl: 'https://example.test/pr/78',
           prState: 'open',
+          headRefName: 'agent/37/codex-dev',
+          baseRefName: 'master',
+          body: renderPrLineageMetadataComment(lineageMetadata),
+        }],
+        resolvePrLineageContext: async () => ({
+          baseBranch: 'master',
+          baseSha: '11fc78e',
         }),
         pushBranch: async () => {
           pushCalls += 1
@@ -265,6 +307,7 @@ describe('createOrFindPr', () => {
       kind: 'reused',
       prNumber: 78,
       prUrl: 'https://example.test/pr/78',
+      branch: 'agent/37/codex-dev',
     })
     expect(pushCalls).toBe(1)
     expect(createCalls).toBe(0)
@@ -290,13 +333,12 @@ describe('createOrFindPr', () => {
       TEST_CONFIG,
       console,
       {
-        checkPrExists: async () => ({
-          prNumber: null,
-          prUrl: null,
-          prState: null,
-        }),
+        listBranchPullRequests: async () => [],
         pushBranch: async () => {},
-        resolvePrLineageMetadata: async () => lineageMetadata,
+        resolvePrLineageContext: async () => ({
+          baseBranch: 'master',
+          baseSha: '11fc78e',
+        }),
         createPr: async (_branch, _issueNumber, _issueTitle, body) => {
           capturedBody = body
           return { number: 91, url: 'https://example.test/pr/91' }
@@ -308,12 +350,85 @@ describe('createOrFindPr', () => {
       kind: 'created',
       prNumber: 91,
       prUrl: 'https://example.test/pr/91',
+      branch: 'agent/37/codex-dev',
     })
     expect(capturedBody).toContain('## Summary')
     expect(capturedBody).toContain('Fixes #37')
-    expect(capturedBody).toContain('<!-- agent-loop:pr-lineage {"version":1,"issue":37,"headBranch":"agent/37/codex-dev","baseBranch":"master","baseSha":"11fc78e","attempt":1,"fingerprint":"lineage-fingerprint"} -->')
+    expect(capturedBody).toContain(`<!-- agent-loop:pr-lineage ${JSON.stringify(buildPrLineageMetadata({
+      issueNumber: 37,
+      headBranch: 'agent/37/codex-dev',
+      baseBranch: 'master',
+      baseSha: '11fc78e',
+      attempt: 1,
+    }))} -->`)
     expect(capturedBody).toContain('## Metadata')
     expect(capturedBody).toContain('"generated_by": "agent-loop"')
     expect(capturedBody).toContain('## Test Plan')
+  })
+
+  test('reuses an existing open replacement lineage after switching branches', async () => {
+    const seenBranches: string[] = []
+    const replacementMetadata = buildPrLineageMetadata({
+      issueNumber: 37,
+      headBranch: 'agent/37-rebuild/codex-dev',
+      baseBranch: 'master',
+      baseSha: '11fc78e',
+      attempt: 2,
+    })
+
+    const result = await createOrFindPr(
+      '/tmp/agent-loop-replacement-reuse',
+      'agent/37/codex-dev',
+      37,
+      'reuse replacement lineage',
+      TEST_CONFIG,
+      console,
+      {
+        listBranchPullRequests: async (requestedBranch) => {
+          seenBranches.push(requestedBranch)
+          if (requestedBranch === 'agent/37/codex-dev') {
+            return [{
+              number: 45,
+              prUrl: 'https://example.test/pr/45',
+              prState: 'closed',
+              headRefName: 'agent/37/codex-dev',
+              baseRefName: 'master',
+              body: '<!-- agent-loop:pr-lineage {"version":1,"issue":37,"headBranch":"agent/37/codex-dev","baseBranch":"master","baseSha":"0176283","attempt":1,"fingerprint":"old"} -->',
+            }]
+          }
+
+          return [{
+            number: 91,
+            prUrl: 'https://example.test/pr/91',
+            prState: 'open',
+            headRefName: 'agent/37-rebuild/codex-dev',
+            baseRefName: 'master',
+            body: renderPrLineageMetadataComment(replacementMetadata),
+          }]
+        },
+        resolvePrLineageContext: async () => ({
+          baseBranch: 'master',
+          baseSha: '11fc78e',
+        }),
+        prepareReplacementBranch: async () => {},
+        pushBranch: async () => {},
+        commentOnPr: async () => {},
+        closePullRequest: async () => {},
+        createPr: async () => {
+          throw new Error('createPr should not run when replacement PR already exists')
+        },
+      },
+    )
+
+    expect(result).toEqual({
+      kind: 'reused',
+      prNumber: 91,
+      prUrl: 'https://example.test/pr/91',
+      branch: 'agent/37-rebuild/codex-dev',
+    })
+    expect(seenBranches).toEqual([
+      'agent/37/codex-dev',
+      'agent/37-rebuild/codex-dev',
+    ])
   })
 })

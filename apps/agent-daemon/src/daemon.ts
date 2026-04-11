@@ -3102,6 +3102,8 @@ export class AgentDaemon {
     worktreePath: string,
     branch: string,
   ): Promise<{ status: 'completed' | 'failed' | 'recoverable'; reason?: string }> {
+    let activeBranch = branch
+
     const preflight = await runIssueBranchPreflight(worktreePath, issue.body, this.config, this.logger)
     if (!preflight.valid) {
       const reason = `Issue preflight failed before PR creation: ${preflight.violations.join('; ')}`
@@ -3133,7 +3135,19 @@ export class AgentDaemon {
       }
     }
 
-    const pr = await createOrFindPr(worktreePath, branch, issue.number, issue.title, this.config, this.logger)
+    const pr = await createOrFindPr(worktreePath, activeBranch, issue.number, issue.title, this.config, this.logger)
+    if (pr.branch !== activeBranch) {
+      activeBranch = pr.branch
+      const activeWorktree = this.activeWorktrees.get(issue.number)
+      if (activeWorktree) {
+        this.activeWorktrees.set(issue.number, {
+          ...activeWorktree,
+          branch: activeBranch,
+        })
+        this.syncRuntimeMetrics()
+      }
+    }
+
     if (pr.kind === 'terminal') {
       const reason = `Linked PR #${pr.prNumber} is ${pr.prState}; replacement PR required before automation can continue`
       await transitionIssueState(
@@ -3163,7 +3177,7 @@ export class AgentDaemon {
     const reviewLease = await this.acquireLeaseForScope({
       targetNumber: pr.prNumber,
       scope: 'pr-review',
-      branch,
+      branch: activeBranch,
       worktreeId: this.buildLeaseKey('issue-process', issue.number),
       phase: 'reviewing-pr',
       issueNumber: issue.number,
@@ -3179,7 +3193,7 @@ export class AgentDaemon {
     const reviewOutcome = await this.reviewAndPossiblyAutoFix(
       issue,
       worktreePath,
-      branch,
+      activeBranch,
       pr.prNumber,
       pr.prUrl,
       this.buildManagedLeaseMonitor('pr-review', pr.prNumber, reviewLease.handle),
@@ -3207,7 +3221,7 @@ export class AgentDaemon {
       const mergeLease = await this.acquireLeaseForScope({
         targetNumber: pr.prNumber,
         scope: 'pr-merge',
-        branch,
+        branch: activeBranch,
         worktreeId: this.buildLeaseKey('issue-process', issue.number),
         phase: 'merging-pr',
         issueNumber: issue.number,
@@ -3223,7 +3237,7 @@ export class AgentDaemon {
       const mergeResult = await this.attemptApprovedPrMergeWithRecovery(
         pr.prNumber,
         pr.prUrl,
-        branch,
+        activeBranch,
         worktreePath,
         this.buildManagedLeaseMonitor('pr-merge', pr.prNumber, mergeLease.handle),
       )
@@ -3293,7 +3307,7 @@ export class AgentDaemon {
       recordIssueProcessed('done')
       recordPrCreated()
 
-      await removeWorktree(worktreePath, branch)
+      await removeWorktree(worktreePath, activeBranch)
       this.activeWorktrees.delete(issue.number)
       this.syncRuntimeMetrics()
       return { status: 'completed' }

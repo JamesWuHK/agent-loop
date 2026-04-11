@@ -1337,6 +1337,15 @@ export interface SelectedPullRequestForBranch {
   prState: 'open' | 'merged' | 'closed'
 }
 
+export interface BranchPullRequestRecord {
+  number: number
+  prUrl: string | null
+  prState: 'open' | 'merged' | 'closed'
+  headRefName: string
+  baseRefName: string | null
+  body: string | null
+}
+
 export interface MergePrResult {
   merged: boolean
   message: string
@@ -1357,12 +1366,16 @@ interface RawRestPullRequest {
   number?: number
   title?: string
   html_url?: string
+  body?: string | null
   state?: string
   merged_at?: string | null
   draft?: boolean
   head?: {
     ref?: string
     sha?: string
+  }
+  base?: {
+    ref?: string
   }
   labels?: Array<{ name?: string }>
 }
@@ -1453,6 +1466,23 @@ export function selectActivePullRequestForBranch(
     })
 
   return matchingPullRequests[0] ?? null
+}
+
+function mapRawBranchPullRequestRecord(pr: RawRestPullRequest): BranchPullRequestRecord | null {
+  if (typeof pr.number !== 'number') return null
+  if (typeof pr.head?.ref !== 'string') return null
+
+  const prState = derivePullRequestStateFromRaw(pr.state, pr.merged_at ?? null)
+  if (prState === null) return null
+
+  return {
+    number: pr.number,
+    prUrl: typeof pr.html_url === 'string' ? pr.html_url : null,
+    prState,
+    headRefName: pr.head.ref,
+    baseRefName: typeof pr.base?.ref === 'string' ? pr.base.ref : null,
+    body: typeof pr.body === 'string' ? pr.body : null,
+  }
 }
 
 function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | null {
@@ -1730,6 +1760,27 @@ export async function checkPrExists(
   return checkPrExistsRest(branch, config)
 }
 
+export async function listBranchPullRequests(
+  branch: string,
+  config: AgentConfig,
+): Promise<BranchPullRequestRecord[]> {
+  const [owner] = config.repo.split('/')
+  const endpoint = `repos/${config.repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`
+  const { stdout, exitCode, stderr } = await ghApiRaw([endpoint], config)
+
+  if (exitCode !== 0) {
+    throw new GhError(
+      `api pulls?state=all&head=${branch}`,
+      exitCode,
+      parseGhApiErrorMessage(stdout, stderr),
+    )
+  }
+
+  return extractRestPullRequestListPage(JSON.parse(stdout))
+    .map(mapRawBranchPullRequestRecord)
+    .filter((pullRequest): pullRequest is BranchPullRequestRecord => pullRequest !== null)
+}
+
 export async function listOpenAgentPullRequests(
   config: AgentConfig,
 ): Promise<ManagedPullRequest[]> {
@@ -1820,6 +1871,27 @@ export async function commentOnPr(
 
   if (exitCode !== 0) {
     throw new GhError(`pr comment ${prNumber}`, exitCode, stderr)
+  }
+}
+
+export async function closePullRequest(
+  prNumber: number,
+  config: AgentConfig,
+): Promise<void> {
+  const response = await withTempJsonFile(
+    'agent-loop-pr-close',
+    { state: 'closed' },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/issues/${prNumber}`,
+      '-X',
+      'PATCH',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(`api issues/${prNumber} close`, response.exitCode, parseGhApiErrorMessage(response.stdout, response.stderr))
   }
 }
 

@@ -1,6 +1,11 @@
-import type { AgentConfig, PrCheckResult, PrLineageMetadata } from '@agent/shared'
-import { checkPrExists, createPr } from '@agent/shared'
-import { buildPrLineageMetadata, renderPrLineageMetadataComment } from './pr-lineage'
+import type { AgentConfig, BranchPullRequestRecord, PrCheckResult, PrLineageMetadata } from '@agent/shared'
+import { checkPrExists, closePullRequest, commentOnPr, createPr, listBranchPullRequests } from '@agent/shared'
+import {
+  buildPrLineageMetadata,
+  buildSupersededPrComment,
+  choosePrLifecycleAction,
+  renderPrLineageMetadataComment,
+} from './pr-lineage'
 
 interface GitCommandResult {
   exitCode: number
@@ -29,10 +34,13 @@ interface ManagedBranchPushPlan {
 }
 
 interface CreateOrFindPrDependencies {
-  checkPrExists?: typeof checkPrExists
   createPr?: typeof createPr
   pushBranch?: typeof pushBranch
-  resolvePrLineageMetadata?: typeof resolvePrLineageMetadata
+  resolvePrLineageContext?: typeof resolvePrLineageContext
+  listBranchPullRequests?: typeof listBranchPullRequests
+  commentOnPr?: typeof commentOnPr
+  closePullRequest?: typeof closePullRequest
+  prepareReplacementBranch?: typeof prepareReplacementBranch
 }
 
 export type CreateOrFindPrResult =
@@ -40,6 +48,7 @@ export type CreateOrFindPrResult =
       kind: 'reused' | 'created'
       prNumber: number
       prUrl: string
+      branch: string
     }
   | {
       kind: 'terminal'
@@ -47,6 +56,7 @@ export type CreateOrFindPrResult =
       prUrl: string
       prState: 'closed' | 'merged'
       replacementNeeded: true
+      branch: string
     }
 
 export function hasReusableOpenPr(
@@ -212,12 +222,30 @@ function buildPrBody(
 }
 
 async function resolvePrLineageMetadata(
-  worktreePath: string,
   branch: string,
   issueNumber: number,
+  context: ResolvedPrLineageContext,
+  attempt: number,
+): Promise<PrLineageMetadata> {
+  return buildPrLineageMetadata({
+    issueNumber,
+    headBranch: branch,
+    baseBranch: context.baseBranch,
+    baseSha: context.baseSha,
+    attempt,
+  })
+}
+
+interface ResolvedPrLineageContext {
+  baseBranch: string
+  baseSha: string
+}
+
+async function resolvePrLineageContext(
+  worktreePath: string,
   config: AgentConfig,
   gitRunner: PushBranchDependencies['runGit'] = runGit,
-): Promise<PrLineageMetadata> {
+): Promise<ResolvedPrLineageContext> {
   const fetchBase = await gitRunner(worktreePath, ['fetch', 'origin', config.git.defaultBranch])
   if (fetchBase.exitCode !== 0) {
     throw new Error(fetchBase.stderr || fetchBase.stdout || `Failed to fetch origin/${config.git.defaultBranch}`)
@@ -228,13 +256,53 @@ async function resolvePrLineageMetadata(
     throw new Error(baseSha.stderr || baseSha.stdout || `Failed to resolve origin/${config.git.defaultBranch}`)
   }
 
-  return buildPrLineageMetadata({
-    issueNumber,
-    headBranch: branch,
+  return {
     baseBranch: config.git.defaultBranch,
     baseSha: baseSha.stdout.trim(),
-    attempt: 1,
-  })
+  }
+}
+
+async function prepareReplacementBranch(
+  worktreePath: string,
+  replacementBranch: string,
+  gitRunner: PushBranchDependencies['runGit'] = runGit,
+): Promise<void> {
+  const currentBranch = await gitRunner(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  if (currentBranch.exitCode === 0 && currentBranch.stdout.trim() === replacementBranch) {
+    return
+  }
+
+  const checkout = await gitRunner(worktreePath, ['checkout', '-B', replacementBranch])
+  if (checkout.exitCode !== 0) {
+    throw new Error(checkout.stderr || checkout.stdout || `Failed to switch worktree to ${replacementBranch}`)
+  }
+}
+
+async function markSupersededPullRequest(
+  pullRequest: BranchPullRequestRecord,
+  replacement: {
+    prNumber: number
+    branch: string
+    attempt: number
+  },
+  reason: 'lineage-mismatch' | 'terminal-closed',
+  config: AgentConfig,
+  dependencies: Pick<CreateOrFindPrDependencies, 'commentOnPr' | 'closePullRequest'> = {},
+): Promise<void> {
+  const comment = dependencies.commentOnPr ?? commentOnPr
+  const close = dependencies.closePullRequest ?? closePullRequest
+
+  await comment(pullRequest.number, buildSupersededPrComment({
+    previousPrNumber: pullRequest.number,
+    replacementPrNumber: replacement.prNumber,
+    replacementBranch: replacement.branch,
+    replacementAttempt: replacement.attempt,
+    reason,
+  }), config)
+
+  if (pullRequest.prState === 'open') {
+    await close(pullRequest.number, config)
+  }
 }
 
 /**
@@ -250,52 +318,94 @@ export async function createOrFindPr(
   logger = console,
   dependencies: CreateOrFindPrDependencies = {},
 ): Promise<CreateOrFindPrResult> {
-  const checkExistingPr = dependencies.checkPrExists ?? checkPrExists
   const createPullRequest = dependencies.createPr ?? createPr
   const pushManagedBranch = dependencies.pushBranch ?? pushBranch
-  const resolveMetadata = dependencies.resolvePrLineageMetadata ?? resolvePrLineageMetadata
+  const resolveLineageContext = dependencies.resolvePrLineageContext ?? resolvePrLineageContext
+  const listBranchPrs = dependencies.listBranchPullRequests ?? listBranchPullRequests
+  const switchToReplacementBranch = dependencies.prepareReplacementBranch ?? prepareReplacementBranch
 
-  // Check idempotency: PR might already exist
-  const existing = await checkExistingPr(branch, config)
+  const lineageContext = await resolveLineageContext(worktreePath, config)
+  let currentBranch = branch
+  const supersedeTargets: Array<{
+    pullRequest: BranchPullRequestRecord
+    reason: 'lineage-mismatch' | 'terminal-closed'
+    replacementAttempt: number
+  }> = []
 
-  if (hasReusableOpenPr(existing)) {
-    const url = existing.prUrl ?? ''
-    await pushManagedBranch(worktreePath, branch, logger)
-    logger.log(`[pr] PR already exists: #${existing.prNumber} (${url})`)
-    return { kind: 'reused', prNumber: existing.prNumber, prUrl: url }
-  }
+  for (let guard = 0; guard < 5; guard += 1) {
+    const candidates = await listBranchPrs(currentBranch, config)
+    const lifecycle = choosePrLifecycleAction({
+      issueNumber,
+      headBranch: currentBranch,
+      baseBranch: lineageContext.baseBranch,
+      baseSha: lineageContext.baseSha,
+    }, candidates)
 
-  if (existing.prNumber !== null && existing.prState === 'merged') {
-    const url = existing.prUrl ?? ''
-    logger.warn(`[pr] PR #${existing.prNumber} is merged; replacement PR is required before continuing`)
-    return {
-      kind: 'terminal',
-      prNumber: existing.prNumber,
-      prUrl: url,
-      prState: 'merged',
-      replacementNeeded: true,
+    if (lifecycle.kind === 'terminal-merged') {
+      logger.warn(`[pr] PR #${lifecycle.prNumber} is merged; replacement PR is not created automatically`)
+      return {
+        kind: 'terminal',
+        prNumber: lifecycle.prNumber,
+        prUrl: lifecycle.prUrl,
+        prState: 'merged',
+        replacementNeeded: true,
+        branch: currentBranch,
+      }
     }
-  }
 
-  if (existing.prNumber !== null && existing.prState === 'closed') {
-    logger.warn(`[pr] PR #${existing.prNumber} is closed; replacement PR is required before continuing`)
-    const url = existing.prUrl ?? ''
-    return {
-      kind: 'terminal',
-      prNumber: existing.prNumber,
-      prUrl: url,
-      prState: 'closed',
-      replacementNeeded: true,
+    if (lifecycle.kind === 'reuse-open-lineage') {
+      await pushManagedBranch(worktreePath, currentBranch, logger)
+      for (const target of supersedeTargets) {
+        await markSupersededPullRequest(target.pullRequest, {
+          prNumber: lifecycle.prNumber,
+          branch: currentBranch,
+          attempt: target.replacementAttempt,
+        }, target.reason, config, dependencies)
+      }
+      logger.log(`[pr] PR already exists: #${lifecycle.prNumber} (${lifecycle.prUrl})`)
+      return { kind: 'reused', prNumber: lifecycle.prNumber, prUrl: lifecycle.prUrl, branch: currentBranch }
     }
+
+    if (lifecycle.kind === 'create-new-pr') {
+      await pushManagedBranch(worktreePath, currentBranch, logger)
+      const lineageMetadata = await resolvePrLineageMetadata(
+        currentBranch,
+        issueNumber,
+        lineageContext,
+        lifecycle.attempt,
+      )
+      const body = buildPrBody(issueNumber, config.machineId, lineageMetadata)
+      const pr = await createPullRequest(currentBranch, issueNumber, issueTitle, body, config)
+
+      for (const target of supersedeTargets) {
+        await markSupersededPullRequest(target.pullRequest, {
+          prNumber: pr.number,
+          branch: currentBranch,
+          attempt: target.replacementAttempt,
+        }, target.reason, config, dependencies)
+      }
+
+      logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)
+      return { kind: 'created', prNumber: pr.number, prUrl: pr.url, branch: currentBranch }
+    }
+
+    const supersededPullRequest = candidates.find((candidate) => candidate.number === lifecycle.supersedesPrNumber)
+    if (!supersededPullRequest) {
+      throw new Error(`Replacement target PR #${lifecycle.supersedesPrNumber} was not found for ${currentBranch}`)
+    }
+
+    supersedeTargets.push({
+      pullRequest: supersededPullRequest,
+      reason: lifecycle.reason,
+      replacementAttempt: lifecycle.replacementAttempt,
+    })
+
+    logger.warn(
+      `[pr] ${currentBranch} requires replacement after ${lifecycle.reason} on PR #${lifecycle.supersedesPrNumber}; switching to ${lifecycle.replacementBranch}`,
+    )
+    await switchToReplacementBranch(worktreePath, lifecycle.replacementBranch)
+    currentBranch = lifecycle.replacementBranch
   }
 
-  // Push branch first if not pushed yet
-  await pushManagedBranch(worktreePath, branch, logger)
-
-  const lineageMetadata = await resolveMetadata(worktreePath, branch, issueNumber, config)
-  const body = buildPrBody(issueNumber, config.machineId, lineageMetadata)
-  const pr = await createPullRequest(branch, issueNumber, issueTitle, body, config)
-
-  logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)
-  return { kind: 'created', prNumber: pr.number, prUrl: pr.url }
+  throw new Error(`Failed to resolve an active PR lineage for issue #${issueNumber}`)
 }
