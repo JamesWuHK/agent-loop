@@ -2136,7 +2136,7 @@ describe('daemon merge recovery helpers', () => {
       })
     })
 
-    test('skips merge calls when checks fail and keeps the linked issue recoverable', async () => {
+    test('skips merge calls when checks fail and keeps the linked issue on the terminal path', async () => {
       const daemon = createTestDaemon()
       const comments: string[] = []
       const reviewStates: string[] = []
@@ -2174,7 +2174,7 @@ describe('daemon merge recovery helpers', () => {
         checksBlocked: true,
       })
       expect(classifyLinkedIssueApprovedMergeOutcome(mergeResult)).toEqual({
-        status: 'recoverable',
+        status: 'failed',
         reason: 'PR checks failed: build-and-test is fail',
       })
     })

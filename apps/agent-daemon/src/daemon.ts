@@ -5137,7 +5137,7 @@ export function classifyLinkedIssueApprovedMergeOutcome(
 ): { status: 'failed' | 'recoverable'; reason: string } {
   if (mergeResult.checksBlocked) {
     return {
-      status: 'recoverable',
+      status: 'failed',
       reason: mergeResult.message,
     }
   }
