@@ -49,6 +49,7 @@ export interface DashboardSummary {
   upgradePendingMachineCount: number
   upgradeReadyMachineCount: number
   upgradeBlockedMachineCount: number
+  upgradeManualMachineCount: number
   upgradeErrorMachineCount: number
 }
 
@@ -124,10 +125,12 @@ export interface DashboardPresenceView {
   agentLoopVersion: string
   agentLoopRevision: string | null
   upgradeStatus: AgentLoopUpgradeStatusKind
+  upgradeAutoApplyEnabled: boolean
   safeToUpgradeNow: boolean
   latestVersion: string | null
   latestRevision: string | null
   upgradeCheckedAt: string | null
+  upgradeMessage: string | null
   source: 'github'
 }
 
@@ -377,6 +380,7 @@ export function buildDashboardSummary(
   let upgradePendingMachineCount = 0
   let upgradeReadyMachineCount = 0
   let upgradeBlockedMachineCount = 0
+  let upgradeManualMachineCount = 0
   let upgradeErrorMachineCount = 0
 
   for (const machine of machines) {
@@ -389,7 +393,9 @@ export function buildDashboardSummary(
       managedPresenceCount += 1
       if (machine.presence.upgradeStatus === 'upgrade-available') {
         upgradePendingMachineCount += 1
-        if (machine.presence.safeToUpgradeNow) {
+        if (!machine.presence.upgradeAutoApplyEnabled) {
+          upgradeManualMachineCount += 1
+        } else if (machine.presence.safeToUpgradeNow) {
           upgradeReadyMachineCount += 1
         } else {
           upgradeBlockedMachineCount += 1
@@ -413,6 +419,7 @@ export function buildDashboardSummary(
     upgradePendingMachineCount,
     upgradeReadyMachineCount,
     upgradeBlockedMachineCount,
+    upgradeManualMachineCount,
     upgradeErrorMachineCount,
   }
 }
@@ -879,14 +886,16 @@ function buildPresenceUpgradeWarnings(machine: DashboardMachineCard): string[] {
   const presence = machine.presence
   if (presence.upgradeStatus === 'upgrade-available') {
     return [
-      presence.safeToUpgradeNow
-        ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
-        : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
+      !presence.upgradeAutoApplyEnabled
+        ? `agent-loop upgrade available on ${presence.machineId}, but auto-apply is disabled on this machine; manual restart is required`
+        : presence.safeToUpgradeNow
+          ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
+          : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
     ]
   }
   if (presence.upgradeStatus === 'error') {
     return [
-      `agent-loop upgrade check is failing on ${presence.machineId}; inspect this daemon before relying on auto-upgrade`,
+      `agent-loop upgrade check is failing on ${presence.machineId}${presence.upgradeMessage ? `: ${presence.upgradeMessage}` : ''}; inspect this daemon before relying on auto-upgrade`,
     ]
   }
   if (presence.upgradeStatus === 'ahead-of-channel') {
@@ -1032,10 +1041,12 @@ function buildDashboardPresenceView(comment: ManagedDaemonPresenceComment): Dash
     agentLoopVersion: comment.presence.agentLoopVersion,
     agentLoopRevision: comment.presence.agentLoopRevision,
     upgradeStatus: comment.presence.upgradeStatus,
+    upgradeAutoApplyEnabled: comment.presence.upgradeAutoApplyEnabled !== false,
     safeToUpgradeNow: comment.presence.safeToUpgradeNow,
     latestVersion: comment.presence.latestVersion,
     latestRevision: comment.presence.latestRevision,
     upgradeCheckedAt: comment.presence.upgradeCheckedAt,
+    upgradeMessage: comment.presence.upgradeMessage ?? null,
     source: 'github',
   }
 }
@@ -1705,6 +1716,7 @@ function renderSummary(snapshot) {
     { label: '待升级机器', value: snapshot.summary.upgradePendingMachineCount, tone: snapshot.summary.upgradePendingMachineCount > 0 ? 'gold' : '' },
     { label: '可立刻升级', value: snapshot.summary.upgradeReadyMachineCount, tone: snapshot.summary.upgradeReadyMachineCount > 0 ? 'accent' : '' },
     { label: '升级被阻塞', value: snapshot.summary.upgradeBlockedMachineCount, tone: snapshot.summary.upgradeBlockedMachineCount > 0 ? 'gold' : '' },
+    { label: '手动升级机器', value: snapshot.summary.upgradeManualMachineCount, tone: snapshot.summary.upgradeManualMachineCount > 0 ? 'gold' : '' },
     { label: '升级检查错误', value: snapshot.summary.upgradeErrorMachineCount, tone: snapshot.summary.upgradeErrorMachineCount > 0 ? 'error' : '' },
     { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
     { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
@@ -1906,7 +1918,9 @@ function renderPresenceItem(presence) {
     presence.expiresInSeconds === null ? null : 'TTL ' + presence.expiresInSeconds + ' 秒',
   ].filter(Boolean).join(' | ');
   const upgradeHint = presence.upgradeStatus === 'upgrade-available'
-    ? (presence.safeToUpgradeNow ? '可安全升级' : '待空闲后升级')
+    ? (!presence.upgradeAutoApplyEnabled
+      ? '自动升级已关闭'
+      : (presence.safeToUpgradeNow ? '可安全升级' : '待空闲后升级'))
     : null;
 
   return [
@@ -1917,12 +1931,14 @@ function renderPresenceItem(presence) {
     renderChip(shortDaemonId(presence.daemonInstanceId), ''),
     renderChip('v' + presence.agentLoopVersion, ''),
     renderChip(presence.upgradeStatus, presence.upgradeStatus === 'upgrade-available' ? 'danger' : ''),
+    renderChip(presence.upgradeAutoApplyEnabled ? '自动升级开' : '自动升级关', presence.upgradeAutoApplyEnabled ? 'accent' : 'gold'),
     renderChip('工作树 ' + presence.activeWorktreeCount, ''),
     renderChip('租约 ' + presence.activeLeaseCount, ''),
     '</div>',
     '<div class="muted" style="margin-top:8px">启动于 ' + escapeHtml(formatTimestamp(presence.startedAt)) + '</div>',
     '<div class="muted" style="margin-top:6px">revision ' + escapeHtml(shortDaemonId(presence.agentLoopRevision || 'unknown')) + (presence.latestVersion ? ' | latest v' + escapeHtml(String(presence.latestVersion)) : '') + '</div>',
     upgradeHint ? '<div class="muted" style="margin-top:6px">' + escapeHtml(upgradeHint) + '</div>' : '',
+    presence.upgradeMessage ? '<div class="muted" style="margin-top:6px">' + escapeHtml(presence.upgradeMessage) + '</div>' : '',
     timing ? '<div class="muted" style="margin-top:6px">' + escapeHtml(timing) + '</div>' : '',
     '</div>',
   ].join('');

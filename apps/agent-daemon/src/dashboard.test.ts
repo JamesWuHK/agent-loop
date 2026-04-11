@@ -95,10 +95,12 @@ function buildPresence(overrides: Partial<DashboardPresenceView> = {}): Dashboar
     agentLoopVersion: '0.1.0',
     agentLoopRevision: 'abcdef1234567890',
     upgradeStatus: 'up-to-date',
+    upgradeAutoApplyEnabled: true,
     safeToUpgradeNow: true,
     latestVersion: '0.1.0',
     latestRevision: 'abcdef1234567890',
     upgradeCheckedAt: '2026-04-05T09:10:00.000Z',
+    upgradeMessage: 'local and latest versions match',
     source: 'github',
     ...overrides,
   }
@@ -258,6 +260,7 @@ describe('dashboard machine aggregation', () => {
       upgradePendingMachineCount: 0,
       upgradeReadyMachineCount: 0,
       upgradeBlockedMachineCount: 0,
+      upgradeManualMachineCount: 0,
       upgradeErrorMachineCount: 0,
     })
   })
@@ -304,27 +307,38 @@ describe('dashboard machine aggregation', () => {
           latestVersion: '0.1.2',
         }),
         buildPresence({
+          machineId: 'machine-manual',
+          daemonInstanceId: 'daemon-manual',
+          upgradeStatus: 'upgrade-available',
+          upgradeAutoApplyEnabled: false,
+          safeToUpgradeNow: true,
+          latestVersion: '0.1.2',
+          upgradeMessage: 'auto-apply disabled on this machine',
+        }),
+        buildPresence({
           machineId: 'machine-error',
           daemonInstanceId: 'daemon-error',
           upgradeStatus: 'error',
           safeToUpgradeNow: false,
           latestVersion: null,
+          upgradeMessage: 'agent-loop upgrade repo could not be resolved',
         }),
       ],
     )
 
     expect(buildDashboardSummary(machines, [], [])).toEqual({
-      machineCount: 4,
+      machineCount: 5,
       localRuntimeCount: 1,
-      managedPresenceCount: 3,
+      managedPresenceCount: 4,
       activeLeaseCount: 1,
       readyIssueCount: 0,
       workingIssueCount: 0,
       failedIssueCount: 0,
       openPrCount: 0,
-      upgradePendingMachineCount: 2,
+      upgradePendingMachineCount: 3,
       upgradeReadyMachineCount: 1,
       upgradeBlockedMachineCount: 1,
+      upgradeManualMachineCount: 1,
       upgradeErrorMachineCount: 1,
     })
 
@@ -334,8 +348,11 @@ describe('dashboard machine aggregation', () => {
     expect(machines.find((machine) => machine.machineId === 'machine-busy')?.warnings).toContain(
       'agent-loop upgrade available on machine-busy; wait for the machine to go idle before restarting',
     )
+    expect(machines.find((machine) => machine.machineId === 'machine-manual')?.warnings).toContain(
+      'agent-loop upgrade available on machine-manual, but auto-apply is disabled on this machine; manual restart is required',
+    )
     expect(machines.find((machine) => machine.machineId === 'machine-error')?.warnings).toContain(
-      'agent-loop upgrade check is failing on machine-error; inspect this daemon before relying on auto-upgrade',
+      'agent-loop upgrade check is failing on machine-error: agent-loop upgrade repo could not be resolved; inspect this daemon before relying on auto-upgrade',
     )
   })
 })
@@ -357,6 +374,7 @@ describe('dashboard localization', () => {
     expect(script).toContain('机器数')
     expect(script).toContain('待升级机器')
     expect(script).toContain('可立刻升级')
+    expect(script).toContain('手动升级机器')
     expect(script).toContain('本地运行时')
     expect(script).toContain('可认领')
     expect(script).toContain('阻塞原因')
