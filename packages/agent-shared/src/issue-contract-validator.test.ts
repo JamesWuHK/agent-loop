@@ -95,4 +95,43 @@ describe('validateIssueContract', () => {
       ],
     })
   })
+
+  it('keeps generic test guidance as a hard validation error until a runnable command exists', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为用户，我希望 lint 能稳定识别不可执行的 Validation 描述。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-quality.ts',
+      '### RequiredSemantics',
+      '- warning 不能改变 ready gate',
+      '### Validation',
+      '- run tests before merge',
+      '- verify manually',
+      '',
+      '## RED 测试',
+      '```ts',
+      'expect(true).toBe(false)',
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 保持 validation 语义稳定',
+      '',
+      '## 验收',
+      '- 不可执行描述仍会阻塞',
+    ].join('\n'))
+
+    expect(validateIssueContract(contract)).toEqual({
+      valid: false,
+      errors: [
+        'missing executable validation command in ### Validation',
+        'missing executable test/build/check command in ### Validation',
+      ],
+    })
+  })
 })

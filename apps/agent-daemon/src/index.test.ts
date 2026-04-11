@@ -7,10 +7,13 @@ import {
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeIssueLintCommand,
   executeWakeCommand,
   executeWakeRequest,
+  formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
+  resolveIssueLintTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -36,6 +39,166 @@ describe('index helpers', () => {
       '--health-port', '9311',
       '--metrics-port', '9091',
     ])
+  })
+
+  test('resolves lint targets and rejects conflicting lint selectors', () => {
+    expect(resolveIssueLintTarget({
+      'lint-file': 'docs/issues/ready.md',
+    })).toEqual({
+      kind: 'file',
+      path: 'docs/issues/ready.md',
+    })
+
+    expect(resolveIssueLintTarget({
+      'lint-issue': '36',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 36,
+    })
+
+    expect(() => resolveIssueLintTarget({
+      'lint-issue': '36',
+      'lint-file': 'docs/issues/ready.md',
+    })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
+  })
+
+  test('executes local issue lint without loading remote config', async () => {
+    const report = await executeIssueLintCommand({
+      target: {
+        kind: 'file',
+        path: 'docs/issues/ready.md',
+      },
+    }, {
+      loadConfig: () => {
+        throw new Error('should not load remote config for local lint')
+      },
+      buildIssueLintReportFromMarkdownFile: (path) => ({
+        source: {
+          kind: 'file',
+          path,
+        },
+        valid: true,
+        score: 100,
+        errors: [],
+        warnings: [],
+        readyGateBlocked: false,
+        readyGateStatus: 'pass',
+        readyGateSummary: 'ready gate would pass current hard validation checks',
+        contract: {
+          allowedFiles: ['docs/issues/ready.md'],
+        },
+      }),
+      buildIssueLintReportFromRemoteIssue: async () => {
+        throw new Error('should not fetch remote issue for local lint')
+      },
+    })
+
+    expect(report).toMatchObject({
+      source: {
+        kind: 'file',
+        path: 'docs/issues/ready.md',
+      },
+      valid: true,
+      readyGateBlocked: false,
+    })
+  })
+
+  test('executes remote issue lint with repo-aware config and supports json output', async () => {
+    const report = await executeIssueLintCommand({
+      target: {
+        kind: 'issue',
+        issueNumber: 36,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      buildIssueLintReportFromMarkdownFile: () => {
+        throw new Error('should not read a local file for remote lint')
+      },
+      buildIssueLintReportFromRemoteIssue: async ({ issueNumber, config }) => {
+        expect(issueNumber).toBe(36)
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          source: {
+            kind: 'issue',
+            issueNumber,
+            repo: config.repo,
+          },
+          valid: false,
+          score: 70,
+          errors: ['missing ## RED 测试 / RED Tests'],
+          warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+          readyGateBlocked: true,
+          readyGateStatus: 'blocked',
+          readyGateSummary: 'ready gate would still block on hard validation errors',
+          contract: {
+            allowedFiles: ['frontend files'],
+          },
+        }
+      },
+    })
+
+    expect(report.readyGateBlocked).toBe(true)
+    expect(JSON.parse(formatIssueLintOutput(report, true))).toMatchObject({
+      valid: false,
+      readyGateBlocked: true,
+      source: {
+        kind: 'issue',
+        issueNumber: 36,
+        repo: 'JamesWuHK/agent-loop',
+      },
+    })
   })
 
   test('resolves wake commands and validates targeted wake numbers', () => {
@@ -67,6 +230,112 @@ describe('index helpers', () => {
       'wake-now': true,
       'wake-pr': '381',
     })).toThrow('Only one of --wake-now, --wake-issue, or --wake-pr can be used at a time')
+  })
+
+  test('resolves issue lint targets for local files and remote issues', () => {
+    expect(resolveIssueLintTarget({
+      'lint-file': 'docs/issues/ready-gate.md',
+    })).toEqual({
+      kind: 'file',
+      path: 'docs/issues/ready-gate.md',
+    })
+
+    expect(resolveIssueLintTarget({
+      'lint-issue': '36',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 36,
+    })
+
+    expect(() => resolveIssueLintTarget({
+      'lint-file': 'docs/issues/ready-gate.md',
+      'lint-issue': '36',
+    })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
+  })
+
+  test('builds lint reports from local markdown files', async () => {
+    const report = await executeIssueLintCommand({
+      target: {
+        kind: 'file',
+        path: '/tmp/issue-36.md',
+      },
+    }, {
+      loadConfig: () => {
+        throw new Error('remote config should not be loaded for local lint')
+      },
+      buildIssueLintReportFromMarkdownFile: (path) => ({
+        source: {
+          kind: 'file',
+          path,
+        },
+        valid: true,
+        score: 90,
+        errors: [],
+        warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+        readyGateBlocked: false,
+        readyGateStatus: 'pass',
+        readyGateSummary: 'ready gate would pass current hard validation checks',
+        contract: {
+          allowedFiles: ['frontend files'],
+        },
+      } as any),
+      buildIssueLintReportFromRemoteIssue: async () => {
+        throw new Error('remote issue loader should not run for local lint')
+      },
+    })
+
+    expect(report.readyGateBlocked).toBe(false)
+    expect(formatIssueLintOutput(report, true)).toContain('"warnings"')
+    expect(formatIssueLintOutput(report)).toContain('readyGate=pass')
+  })
+
+  test('builds lint reports from remote issue bodies and preserves hard errors', async () => {
+    const report = await executeIssueLintCommand({
+      target: {
+        kind: 'issue',
+        issueNumber: 36,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      loadConfig: (args = {}) => ({
+        repo: args.repo!,
+        pat: args.pat!,
+        concurrency: 1,
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        machineId: 'codex-dev',
+      } as any),
+      buildIssueLintReportFromMarkdownFile: () => {
+        throw new Error('local file loader should not run for remote lint')
+      },
+      buildIssueLintReportFromRemoteIssue: async ({ issueNumber, config }) => ({
+        source: {
+          kind: 'issue',
+          repo: config.repo,
+          issueNumber,
+        },
+        valid: false,
+        score: 75,
+        errors: ['missing ## RED 测试 / RED Tests'],
+        warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+        readyGateBlocked: true,
+        readyGateStatus: 'blocked',
+        readyGateSummary: 'ready gate would still block on hard validation errors',
+        contract: {
+          allowedFiles: ['frontend files'],
+          validation: ['git diff --stat origin/main...HEAD'],
+        },
+      } as any),
+    })
+
+    expect(report.source).toEqual({
+      kind: 'issue',
+      repo: 'JamesWuHK/agent-loop',
+      issueNumber: 36,
+    })
+    expect(report.readyGateBlocked).toBe(true)
+    expect(report.errors).toEqual(['missing ## RED 测试 / RED Tests'])
   })
 
   test('builds stable wake requests from CLI commands', () => {
