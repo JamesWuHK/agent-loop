@@ -11,6 +11,7 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
@@ -218,6 +219,7 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
 const DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES: BootstrapScenarioCommandDependencies = {
   evaluateBootstrapScenarioFixtureDirectory,
 }
+const DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR = join(import.meta.dir, 'fixtures', 'replay')
 
 async function main() {
   const { values: args } = parseArgs({
@@ -989,7 +991,7 @@ export async function executeBootstrapScenarioCommand(
   deps: BootstrapScenarioCommandDependencies = DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES,
 ): Promise<BootstrapScenarioSuiteReport> {
   return deps.evaluateBootstrapScenarioFixtureDirectory(
-    input.fixturesDir ?? 'apps/agent-daemon/src/fixtures/replay',
+    input.fixturesDir ?? DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR,
   )
 }
 

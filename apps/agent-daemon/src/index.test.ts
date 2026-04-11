@@ -391,6 +391,29 @@ describe('index helpers', () => {
     expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
   })
 
+  test('resolves the default bootstrap fixture directory from the CLI module location', async () => {
+    const report = await executeBootstrapScenarioCommand({}, {
+      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
+        expect(fixturesDir).toBe(join(import.meta.dir, 'fixtures', 'replay'))
+
+        return {
+          suite: 'self-bootstrap-v0.2',
+          ok: true,
+          cases: [],
+          failedCases: [],
+          summary: {
+            requiredCases: 4,
+            presentCases: 4,
+            passedCases: 4,
+            failedCases: 0,
+          },
+        }
+      },
+    })
+
+    expect(report.ok).toBe(true)
+  })
+
   test('builds stable wake requests from CLI commands', () => {
     expect(buildWakeRequestFromCli(
       { kind: 'issue', issueNumber: 374 },
