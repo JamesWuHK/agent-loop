@@ -1,4 +1,4 @@
-import type { AgentConfig } from '@agent/shared'
+import type { AgentConfig, PrCheckResult } from '@agent/shared'
 import { checkPrExists, createPr } from '@agent/shared'
 
 interface GitCommandResult {
@@ -25,6 +25,32 @@ const MAX_PUSH_ATTEMPTS = 3
 interface ManagedBranchPushPlan {
   pushArgs: string[] | null
   detachedHead: boolean
+}
+
+interface CreateOrFindPrDependencies {
+  checkPrExists?: typeof checkPrExists
+  createPr?: typeof createPr
+  pushBranch?: typeof pushBranch
+}
+
+export type CreateOrFindPrResult =
+  | {
+      kind: 'reused' | 'created'
+      prNumber: number
+      prUrl: string
+    }
+  | {
+      kind: 'terminal'
+      prNumber: number
+      prUrl: string
+      prState: 'closed' | 'merged'
+      replacementNeeded: true
+    }
+
+export function hasReusableOpenPr(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState'>,
+): prCheck is Pick<PrCheckResult, 'prState'> & { prNumber: number; prState: 'open' } {
+  return prCheck.prNumber !== null && prCheck.prState === 'open'
 }
 
 export async function pushBranch(
@@ -181,35 +207,52 @@ export async function createOrFindPr(
   issueTitle: string,
   config: AgentConfig,
   logger = console,
-): Promise<{ prNumber: number; prUrl: string }> {
-  // Check idempotency: PR might already exist
-  const existing = await checkPrExists(branch, config)
+  dependencies: CreateOrFindPrDependencies = {},
+): Promise<CreateOrFindPrResult> {
+  const checkExistingPr = dependencies.checkPrExists ?? checkPrExists
+  const createPullRequest = dependencies.createPr ?? createPr
+  const pushManagedBranch = dependencies.pushBranch ?? pushBranch
 
-  if (existing.prNumber !== null && existing.prState === 'open') {
+  // Check idempotency: PR might already exist
+  const existing = await checkExistingPr(branch, config)
+
+  if (hasReusableOpenPr(existing)) {
     const url = existing.prUrl ?? ''
-    await pushBranch(worktreePath, branch, logger)
+    await pushManagedBranch(worktreePath, branch, logger)
     logger.log(`[pr] PR already exists: #${existing.prNumber} (${url})`)
-    return { prNumber: existing.prNumber, prUrl: url }
+    return { kind: 'reused', prNumber: existing.prNumber, prUrl: url }
   }
 
   if (existing.prNumber !== null && existing.prState === 'merged') {
     const url = existing.prUrl ?? ''
-    logger.log(`[pr] PR already merged: #${existing.prNumber}`)
-    return { prNumber: existing.prNumber, prUrl: url }
+    logger.warn(`[pr] PR #${existing.prNumber} is merged; replacement PR is required before continuing`)
+    return {
+      kind: 'terminal',
+      prNumber: existing.prNumber,
+      prUrl: url,
+      prState: 'merged',
+      replacementNeeded: true,
+    }
   }
 
   if (existing.prNumber !== null && existing.prState === 'closed') {
-    logger.warn(`[pr] PR was closed, not creating new PR`)
+    logger.warn(`[pr] PR #${existing.prNumber} is closed; replacement PR is required before continuing`)
     const url = existing.prUrl ?? ''
-    return { prNumber: existing.prNumber, prUrl: url }
+    return {
+      kind: 'terminal',
+      prNumber: existing.prNumber,
+      prUrl: url,
+      prState: 'closed',
+      replacementNeeded: true,
+    }
   }
 
   // Push branch first if not pushed yet
-  await pushBranch(worktreePath, branch, logger)
+  await pushManagedBranch(worktreePath, branch, logger)
 
   const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
-  const pr = await createPr(branch, issueNumber, issueTitle, body, config)
+  const pr = await createPullRequest(branch, issueNumber, issueTitle, body, config)
 
   logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)
-  return { prNumber: pr.number, prUrl: pr.url }
+  return { kind: 'created', prNumber: pr.number, prUrl: pr.url }
 }

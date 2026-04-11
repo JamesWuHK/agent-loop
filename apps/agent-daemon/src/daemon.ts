@@ -25,7 +25,7 @@ import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveMa
 import { claimSpecificIssue, pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
-import { createOrFindPr, pushBranch } from './pr-reporter'
+import { createOrFindPr, hasReusableOpenPr, pushBranch } from './pr-reporter'
 import { createDetachedPrWorktree, extractIssueNumberFromPrTitle, reviewPr, buildPrReviewComment, buildReviewFeedback, extractAutomatedReviewReasons, canResumeHumanNeededPrReview, getNextAutomatedPrReviewAttempt, getReusableAutomatedPrReviewFeedback, shouldRestartAutomatedPrReviewOnIssueUpdate, shouldRestartAutomatedPrReviewOnNewHead, classifyPrReviewOutcome, hydrateDetachedReviewWorktree, type PrReviewResult } from './pr-reviewer'
 import { acquireManagedLease, type ManagedLeaseHandle } from './lease'
 import type { TaskExecutionMonitor } from './cli-agent'
@@ -2663,9 +2663,14 @@ export class AgentDaemon {
       })
 
       const prCheck = await checkPrExists(branch, this.config)
-      const linkedOpenPr = prCheck.prNumber !== null && prCheck.prState === 'open'
+      const linkedOpenPr = hasReusableOpenPr(prCheck)
         ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === prCheck.prNumber) ?? null
         : null
+      if (prCheck.prNumber !== null && prCheck.prState !== 'open') {
+        this.logger.warn(
+          `[daemon] skipping terminal linked PR #${prCheck.prNumber} (${prCheck.prState}) during issue #${issueNumber} recovery`,
+        )
+      }
       if (linkedOpenPr && shouldResetLinkedPrToRetryOnIssueResume(linkedOpenPr.labels)) {
         await setManagedPrReviewLabels(linkedOpenPr.number, 'retry', this.config)
         this.logger.log(
@@ -2674,8 +2679,8 @@ export class AgentDaemon {
       }
       const recentBlockingReasons = [
         ...extractAutomatedIssuePreflightReasons(await listIssueComments(issueNumber, this.config)),
-        ...(prCheck.prNumber !== null
-          ? extractAutomatedReviewReasons(await listIssueComments(prCheck.prNumber, this.config))
+        ...(linkedOpenPr
+          ? extractAutomatedReviewReasons(await listIssueComments(linkedOpenPr.number, this.config))
           : []),
       ]
       const recoveryResult = await runIssueRecovery(
@@ -2685,8 +2690,8 @@ export class AgentDaemon {
         issue.body,
         this.config,
         this.logger,
-        prCheck.prNumber !== null && prCheck.prUrl
-          ? { number: prCheck.prNumber, url: prCheck.prUrl, branch }
+        linkedOpenPr
+          ? { number: linkedOpenPr.number, url: linkedOpenPr.url, branch }
           : null,
         recentBlockingReasons,
         monitor,
@@ -3129,6 +3134,32 @@ export class AgentDaemon {
     }
 
     const pr = await createOrFindPr(worktreePath, branch, issue.number, issue.title, this.config, this.logger)
+    if (pr.kind === 'terminal') {
+      const reason = `Linked PR #${pr.prNumber} is ${pr.prState}; replacement PR required before automation can continue`
+      await transitionIssueState(
+        issue.number,
+        ISSUE_LABELS.FAILED,
+        ISSUE_LABELS.WORKING,
+        {
+          event: 'failed',
+          machine: this.config.machineId,
+          ts: new Date().toISOString(),
+          prNumber: pr.prNumber,
+          reason,
+        },
+        this.config,
+      )
+
+      this.logger.warn(`[daemon] issue #${issue.number} stopped on terminal PR #${pr.prNumber} (${pr.prState})`)
+      recordIssueProcessed('failed')
+      this.activeWorktrees.delete(issue.number)
+      this.syncRuntimeMetrics()
+      return {
+        status: 'failed',
+        reason,
+      }
+    }
+
     const reviewLease = await this.acquireLeaseForScope({
       targetNumber: pr.prNumber,
       scope: 'pr-review',

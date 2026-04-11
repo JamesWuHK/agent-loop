@@ -2,7 +2,52 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
+import type { AgentConfig } from '@agent/shared'
+import { createOrFindPr, hasReusableOpenPr, isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
+
+const TEST_CONFIG: AgentConfig = {
+  machineId: 'codex-dev',
+  repo: 'JamesWuHK/agent-loop',
+  pat: 'test-token',
+  pollIntervalMs: 60_000,
+  idlePollIntervalMs: 300_000,
+  concurrency: 1,
+  requestedConcurrency: 1,
+  concurrencyPolicy: {
+    requested: 1,
+    effective: 1,
+    repoCap: null,
+    profileCap: null,
+    projectCap: null,
+  },
+  scheduling: {
+    concurrencyByRepo: {},
+    concurrencyByProfile: {},
+  },
+  recovery: {
+    heartbeatIntervalMs: 30_000,
+    leaseTtlMs: 60_000,
+    workerIdleTimeoutMs: 300_000,
+    leaseAdoptionBackoffMs: 5_000,
+    leaseNoProgressTimeoutMs: 360_000,
+  },
+  worktreesBase: '/tmp/worktrees',
+  project: {
+    profile: 'desktop-vite',
+  },
+  agent: {
+    primary: 'codex',
+    fallback: 'claude',
+    claudePath: 'claude',
+    codexPath: 'codex',
+    timeoutMs: 60_000,
+  },
+  git: {
+    defaultBranch: 'master',
+    authorName: 'agent-loop',
+    authorEmail: 'agent-loop@local',
+  },
+}
 
 async function runGit(
   worktreePath: string,
@@ -140,5 +185,88 @@ describe('pr reporter push recovery', () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('createOrFindPr', () => {
+  test('treats only open PR checks as reusable', () => {
+    expect(hasReusableOpenPr({ prNumber: 81, prState: 'open' })).toBe(true)
+    expect(hasReusableOpenPr({ prNumber: 81, prState: 'closed' })).toBe(false)
+    expect(hasReusableOpenPr({ prNumber: 81, prState: 'merged' })).toBe(false)
+    expect(hasReusableOpenPr({ prNumber: null, prState: null })).toBe(false)
+  })
+
+  test('returns a terminal replacement-needed result for closed PR matches', async () => {
+    let pushCalls = 0
+    let createCalls = 0
+
+    const result = await createOrFindPr(
+      '/tmp/agent-loop-terminal-pr',
+      'agent/37/codex-dev',
+      37,
+      'repair terminal PR reuse',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => ({
+          prNumber: 45,
+          prUrl: 'https://example.test/pr/45',
+          prState: 'closed',
+        }),
+        pushBranch: async () => {
+          pushCalls += 1
+        },
+        createPr: async () => {
+          createCalls += 1
+          return { number: 99, url: 'https://example.test/pr/99' }
+        },
+      },
+    )
+
+    expect(result).toEqual({
+      kind: 'terminal',
+      prNumber: 45,
+      prUrl: 'https://example.test/pr/45',
+      prState: 'closed',
+      replacementNeeded: true,
+    })
+    expect(pushCalls).toBe(0)
+    expect(createCalls).toBe(0)
+  })
+
+  test('keeps the open PR idempotent path intact', async () => {
+    let pushCalls = 0
+    let createCalls = 0
+
+    const result = await createOrFindPr(
+      '/tmp/agent-loop-open-pr',
+      'agent/37/codex-dev',
+      37,
+      'repair terminal PR reuse',
+      TEST_CONFIG,
+      console,
+      {
+        checkPrExists: async () => ({
+          prNumber: 78,
+          prUrl: 'https://example.test/pr/78',
+          prState: 'open',
+        }),
+        pushBranch: async () => {
+          pushCalls += 1
+        },
+        createPr: async () => {
+          createCalls += 1
+          return { number: 99, url: 'https://example.test/pr/99' }
+        },
+      },
+    )
+
+    expect(result).toEqual({
+      kind: 'reused',
+      prNumber: 78,
+      prUrl: 'https://example.test/pr/78',
+    })
+    expect(pushCalls).toBe(1)
+    expect(createCalls).toBe(0)
   })
 })

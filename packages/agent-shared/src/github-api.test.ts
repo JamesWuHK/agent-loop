@@ -26,6 +26,7 @@ import {
   qualifyGhApiArgs,
   ghApiRaw,
   setGitHubApiRequestObserver,
+  selectActivePullRequestForBranch,
   sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
 } from './github-api'
@@ -435,6 +436,54 @@ describe('derivePullRequestStateFromRaw', () => {
 
   test('returns closed when a closed pull request has not merged', () => {
     expect(derivePullRequestStateFromRaw('closed', null)).toBe('closed')
+  })
+})
+
+describe('selectActivePullRequestForBranch', () => {
+  test('prefers an open PR over historical terminal matches for the same branch', () => {
+    expect(selectActivePullRequestForBranch('agent/37/codex-dev', [
+      {
+        number: 45,
+        state: 'closed',
+        merged_at: null,
+        html_url: 'https://example.test/pr/45',
+        head: { ref: 'agent/37/codex-dev' },
+      },
+      {
+        number: 78,
+        state: 'open',
+        merged_at: null,
+        html_url: 'https://example.test/pr/78',
+        head: { ref: 'agent/37/codex-dev' },
+      },
+    ])).toEqual({
+      prNumber: 78,
+      prUrl: 'https://example.test/pr/78',
+      prState: 'open',
+    })
+  })
+
+  test('falls back to the latest terminal PR when no open PR exists', () => {
+    expect(selectActivePullRequestForBranch('agent/37/codex-dev', [
+      {
+        number: 45,
+        state: 'closed',
+        merged_at: null,
+        html_url: 'https://example.test/pr/45',
+        head: { ref: 'agent/37/codex-dev' },
+      },
+      {
+        number: 49,
+        state: 'closed',
+        merged_at: '2026-04-12T01:00:00Z',
+        html_url: 'https://example.test/pr/49',
+        head: { ref: 'agent/37/codex-dev' },
+      },
+    ])).toEqual({
+      prNumber: 49,
+      prUrl: 'https://example.test/pr/49',
+      prState: 'merged',
+    })
   })
 })
 

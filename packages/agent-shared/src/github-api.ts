@@ -1321,6 +1321,22 @@ export interface PrCheckResult {
   prState: 'open' | 'merged' | 'closed' | null
 }
 
+export interface PullRequestBranchLookupCandidate {
+  number?: number
+  html_url?: string
+  state?: string
+  merged_at?: string | null
+  head?: {
+    ref?: string
+  }
+}
+
+export interface SelectedPullRequestForBranch {
+  prNumber: number
+  prUrl: string | null
+  prState: 'open' | 'merged' | 'closed'
+}
+
 export interface MergePrResult {
   merged: boolean
   message: string
@@ -1411,6 +1427,34 @@ export function extractRestPullRequest(data: unknown): RawRestPullRequest | null
     : null
 }
 
+export function selectActivePullRequestForBranch(
+  branch: string,
+  pullRequests: PullRequestBranchLookupCandidate[],
+): SelectedPullRequestForBranch | null {
+  const matchingPullRequests = pullRequests
+    .map((pullRequest) => {
+      if (typeof pullRequest.number !== 'number') return null
+      if (typeof pullRequest.head?.ref !== 'string' || pullRequest.head.ref !== branch) return null
+
+      const prState = derivePullRequestStateFromRaw(pullRequest.state, pullRequest.merged_at ?? null)
+      if (prState === null) return null
+
+      return {
+        prNumber: pullRequest.number,
+        prUrl: typeof pullRequest.html_url === 'string' ? pullRequest.html_url : null,
+        prState,
+      } satisfies SelectedPullRequestForBranch
+    })
+    .filter((pullRequest): pullRequest is SelectedPullRequestForBranch => pullRequest !== null)
+    .sort((left, right) => {
+      const stateDelta = Number(left.prState !== 'open') - Number(right.prState !== 'open')
+      if (stateDelta !== 0) return stateDelta
+      return right.prNumber - left.prNumber
+    })
+
+  return matchingPullRequests[0] ?? null
+}
+
 function mapRawRestPullRequest(pr: RawRestPullRequest): ManagedPullRequest | null {
   if (typeof pr.number !== 'number') return null
   if (typeof pr.title !== 'string') return null
@@ -1445,15 +1489,15 @@ async function checkPrExistsRest(
   }
 
   const data = extractRestPullRequestListPage(JSON.parse(stdout))
-  if (data.length === 0) {
+  const selected = selectActivePullRequestForBranch(branch, data)
+  if (selected === null) {
     return { prNumber: null, prUrl: null, prState: null }
   }
 
-  const pr = data[0]!
   return {
-    prNumber: typeof pr.number === 'number' ? pr.number : null,
-    prUrl: typeof pr.html_url === 'string' ? pr.html_url : null,
-    prState: derivePullRequestStateFromRaw(pr.state, pr.merged_at ?? null),
+    prNumber: selected.prNumber,
+    prUrl: selected.prUrl,
+    prState: selected.prState,
   }
 }
 
