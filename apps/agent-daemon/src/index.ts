@@ -54,6 +54,11 @@ import {
   formatIssueLintReportJson,
   type IssueLintReport,
 } from './audit-issue-contracts'
+import {
+  rewriteIssueDraft,
+  type RewriteIssueDraftResult,
+} from './issue-authoring'
+import { runConfiguredAgent } from './cli-agent'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -95,6 +100,13 @@ export interface ExecuteIssueLintInput {
   target: IssueLintTarget
   repo?: string
   pat?: string
+}
+
+export interface ExecuteIssueRewriteInput {
+  path: string
+  repo?: string
+  pat?: string
+  repoRoot?: string
 }
 
 export interface RestartManagedRuntimeInput {
@@ -174,6 +186,13 @@ interface IssueLintCommandDependencies {
   buildIssueLintReportFromRemoteIssue: typeof buildIssueLintReportFromRemoteIssue
 }
 
+interface IssueRewriteCommandDependencies {
+  loadConfig: typeof loadConfig
+  readIssueDraftFile: (path: string) => string
+  rewriteIssueDraft: typeof rewriteIssueDraft
+  runConfiguredAgent: typeof runConfiguredAgent
+}
+
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
   platform: process.platform,
   resolveLocalDaemonIdentity,
@@ -198,6 +217,13 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
   loadConfig,
   buildIssueLintReportFromMarkdownFile,
   buildIssueLintReportFromRemoteIssue,
+}
+
+const DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES: IssueRewriteCommandDependencies = {
+  loadConfig,
+  readIssueDraftFile: (path) => readFileSync(path, 'utf-8'),
+  rewriteIssueDraft,
+  runConfiguredAgent,
 }
 
 async function main() {
@@ -239,6 +265,7 @@ async function main() {
       'github-event-path': { type: 'string' },
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
+      'rewrite-file': { type: 'string' },
       json: { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -265,6 +292,9 @@ async function main() {
     'lint-issue': args['lint-issue'] as string | undefined,
     'lint-file': args['lint-file'] as string | undefined,
   })
+  const issueRewritePath = resolveIssueRewritePath({
+    'rewrite-file': args['rewrite-file'] as string | undefined,
+  })
 
   if (wakeCommand) {
     assertWakeCommandCompatible(args)
@@ -272,6 +302,44 @@ async function main() {
 
   if (issueLintTarget) {
     assertIssueLintCompatible(args)
+  }
+
+  if (issueRewritePath) {
+    assertIssueRewriteCompatible({
+      'wake-now': args['wake-now'] as boolean | undefined,
+      'wake-issue': args['wake-issue'] as string | undefined,
+      'wake-pr': args['wake-pr'] as string | undefined,
+      'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
+      'lint-issue': args['lint-issue'] as string | undefined,
+      'lint-file': args['lint-file'] as string | undefined,
+      concurrency: args.concurrency as string | undefined,
+      'poll-interval': args['poll-interval'] as string | undefined,
+      'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
+      'machine-id': args['machine-id'] as string | undefined,
+      'dry-run': args['dry-run'] as boolean | undefined,
+      'metrics-port': args['metrics-port'] as string | undefined,
+      dashboard: args.dashboard as boolean | undefined,
+      'dashboard-host': args['dashboard-host'] as string | undefined,
+      'dashboard-port': args['dashboard-port'] as string | undefined,
+      daemonize: args.daemonize as boolean | undefined,
+      'join-project': args['join-project'] as boolean | undefined,
+      'repo-cap': args['repo-cap'] as string | undefined,
+      runtimes: args.runtimes as boolean | undefined,
+      start: args.start as boolean | undefined,
+      logs: args.logs as boolean | undefined,
+      reconcile: args.reconcile as boolean | undefined,
+      restart: args.restart as boolean | undefined,
+      'launchd-install': args['launchd-install'] as boolean | undefined,
+      'launchd-uninstall': args['launchd-uninstall'] as boolean | undefined,
+      'launchd-status': args['launchd-status'] as boolean | undefined,
+      stop: args.stop as boolean | undefined,
+      once: args.once as boolean | undefined,
+      status: args.status as boolean | undefined,
+      doctor: args.doctor as boolean | undefined,
+      'health-host': args['health-host'] as string | undefined,
+      'health-port': args['health-port'] as string | undefined,
+      json: args.json as boolean | undefined,
+    })
   }
 
   if (args['wake-from-github-event']) {
@@ -352,6 +420,17 @@ async function main() {
     })
     console.log(formatIssueLintOutput(report, args.json as boolean | undefined))
     process.exit(report.readyGateBlocked ? 1 : 0)
+  }
+
+  if (issueRewritePath) {
+    const result = await executeIssueRewriteCommand({
+      path: issueRewritePath,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(result.markdown)
+    process.exit(0)
   }
 
   if (args['join-project']) {
@@ -711,6 +790,7 @@ Usage:
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
+  agent-loop --rewrite-file <path> [--repo owner/repo]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -745,6 +825,7 @@ Options:
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
+      --rewrite-file <path>   Rewrite a local issue draft into canonical contract markdown
       --json                  Print machine-readable JSON for lint commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
@@ -789,6 +870,7 @@ Examples:
   agent-loop --wake-pr 381 --health-port 9311
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
+  agent-loop --rewrite-file docs/issues/draft.md
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
@@ -914,6 +996,21 @@ export function resolveIssueLintTarget(args: {
   return targets[0] ?? null
 }
 
+export function resolveIssueRewritePath(args: {
+  'rewrite-file'?: string
+}): string | null {
+  if (typeof args['rewrite-file'] !== 'string') {
+    return null
+  }
+
+  const path = args['rewrite-file'].trim()
+  if (!path) {
+    throw new Error('--rewrite-file must be a non-empty path')
+  }
+
+  return path
+}
+
 export async function executeIssueLintCommand(
   input: ExecuteIssueLintInput,
   deps: IssueLintCommandDependencies = DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES,
@@ -930,6 +1027,42 @@ export async function executeIssueLintCommand(
   return deps.buildIssueLintReportFromRemoteIssue({
     issueNumber: input.target.issueNumber!,
     config,
+  })
+}
+
+export async function executeIssueRewriteCommand(
+  input: ExecuteIssueRewriteInput,
+  deps: IssueRewriteCommandDependencies = DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES,
+): Promise<RewriteIssueDraftResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+  const issueText = deps.readIssueDraftFile(input.path)
+  const repoRoot = input.repoRoot ?? process.cwd()
+
+  return deps.rewriteIssueDraft({
+    issueText,
+    repoRoot,
+  }, {
+    runAgent: async ({ prompt, repoRoot: worktreePath }) => {
+      const result = await deps.runConfiguredAgent({
+        prompt,
+        worktreePath,
+        timeoutMs: config.agent.timeoutMs,
+        config,
+        logger: console,
+        allowWrites: false,
+      })
+
+      if (!result.ok) {
+        throw new Error(result.stderr || result.stdout || 'Issue rewrite agent execution failed')
+      }
+
+      return {
+        responseText: result.responseText,
+      }
+    },
   })
 }
 
@@ -1262,6 +1395,82 @@ function assertIssueLintCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Issue lint cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertIssueRewriteCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+  json?: boolean
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+    args.json ? '--json' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Issue rewrite cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 

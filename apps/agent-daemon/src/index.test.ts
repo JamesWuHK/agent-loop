@@ -8,12 +8,14 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
+  executeIssueRewriteCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveIssueLintTarget,
+  resolveIssueRewritePath,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -199,6 +201,137 @@ describe('index helpers', () => {
         repo: 'JamesWuHK/agent-loop',
       },
     })
+  })
+
+  test('resolves rewrite file paths and rejects empty values', () => {
+    expect(resolveIssueRewritePath({
+      'rewrite-file': 'docs/issues/draft.md',
+    })).toBe('docs/issues/draft.md')
+
+    expect(resolveIssueRewritePath({})).toBeNull()
+
+    expect(() => resolveIssueRewritePath({
+      'rewrite-file': '   ',
+    })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
+  test('executes local issue rewrite through the read-only agent runner', async () => {
+    const result = await executeIssueRewriteCommand({
+      path: 'docs/issues/draft.md',
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo-root',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: (path) => {
+        expect(path).toBe('docs/issues/draft.md')
+        return '修复 ready gate 的 validation path 提示'
+      },
+      rewriteIssueDraft: async ({ issueText, repoRoot }, { runAgent }) => {
+        expect(issueText).toBe('修复 ready gate 的 validation path 提示')
+        expect(repoRoot).toBe('/tmp/repo-root')
+
+        const response = await runAgent({
+          prompt: 'rewrite prompt',
+          repoRoot,
+        })
+
+        expect(response.responseText).toBe('## 用户故事\n\nrewritten markdown')
+
+        return {
+          markdown: response.responseText,
+          validation: {
+            source: {
+              kind: 'file',
+              path: 'stdout',
+            },
+            valid: true,
+            readyGateBlocked: false,
+            readyGateStatus: 'pass',
+            readyGateSummary: 'ready gate would pass hard validation checks',
+            score: 100,
+            errors: [],
+            warnings: [],
+            contract: {
+              allowedFiles: ['apps/agent-daemon/src/ready-gate.ts'],
+            },
+          },
+          authoringContext: {
+            candidateValidationCommands: ['bun test apps/agent-daemon/src/ready-gate.test.ts'],
+            candidateAllowedFiles: ['apps/agent-daemon/src/ready-gate.ts'],
+            candidateForbiddenFiles: ['package.json'],
+          },
+        }
+      },
+      runConfiguredAgent: async (options) => {
+        expect(options.prompt).toBe('rewrite prompt')
+        expect(options.worktreePath).toBe('/tmp/repo-root')
+        expect(options.allowWrites).toBe(false)
+        expect(options.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+          responseText: '## 用户故事\n\nrewritten markdown',
+          usedAgent: 'codex',
+          usedFallback: false,
+        }
+      },
+    })
+
+    expect(result.markdown).toBe('## 用户故事\n\nrewritten markdown')
+    expect(result.validation.valid).toBe(true)
   })
 
   test('resolves wake commands and validates targeted wake numbers', () => {
