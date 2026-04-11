@@ -92,10 +92,12 @@ import {
   ManagedDaemonPresencePublisher,
   buildManagedDaemonUpgradeAnnouncementComment,
   buildManagedDaemonUpgradeFailureAlertComment,
+  buildManagedDaemonUpgradeSuccessComment,
   commentOnIssue as commentOnPresenceIssue,
   ensureManagedDaemonPresenceIssue,
   getLatestManagedDaemonUpgradeAnnouncement,
   getLatestManagedDaemonUpgradeFailureAlert,
+  getLatestManagedDaemonUpgradeSuccess,
   listIssueComments as listPresenceIssueComments,
   type ManagedDaemonPresenceRuntimeState,
 } from './presence'
@@ -308,6 +310,7 @@ export class AgentDaemon {
   private lastAutoUpgradeAttemptTarget: string | null = null
   private lastPublishedUpgradeAnnouncementKey: string | null = null
   private lastPublishedUpgradeFailureAlertKey: string | null = null
+  private lastPublishedUpgradeSuccessKey: string | null = null
   private lastObservedUpgradeAnnouncementKey: string | null = null
   private upgradeAnnouncementCheckPromise: Promise<void> | null = null
 
@@ -858,6 +861,10 @@ export class AgentDaemon {
     } catch (error) {
       this.logger.warn(`[daemon] failed to start GitHub presence heartbeat: ${formatDaemonError(error)}`)
     }
+
+    void this.maybePublishAutoUpgradeSuccessAcknowledgement().catch((error) => {
+      this.logger.warn(`[daemon] failed to publish agent-loop auto-upgrade success acknowledgement: ${formatDaemonError(error)}`)
+    })
 
     void this.maybeRefreshAgentLoopUpgradeStatus(true)
     void this.maybeProcessRemoteUpgradeAnnouncement()
@@ -3722,6 +3729,61 @@ export class AgentDaemon {
     )
   }
 
+  private async maybePublishAutoUpgradeSuccessAcknowledgement(): Promise<void> {
+    if (
+      this.autoUpgradeState.lastOutcome !== 'succeeded'
+      || !this.autoUpgradeState.lastSuccessAt
+      || !this.didLastAutoUpgradeReachCurrentBuild()
+    ) {
+      return
+    }
+
+    const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const key = this.getAutoUpgradeSuccessAcknowledgementKey({
+      channel: policy.channel,
+      targetVersion: this.autoUpgradeState.lastTargetVersion,
+      targetRevision: this.autoUpgradeState.lastTargetRevision,
+      succeededAt: this.autoUpgradeState.lastSuccessAt,
+    })
+    if (!key || key === this.lastPublishedUpgradeSuccessKey) {
+      return
+    }
+
+    const issueNumber = await this.ensurePresenceIssueNumber()
+    const comments = await this.listPresenceRegistryComments(issueNumber)
+    const latest = getLatestManagedDaemonUpgradeSuccess(comments, this.config.repo, this.config.machineId)
+    const latestKey = latest
+      ? this.getAutoUpgradeSuccessAcknowledgementKey({
+          channel: latest.success.channel,
+          targetVersion: latest.success.targetVersion,
+          targetRevision: latest.success.targetRevision,
+          succeededAt: latest.success.succeededAt,
+        })
+      : null
+    if (latestKey === key) {
+      this.lastPublishedUpgradeSuccessKey = key
+      return
+    }
+
+    await this.commentOnPresenceRegistryIssue(
+      issueNumber,
+      buildManagedDaemonUpgradeSuccessComment({
+        repo: this.config.repo,
+        machineId: this.config.machineId,
+        daemonInstanceId: this.daemonInstanceId,
+        channel: policy.channel,
+        targetVersion: this.autoUpgradeState.lastTargetVersion,
+        targetRevision: this.autoUpgradeState.lastTargetRevision,
+        succeededAt: this.autoUpgradeState.lastSuccessAt,
+        acknowledgedAt: new Date().toISOString(),
+      }),
+    )
+    this.lastPublishedUpgradeSuccessKey = key
+    this.logger.log(
+      `[daemon] published agent-loop auto-upgrade success acknowledgement for ${policy.channel ?? 'default'} -> v${this.autoUpgradeState.lastTargetVersion ?? this.agentLoopBuild.version}@${abbreviateRevision(this.autoUpgradeState.lastTargetRevision ?? this.agentLoopBuild.revision)}`,
+    )
+  }
+
   private shouldRefreshFromUpgradeAnnouncement(
     announcedAt: string,
     key: string,
@@ -3891,6 +3953,39 @@ export class AgentDaemon {
       String(input.consecutiveFailureCount),
       input.pausedUntil ?? 'none',
     ].join(':')
+  }
+
+  private getAutoUpgradeSuccessAcknowledgementKey(input: {
+    channel: string | null
+    targetVersion: string | null
+    targetRevision: string | null
+    succeededAt: string | null
+  }): string | null {
+    if ((!input.targetVersion && !input.targetRevision) || !input.succeededAt) {
+      return null
+    }
+
+    return [
+      input.channel ?? 'default',
+      input.targetVersion ?? 'unknown',
+      input.targetRevision ?? 'unknown',
+      input.succeededAt,
+    ].join(':')
+  }
+
+  private didLastAutoUpgradeReachCurrentBuild(): boolean {
+    const targetVersion = this.autoUpgradeState.lastTargetVersion
+    const targetRevision = this.autoUpgradeState.lastTargetRevision
+    if (!targetVersion && !targetRevision) {
+      return false
+    }
+    if (targetVersion && targetVersion !== this.agentLoopBuild.version) {
+      return false
+    }
+    if (targetRevision && this.agentLoopBuild.revision && targetRevision !== this.agentLoopBuild.revision) {
+      return false
+    }
+    return true
   }
 
   private assertDetachedUpgradeRestartReady(): void {

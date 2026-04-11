@@ -49,6 +49,7 @@ import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 import {
   buildManagedDaemonUpgradeAnnouncementComment,
   buildManagedDaemonUpgradeFailureAlertComment,
+  buildManagedDaemonUpgradeSuccessComment,
 } from './presence'
 import { getMetrics, registry } from './metrics'
 import { appendWakeRequest, buildWakeQueuePath } from './wake-queue'
@@ -842,6 +843,74 @@ describe('agent-loop upgrade coordination', () => {
     expect(postedBodies).toHaveLength(1)
     expect(postedBodies[0]).toContain('"consecutiveFailureCount":3')
     expect(postedBodies[0]).toContain('"pausedUntil":"2026-04-11T12:45:10.000Z"')
+  })
+
+  test('publishes a deduplicated GitHub success acknowledgement after an auto-upgrade restart', async () => {
+    const daemon = createTestDaemon({
+      upgrade: {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkIntervalMs: 60_000,
+        reminderIntervalMs: 3_600_000,
+        autoApply: true,
+      },
+    }) as any
+
+    const postedBodies: string[] = []
+    const currentVersion = daemon.agentLoopBuild.version
+    const currentRevision = daemon.agentLoopBuild.revision
+
+    daemon.ensurePresenceIssueNumber = async () => 500
+    daemon.commentOnPresenceRegistryIssue = async (_issueNumber: number, body: string) => {
+      postedBodies.push(body)
+    }
+    daemon.listPresenceRegistryComments = async () => [{
+      commentId: 28,
+      body: buildManagedDaemonUpgradeSuccessComment({
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'codex-dev',
+        daemonInstanceId: 'daemon-codex-dev-older',
+        channel: 'master',
+        targetVersion: currentVersion,
+        targetRevision: currentRevision,
+        succeededAt: '2026-04-11T12:00:20.000Z',
+        acknowledgedAt: '2026-04-11T12:00:30.000Z',
+      }),
+      createdAt: '2026-04-11T12:00:30.000Z',
+      updatedAt: '2026-04-11T12:00:30.000Z',
+    }]
+
+    daemon.autoUpgradeState = {
+      attemptCount: 2,
+      successCount: 1,
+      failureCount: 1,
+      noChangeCount: 0,
+      consecutiveFailureCount: 0,
+      lastAttemptAt: '2026-04-11T12:00:10.000Z',
+      lastSuccessAt: '2026-04-11T12:00:20.000Z',
+      lastOutcome: 'succeeded',
+      lastTargetVersion: currentVersion,
+      lastTargetRevision: currentRevision,
+      lastError: null,
+      pausedUntil: null,
+    }
+
+    await daemon.maybePublishAutoUpgradeSuccessAcknowledgement()
+
+    expect(postedBodies).toHaveLength(0)
+
+    daemon.autoUpgradeState = {
+      ...daemon.autoUpgradeState,
+      lastSuccessAt: '2026-04-11T12:30:20.000Z',
+    }
+
+    await daemon.maybePublishAutoUpgradeSuccessAcknowledgement()
+
+    expect(postedBodies).toHaveLength(1)
+    expect(postedBodies[0]).toContain(`"targetVersion":"${currentVersion}"`)
+    expect(postedBodies[0]).toContain(`"targetRevision":"${currentRevision}"`)
+    expect(postedBodies[0]).toContain('"succeededAt":"2026-04-11T12:30:20.000Z"')
   })
 })
 
