@@ -41,6 +41,7 @@ import {
   rebaseManagedBranchOntoDefault,
   shouldApplyStandaloneIssueTransition,
   shouldResetLinkedPrToRetryOnIssueResume,
+  shouldUseOpenPrCheckForRecovery,
   shouldCompleteIssueRecoveryOnRemoteClose,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
@@ -1788,6 +1789,23 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.FAILED, PR_REVIEW_LABELS.HUMAN_NEEDED])).toBe(true)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.RETRY])).toBe(false)
     expect(shouldResetLinkedPrToRetryOnIssueResume([PR_REVIEW_LABELS.APPROVED])).toBe(false)
+  })
+
+  test('only reuses open PR checks for issue recovery context', () => {
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 386,
+      prState: 'closed',
+    })).toBe(false)
+
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 387,
+      prState: 'merged',
+    })).toBe(false)
+
+    expect(shouldUseOpenPrCheckForRecovery({
+      prNumber: 388,
+      prState: 'open',
+    })).toBe(true)
   })
 
   test('prefers standalone PR handoff for resumable issues when the branch is already synced', () => {

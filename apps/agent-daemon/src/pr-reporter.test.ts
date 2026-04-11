@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
+import { createOrFindPr, isRetryableManagedBranchPushFailure, pushBranch } from './pr-reporter'
 
 async function runGit(
   worktreePath: string,
@@ -140,5 +140,96 @@ describe('pr reporter push recovery', () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+
+  test('reopens a closed PR instead of treating it as terminal', async () => {
+    const calls: string[] = []
+    const logger = {
+      log: () => undefined,
+      warn: () => undefined,
+    }
+
+    const result = await createOrFindPr(
+      '/tmp/worktree',
+      'agent/125/codex',
+      125,
+      'Fix #125',
+      {
+        machineId: 'codex',
+      } as any,
+      logger as Console,
+      {
+        checkPrExists: async () => ({
+          prNumber: 386,
+          prUrl: 'https://github.com/example/repo/pull/386',
+          prState: 'closed',
+        }),
+        pushBranch: async () => {
+          calls.push('push')
+        },
+        reopenPullRequest: async (prNumber) => {
+          calls.push(`reopen:${prNumber}`)
+          return {
+            number: prNumber,
+            url: `https://github.com/example/repo/pull/${prNumber}`,
+          }
+        },
+        createPr: async () => {
+          throw new Error('should not create a fresh PR when reopen succeeds')
+        },
+      },
+    )
+
+    expect(calls).toEqual(['push', 'reopen:386'])
+    expect(result).toEqual({
+      prNumber: 386,
+      prUrl: 'https://github.com/example/repo/pull/386',
+    })
+  })
+
+  test('falls back to creating a fresh PR when reopen fails', async () => {
+    const calls: string[] = []
+    const logger = {
+      log: () => undefined,
+      warn: () => undefined,
+    }
+
+    const result = await createOrFindPr(
+      '/tmp/worktree',
+      'agent/125/codex',
+      125,
+      'Fix #125',
+      {
+        machineId: 'codex',
+      } as any,
+      logger as Console,
+      {
+        checkPrExists: async () => ({
+          prNumber: 386,
+          prUrl: 'https://github.com/example/repo/pull/386',
+          prState: 'closed',
+        }),
+        pushBranch: async () => {
+          calls.push('push')
+        },
+        reopenPullRequest: async () => {
+          calls.push('reopen')
+          throw new Error('cannot reopen closed PR')
+        },
+        createPr: async () => {
+          calls.push('create')
+          return {
+            number: 412,
+            url: 'https://github.com/example/repo/pull/412',
+          }
+        },
+      },
+    )
+
+    expect(calls).toEqual(['push', 'reopen', 'create'])
+    expect(result).toEqual({
+      prNumber: 412,
+      prUrl: 'https://github.com/example/repo/pull/412',
+    })
   })
 })

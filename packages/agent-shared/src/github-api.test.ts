@@ -9,6 +9,7 @@ import {
   derivePullRequestStateFromRaw,
   deriveIssueStateFromRaw,
   extractNextPageUrl,
+  mapOpenManagedPullRequest,
   extractRestOpenIssueListPage,
   extractRestPullRequest,
   extractRestPullRequestListPage,
@@ -25,6 +26,7 @@ import {
   parseMergePrResponse,
   qualifyGhApiArgs,
   ghApiRaw,
+  selectPullRequestForBranchReuse,
   setGitHubApiRequestObserver,
   sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
@@ -435,6 +437,98 @@ describe('derivePullRequestStateFromRaw', () => {
 
   test('returns closed when a closed pull request has not merged', () => {
     expect(derivePullRequestStateFromRaw('closed', null)).toBe('closed')
+  })
+})
+
+describe('selectPullRequestForBranchReuse', () => {
+  test('prefers an open PR over older closed PRs on the same branch', () => {
+    const selected = selectPullRequestForBranchReuse([
+      {
+        number: 386,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/386',
+        state: 'closed',
+        merged_at: null,
+        head: { ref: 'agent/125/codex', sha: 'aaa111' },
+      },
+      {
+        number: 412,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/412',
+        state: 'open',
+        merged_at: null,
+        head: { ref: 'agent/125/codex', sha: 'bbb222' },
+      },
+    ])
+
+    expect(selected?.number).toBe(412)
+    expect(derivePullRequestStateFromRaw(selected?.state, selected?.merged_at ?? null)).toBe('open')
+  })
+
+  test('picks the newest closed PR when no open PR exists', () => {
+    const selected = selectPullRequestForBranchReuse([
+      {
+        number: 386,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/386',
+        state: 'closed',
+        merged_at: null,
+        head: { ref: 'agent/125/codex', sha: 'aaa111' },
+      },
+      {
+        number: 390,
+        title: 'Fix #125',
+        html_url: 'https://github.com/example/repo/pull/390',
+        state: 'closed',
+        merged_at: null,
+        head: { ref: 'agent/125/codex', sha: 'bbb222' },
+      },
+    ])
+
+    expect(selected?.number).toBe(390)
+    expect(derivePullRequestStateFromRaw(selected?.state, selected?.merged_at ?? null)).toBe('closed')
+  })
+})
+
+describe('mapOpenManagedPullRequest', () => {
+  test('returns null for closed and merged pull requests', () => {
+    expect(mapOpenManagedPullRequest({
+      number: 386,
+      title: 'Fix #125',
+      html_url: 'https://github.com/example/repo/pull/386',
+      state: 'closed',
+      merged_at: null,
+      draft: false,
+      head: { ref: 'agent/125/codex', sha: 'aaa111' },
+      labels: [{ name: 'agent:review-failed' }],
+    })).toBeNull()
+
+    expect(mapOpenManagedPullRequest({
+      number: 387,
+      title: 'Fix #125',
+      html_url: 'https://github.com/example/repo/pull/387',
+      state: 'closed',
+      merged_at: '2026-04-11T09:00:00Z',
+      draft: false,
+      head: { ref: 'agent/125/codex', sha: 'bbb222' },
+      labels: [{ name: 'agent:review-approved' }],
+    })).toBeNull()
+  })
+
+  test('keeps open managed pull requests reviewable', () => {
+    expect(mapOpenManagedPullRequest({
+      number: 388,
+      title: 'Fix #125',
+      html_url: 'https://github.com/example/repo/pull/388',
+      state: 'open',
+      merged_at: null,
+      draft: false,
+      head: { ref: 'agent/125/codex', sha: 'ccc333' },
+      labels: [{ name: 'agent:review-failed' }],
+    })).toMatchObject({
+      number: 388,
+      headRefName: 'agent/125/codex',
+    })
   })
 })
 

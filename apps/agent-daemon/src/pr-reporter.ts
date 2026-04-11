@@ -1,5 +1,5 @@
 import type { AgentConfig } from '@agent/shared'
-import { checkPrExists, createPr } from '@agent/shared'
+import { checkPrExists, createPr, reopenPullRequest } from '@agent/shared'
 
 interface GitCommandResult {
   exitCode: number
@@ -25,6 +25,13 @@ const MAX_PUSH_ATTEMPTS = 3
 interface ManagedBranchPushPlan {
   pushArgs: string[] | null
   detachedHead: boolean
+}
+
+interface CreateOrFindPrDependencies {
+  checkPrExists?: typeof checkPrExists
+  createPr?: typeof createPr
+  reopenPullRequest?: typeof reopenPullRequest
+  pushBranch?: typeof pushBranch
 }
 
 export async function pushBranch(
@@ -181,13 +188,28 @@ export async function createOrFindPr(
   issueTitle: string,
   config: AgentConfig,
   logger = console,
+  dependencies: CreateOrFindPrDependencies = {},
 ): Promise<{ prNumber: number; prUrl: string }> {
+  const checkPrExistsImpl = dependencies.checkPrExists ?? checkPrExists
+  const createPrImpl = dependencies.createPr ?? createPr
+  const reopenPullRequestImpl = dependencies.reopenPullRequest ?? reopenPullRequest
+  const pushBranchImpl = dependencies.pushBranch ?? pushBranch
+  let branchPushed = false
+
+  const ensureBranchPushed = async (): Promise<void> => {
+    if (branchPushed) {
+      return
+    }
+    await pushBranchImpl(worktreePath, branch, logger)
+    branchPushed = true
+  }
+
   // Check idempotency: PR might already exist
-  const existing = await checkPrExists(branch, config)
+  const existing = await checkPrExistsImpl(branch, config)
 
   if (existing.prNumber !== null && existing.prState === 'open') {
     const url = existing.prUrl ?? ''
-    await pushBranch(worktreePath, branch, logger)
+    await ensureBranchPushed()
     logger.log(`[pr] PR already exists: #${existing.prNumber} (${url})`)
     return { prNumber: existing.prNumber, prUrl: url }
   }
@@ -199,17 +221,29 @@ export async function createOrFindPr(
   }
 
   if (existing.prNumber !== null && existing.prState === 'closed') {
-    logger.warn(`[pr] PR was closed, not creating new PR`)
-    const url = existing.prUrl ?? ''
-    return { prNumber: existing.prNumber, prUrl: url }
+    await ensureBranchPushed()
+
+    try {
+      const reopened = await reopenPullRequestImpl(existing.prNumber, config)
+      logger.log(`[pr] reopened closed PR #${reopened.number}: ${reopened.url}`)
+      return { prNumber: reopened.number, prUrl: reopened.url }
+    } catch (error) {
+      logger.warn(
+        `[pr] failed to reopen closed PR #${existing.prNumber}; attempting to create a fresh PR instead: ${formatPrReporterError(error)}`,
+      )
+    }
   }
 
   // Push branch first if not pushed yet
-  await pushBranch(worktreePath, branch, logger)
+  await ensureBranchPushed()
 
   const body = PR_BODY_TEMPLATE(issueNumber, config.machineId)
-  const pr = await createPr(branch, issueNumber, issueTitle, body, config)
+  const pr = await createPrImpl(branch, issueNumber, issueTitle, body, config)
 
   logger.log(`[pr] created PR #${pr.number}: ${pr.url}`)
   return { prNumber: pr.number, prUrl: pr.url }
+}
+
+function formatPrReporterError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
