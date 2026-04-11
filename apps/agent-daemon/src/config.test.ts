@@ -140,11 +140,11 @@ describe('buildConfig', () => {
       channel: null,
       checkIntervalMs: 900_000,
       reminderIntervalMs: 3_600_000,
-      autoApply: false,
+      autoApply: true,
     })
   })
 
-  test('allows home config to opt into automatic agent-loop upgrades', () => {
+  test('allows home config to opt out of automatic agent-loop upgrades', () => {
     const config = buildConfig(
       {},
       {
@@ -156,7 +156,7 @@ describe('buildConfig', () => {
             channel: 'master',
             checkIntervalMs: 900_000,
             reminderIntervalMs: 3_600_000,
-            autoApply: true,
+            autoApply: false,
           },
         },
         repoConfig: {},
@@ -165,7 +165,7 @@ describe('buildConfig', () => {
       },
     )
 
-    expect(config.upgrade?.autoApply).toBe(true)
+    expect(config.upgrade?.autoApply).toBe(false)
   })
 
   test('allows repo-local config to disable agent fallback explicitly', () => {

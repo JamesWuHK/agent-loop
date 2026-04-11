@@ -88,6 +88,10 @@ describe('join-project helpers', () => {
       machineId: 'macbook-pro-b',
       pat: 'ghp-next',
       concurrency: 2,
+      upgrade: {
+        enabled: true,
+        autoApply: true,
+      },
       scheduling: {
         concurrencyByRepo: {
           'JamesWuHK/agent-loop': 1,
@@ -100,6 +104,34 @@ describe('join-project helpers', () => {
       agent: {
         primary: 'codex',
       },
+    })
+  })
+
+  test('preserves an explicit auto-upgrade opt-out when joining a managed machine', () => {
+    const config = buildJoinProjectConfigFile(
+      {
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 900_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: false,
+        },
+      },
+      {
+        repo: 'JamesWuHK/digital-employee',
+        machineId: 'macbook-pro-b',
+      },
+    )
+
+    expect(config.upgrade).toEqual({
+      enabled: true,
+      repo: 'JamesWuHK/agent-loop',
+      channel: 'master',
+      checkIntervalMs: 900_000,
+      reminderIntervalMs: 3_600_000,
+      autoApply: false,
     })
   })
 
@@ -193,6 +225,10 @@ describe('join-project helpers', () => {
       machineId: 'macbook-pro-b',
       repo: 'JamesWuHK/digital-employee',
       concurrency: 2,
+      upgrade: {
+        enabled: true,
+        autoApply: true,
+      },
       scheduling: {
         concurrencyByRepo: {
           'JamesWuHK/digital-employee': 3,

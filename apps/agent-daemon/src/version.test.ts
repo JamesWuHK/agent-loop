@@ -57,7 +57,7 @@ const TEST_CONFIG: AgentConfig = {
     channel: 'master',
     checkIntervalMs: 60_000,
     reminderIntervalMs: 3_600_000,
-    autoApply: false,
+    autoApply: true,
   },
 }
 
@@ -104,15 +104,15 @@ describe('createInitialAgentLoopUpgradeMetadata', () => {
 })
 
 describe('resolveAgentLoopUpgradePolicy', () => {
-  test('keeps auto-apply disabled unless explicitly opted in', () => {
-    expect(resolveAgentLoopUpgradePolicy(TEST_CONFIG, LOCAL_BUILD).autoApply).toBe(false)
+  test('enables auto-apply by default but allows an explicit opt-out', () => {
+    expect(resolveAgentLoopUpgradePolicy(TEST_CONFIG, LOCAL_BUILD).autoApply).toBe(true)
     expect(resolveAgentLoopUpgradePolicy({
       ...TEST_CONFIG,
       upgrade: {
         ...TEST_CONFIG.upgrade!,
-        autoApply: true,
+        autoApply: false,
       },
-    }, LOCAL_BUILD).autoApply).toBe(true)
+    }, LOCAL_BUILD).autoApply).toBe(false)
   })
 })
 

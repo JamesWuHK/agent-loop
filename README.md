@@ -451,6 +451,7 @@ agent-loop 现在内置了一套“多机感知 + 空闲自升级”机制，目
 - GitHub presence 心跳也会上报这些字段，所以 dashboard 和远端机器视图能直接看出谁落后、谁现在空闲可升
 - 任意一台机器发现新版本后，会在 shared presence registry 里广播一个 upgrade announcement；其他机器会在下一次 presence 心跳周期内强制刷新本地 upgrade 状态，而不是死等自己的 `checkIntervalMs`
 - 只有在 daemon 当前没有 startup recovery、active worktree、active lease、in-flight issue/review task 时，才会把 `safeToUpgradeNow` 标记为 `true`
+- 受管 daemon（`launchd` / `detached`）默认开启 `autoApply`；也就是一旦确认空闲安全，会自动拉起最新版并继续投入开发，只有显式把 `upgrade.autoApply=false` 才会退回提醒模式
 
 默认策略可以在 `~/.agent-loop/config.json` 里配置：
 
@@ -462,7 +463,7 @@ agent-loop 现在内置了一套“多机感知 + 空闲自升级”机制，目
     "channel": "master",
     "checkIntervalMs": 900000,
     "reminderIntervalMs": 3600000,
-    "autoApply": false
+    "autoApply": true
   }
 }
 ```
@@ -474,7 +475,7 @@ agent-loop 现在内置了一套“多机感知 + 空闲自升级”机制，目
 - `channel`：跟踪的分支；不填时默认取目标仓库 default branch
 - `checkIntervalMs`：后台检查最新版本的最小间隔
 - `reminderIntervalMs`：升级提醒日志的冷却时间，避免刷屏
-- `autoApply`：默认关闭；当本机 daemon 已空闲且本轮 poll 最终没有领到新活时，是否自动执行升级并重启托管 runtime
+- `autoApply`：受管 daemon 默认开启；当本机 daemon 已空闲且本轮 poll 最终没有领到新活时，自动执行升级并重启托管 runtime。需要保守模式时显式设成 `false`
 
 版本发布时，统一用下面的命令 bump 根版本号，避免手改：
 
@@ -485,7 +486,7 @@ bun run agent:version:bump major
 bun run agent:version:bump set 0.2.0
 ```
 
-开启 `upgrade.autoApply=true` 后，daemon 会在满足 `safeToUpgradeNow=true` 且本轮 poll 最终没有启动任何新任务时，自动执行下面的升级流程：
+在默认的 `upgrade.autoApply=true` 下，daemon 会在满足 `safeToUpgradeNow=true` 且本轮 poll 最终没有启动任何新任务时，自动执行下面的升级流程：
 
 - 在本地 `agent-loop` checkout 上执行 `git pull --ff-only origin <channel>`
 - 执行 `bun install --frozen-lockfile`

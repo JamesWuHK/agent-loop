@@ -166,7 +166,7 @@ export function resolveAgentLoopUpgradePolicy(
       config.upgrade?.reminderIntervalMs,
       DEFAULT_AGENT_LOOP_UPGRADE_REMINDER_INTERVAL_MS,
     ),
-    autoApply: config.upgrade?.autoApply === true,
+    autoApply: config.upgrade?.autoApply !== false,
   }
 }
 
