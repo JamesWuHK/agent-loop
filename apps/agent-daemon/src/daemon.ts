@@ -3505,6 +3505,7 @@ export class AgentDaemon {
     const runtime = this.buildRuntimeStatus()
     const upgrade = this.buildUpgradeStatus()
     const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const supervisor = resolveCurrentRuntimeSupervisor()
     return {
       activeLeaseCount: runtime.activeLeaseCount,
       activeWorktreeCount: this.activeWorktrees.size,
@@ -3512,7 +3513,7 @@ export class AgentDaemon {
       agentLoopVersion: this.agentLoopBuild.version,
       agentLoopRevision: this.agentLoopBuild.revision,
       upgradeStatus: upgrade.status,
-      upgradeAutoApplyEnabled: policy.autoApply,
+      upgradeAutoApplyEnabled: policy.autoApply && supervisor !== 'direct',
       safeToUpgradeNow: upgrade.safeToUpgradeNow,
       latestVersion: upgrade.latestVersion,
       latestRevision: upgrade.latestRevision,
@@ -3744,7 +3745,8 @@ export class AgentDaemon {
 
   private async maybeAutoApplyAgentLoopUpgrade(): Promise<boolean> {
     const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
-    if (!policy.enabled || !policy.autoApply) {
+    const supervisor = resolveCurrentRuntimeSupervisor()
+    if (!policy.enabled || !policy.autoApply || supervisor === 'direct') {
       return false
     }
     if (this.shutdownRequested || !this.running || !this.isSafeToUpgradeNow()) {
@@ -3936,6 +3938,7 @@ export class AgentDaemon {
     }
 
     const policy = resolveAgentLoopUpgradePolicy(this.config, this.agentLoopBuild)
+    const supervisor = resolveCurrentRuntimeSupervisor()
     const reminderTargetKey = this.getUpgradeAnnouncementKey(upgrade)
     const now = Date.now()
     if (
@@ -3952,16 +3955,20 @@ export class AgentDaemon {
     const local = `v${this.agentLoopBuild.version}@${abbreviateRevision(this.agentLoopBuild.revision)}`
     const latest = `v${upgrade.latestVersion ?? 'unknown'}@${abbreviateRevision(upgrade.latestRevision)}`
     this.logger.warn(
-      `[daemon] agent-loop upgrade available on ${upgrade.channel ?? 'default'}: ${local} -> ${latest}; ${this.describeAgentLoopUpgradeNoticeAction(upgrade, policy.autoApply)}`,
+      `[daemon] agent-loop upgrade available on ${upgrade.channel ?? 'default'}: ${local} -> ${latest}; ${this.describeAgentLoopUpgradeNoticeAction(upgrade, policy.autoApply, supervisor)}`,
     )
   }
 
   private describeAgentLoopUpgradeNoticeAction(
     upgrade: Pick<AgentLoopUpgradeMetadata, 'safeToUpgradeNow'>,
     autoApplyEnabled: boolean,
+    supervisor: ReturnType<typeof resolveCurrentRuntimeSupervisor>,
   ): string {
     if (!autoApplyEnabled) {
       return 'auto-apply is disabled on this machine; manual restart is required'
+    }
+    if (supervisor === 'direct') {
+      return 'auto-apply is configured, but this daemon is running in direct mode; manual restart is required'
     }
     if (upgrade.safeToUpgradeNow) {
       return 'auto-apply is enabled and this daemon can restart into the latest build now'
