@@ -601,9 +601,7 @@ function buildCleanEnv(config: AgentConfig): Record<string, string> {
 
   if (config.agent.codexBaseUrl) {
     cleanEnv.OPENAI_BASE_URL = config.agent.codexBaseUrl
-  }
-
-  if (!cleanEnv.OPENAI_BASE_URL) {
+  } else if (!cleanEnv.OPENAI_BASE_URL) {
     const openaiBaseUrl =
       cleanEnv.OPENAI_API_BASE
       || cleanEnv.OPENAI_API_URL
@@ -628,6 +626,11 @@ function buildRuntimeEnv(
   }
 
   const { homeDir, codexHomeDir } = createIsolatedCodexHome(tempDir, cleanEnv)
+
+  delete cleanEnv.OPENAI_BASE_URL
+  delete cleanEnv.OPENAI_API_BASE
+  delete cleanEnv.OPENAI_API_URL
+  delete cleanEnv.OPENAI_BASE
 
   return {
     ...cleanEnv,
