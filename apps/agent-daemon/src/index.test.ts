@@ -8,6 +8,7 @@ import {
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeAuditIssuesCommand,
+  executeIssueApplyCommand,
   executeIssueLintCommand,
   executeIssueRepairCommand,
   executeIssueSimulationCommand,
@@ -16,12 +17,14 @@ import {
   executeWakeCommand,
   executeWakeRequest,
   formatAuditIssuesOutput,
+  formatIssueApplyOutput,
   formatIssueLintOutput,
   formatIssueRepairOutput,
   formatIssueSimulationOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveAuditIssuesInput,
+  resolveIssueApplyInput,
   resolveIssueLintTarget,
   resolveIssueRepairInput,
   resolveIssueRewritePath,
@@ -34,6 +37,7 @@ import {
   formatRuntimeListing,
   restartManagedRuntime,
   shouldFailAuditIssuesCommand,
+  shouldFailIssueApplyCommand,
   shouldFailIssueRepairCommand,
   shouldRemoveManagedRuntimeRecord,
   stopManagedRuntime,
@@ -93,6 +97,11 @@ describe('index helpers', () => {
       issueNumbers: [50, 51],
       includeSimulation: true,
     })
+
+    expect(resolveAuditIssuesInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54'],
+    })).toBeNull()
 
     expect(resolveAuditIssuesInput({
       'repair-file': 'docs/issues/broken.md',
@@ -561,6 +570,56 @@ describe('index helpers', () => {
     })).toThrow('--rewrite-file must be a non-empty path')
   })
 
+  test('resolves apply file inputs and enforces stale-write guards', () => {
+    expect(resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54'],
+      'expected-updated-at': '2026-04-12T08:00:00.000Z',
+    })).toEqual({
+      path: 'docs/issues/ready.md',
+      issueNumber: 54,
+      expectedUpdatedAt: '2026-04-12T08:00:00.000Z',
+      force: false,
+    })
+
+    expect(resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54'],
+      force: true,
+    })).toEqual({
+      path: 'docs/issues/ready.md',
+      issueNumber: 54,
+      force: true,
+    })
+
+    expect(resolveIssueApplyInput({})).toBeNull()
+
+    expect(() => resolveIssueApplyInput({
+      'expected-updated-at': '2026-04-12T08:00:00.000Z',
+    })).toThrow('--expected-updated-at requires --apply-file')
+
+    expect(() => resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+    })).toThrow('--apply-file requires --issue')
+
+    expect(() => resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54', '55'],
+      force: true,
+    })).toThrow('--apply-file requires exactly one --issue')
+
+    expect(() => resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54'],
+    })).toThrow('--apply-file requires --expected-updated-at unless --force is provided')
+
+    expect(() => resolveIssueApplyInput({
+      'apply-file': 'docs/issues/ready.md',
+      issue: ['54'],
+      'expected-updated-at': 'not-an-iso',
+    })).toThrow('--expected-updated-at must be a valid ISO-8601 timestamp')
+  })
+
   test('resolves repair file paths and shared simulate flag', () => {
     expect(resolveIssueRepairInput({
       'repair-file': 'docs/issues/broken.md',
@@ -902,6 +961,136 @@ describe('index helpers', () => {
       },
     })
     expect(formatIssueSimulationOutput(result)).toContain('source=issue:JamesWuHK/agent-loop#40')
+  })
+
+  test('executes local issue apply through the shared GitHub apply flow', async () => {
+    const result = await executeIssueApplyCommand({
+      path: 'docs/issues/ready.md',
+      issueNumber: 54,
+      expectedUpdatedAt: '2026-04-12T08:00:00.000Z',
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readIssueDraftFile: (path) => {
+        expect(path).toBe('docs/issues/ready.md')
+        return '## 用户故事\n\ncanonical markdown'
+      },
+      applyIssueBodyUpdate: async (input) => {
+        expect(input.issueNumber).toBe(54)
+        expect(input.markdown).toBe('## 用户故事\n\ncanonical markdown')
+        expect(input.expectedUpdatedAt).toBe('2026-04-12T08:00:00.000Z')
+        expect(input.force).toBeUndefined()
+        expect(input.config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          status: 'updated',
+          updated: true,
+          issueNumber: 54,
+          issueUrl: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+          oldUpdatedAt: '2026-04-12T08:00:00.000Z',
+          newUpdatedAt: '2026-04-12T08:06:00.000Z',
+          expectedUpdatedAt: '2026-04-12T08:00:00.000Z',
+          validation: {
+            source: { kind: 'file', path: 'stdin' },
+            valid: true,
+            readyGateBlocked: false,
+            readyGateStatus: 'pass',
+            readyGateSummary: 'ready gate would pass hard validation checks',
+            score: 100,
+            errors: [],
+            warnings: [],
+            contract: {} as any,
+          },
+          message: 'Remote issue body updated',
+        }
+      },
+    })
+
+    expect(result.status).toBe('updated')
+    expect(result.updated).toBe(true)
+    expect(formatIssueApplyOutput(result)).toContain('status=updated')
+    expect(shouldFailIssueApplyCommand(result)).toBe(false)
+  })
+
+  test('formats apply json output and conflict failure semantics', () => {
+    const result = {
+      status: 'conflict',
+      updated: false,
+      issueNumber: 54,
+      issueUrl: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+      oldUpdatedAt: '2026-04-12T08:05:00.000Z',
+      newUpdatedAt: null,
+      expectedUpdatedAt: '2026-04-12T08:00:00.000Z',
+      validation: {
+        source: { kind: 'file', path: 'stdin' },
+        valid: true,
+        readyGateBlocked: false,
+        readyGateStatus: 'pass',
+        readyGateSummary: 'ready gate would pass hard validation checks',
+        score: 100,
+        errors: [],
+        warnings: [],
+        contract: {} as any,
+      },
+      message: 'Remote issue updatedAt changed',
+    }
+
+    expect(shouldFailIssueApplyCommand(result as any)).toBe(true)
+    expect(JSON.parse(formatIssueApplyOutput(result as any, true))).toMatchObject({
+      status: 'conflict',
+      updated: false,
+      issueNumber: 54,
+    })
   })
 
   test('executes local issue repair through the read-only agent runner', async () => {

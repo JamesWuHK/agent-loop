@@ -798,9 +798,24 @@ interface RawRestGitHubIssue {
   body?: string | null
   state?: string
   updated_at?: string
+  html_url?: string
   labels?: Array<{ name?: string }>
   assignees?: Array<{ login?: string }>
   pull_request?: unknown
+}
+
+export interface IssueBodySnapshot {
+  number: number
+  title: string
+  body: string
+  url: string
+  updatedAt: string
+}
+
+export interface IssueBodyUpdateResult {
+  number: number
+  url: string
+  updatedAt: string
 }
 
 export function deriveIssueStateFromRaw(
@@ -869,6 +884,19 @@ function mapRawRestIssue(issue: RawRestGitHubIssue): AgentIssue | null {
     claimBlockedBy: [],
     hasExecutableContract: contractValidation.valid,
     contractValidationErrors: contractValidation.errors,
+  }
+}
+
+function mapRawIssueBodySnapshot(
+  issue: RawRestGitHubIssue,
+  fallbackIssueNumber: number,
+): IssueBodySnapshot {
+  return {
+    number: typeof issue.number === 'number' ? issue.number : fallbackIssueNumber,
+    title: typeof issue.title === 'string' ? issue.title : '',
+    body: typeof issue.body === 'string' ? issue.body : '',
+    url: typeof issue.html_url === 'string' ? issue.html_url : '',
+    updatedAt: typeof issue.updated_at === 'string' ? issue.updated_at : '',
   }
 }
 
@@ -1032,6 +1060,58 @@ export async function getAgentIssueByNumber(
   config: AgentConfig,
 ): Promise<AgentIssue | null> {
   return fetchIssuesByNumbers([issueNumber], config).then((issues) => issues.get(issueNumber) ?? null)
+}
+
+export async function fetchIssueBodySnapshot(
+  issueNumber: number,
+  config: AgentConfig,
+): Promise<IssueBodySnapshot> {
+  const { stdout, exitCode, stderr } = await ghApiRaw([
+    `repos/${config.repo}/issues/${issueNumber}`,
+  ], config)
+
+  if (exitCode !== 0) {
+    throw new GhError(
+      `api issues/${issueNumber}`,
+      exitCode,
+      parseGhApiErrorMessage(stdout, stderr),
+    )
+  }
+
+  return mapRawIssueBodySnapshot(JSON.parse(stdout) as RawRestGitHubIssue, issueNumber)
+}
+
+export async function updateIssueBody(
+  issueNumber: number,
+  body: string,
+  config: AgentConfig,
+): Promise<IssueBodyUpdateResult> {
+  const response = await withTempJsonFile(
+    'agent-loop-issue-body-update',
+    { body },
+    async (path) => ghApiRaw([
+      `repos/${config.repo}/issues/${issueNumber}`,
+      '-X',
+      'PATCH',
+      '--input',
+      path,
+    ], config),
+  )
+
+  if (response.exitCode !== 0) {
+    throw new GhError(
+      `api issues/${issueNumber} update body`,
+      response.exitCode,
+      parseGhApiErrorMessage(response.stdout, response.stderr),
+    )
+  }
+
+  const updated = mapRawIssueBodySnapshot(JSON.parse(response.stdout) as RawRestGitHubIssue, issueNumber)
+  return {
+    number: updated.number,
+    url: updated.url,
+    updatedAt: updated.updatedAt,
+  }
 }
 
 async function enrichClaimability(

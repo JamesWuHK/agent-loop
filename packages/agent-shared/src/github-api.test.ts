@@ -15,6 +15,7 @@ import {
   extractOpenIssueConnectionPage,
   extractManagedLeaseComment,
   getActiveManagedLease,
+  fetchIssueBodySnapshot,
   getLatestManagedLease,
   isGraphQlRateLimitErrorMessage,
   isManagedLeaseExpired,
@@ -29,6 +30,7 @@ import {
   selectActivePullRequestForBranch,
   sortClaimableIssuesForScheduling,
   shouldClearIssueAssigneesForStateLabel,
+  updateIssueBody,
 } from './github-api'
 import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, type AgentConfig, type AgentIssue } from './types'
 
@@ -220,6 +222,90 @@ describe('ghApiRaw', () => {
       expect((observations[0]?.durationMs ?? 0) >= 0).toBe(true)
     } finally {
       setGitHubApiRequestObserver(null)
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('issue body helpers', () => {
+  test('fetches an issue body snapshot through the shared GitHub API helper', async () => {
+    const originalFetch = globalThis.fetch
+    const config = {
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    } as AgentConfig
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+
+      expect(url).toBe('https://api.github.com/repos/JamesWuHK/agent-loop/issues/54')
+
+      return new Response(JSON.stringify({
+        number: 54,
+        title: '[AL-14] apply',
+        body: 'remote markdown',
+        html_url: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+        updated_at: '2026-04-12T08:00:00.000Z',
+      }), { status: 200 })
+    }) as typeof fetch
+
+    try {
+      await expect(fetchIssueBodySnapshot(54, config)).resolves.toEqual({
+        number: 54,
+        title: '[AL-14] apply',
+        body: 'remote markdown',
+        url: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+        updatedAt: '2026-04-12T08:00:00.000Z',
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test('updates an issue body through the shared GitHub API helper', async () => {
+    const originalFetch = globalThis.fetch
+    const config = {
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    } as AgentConfig
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+
+      expect(url).toBe('https://api.github.com/repos/JamesWuHK/agent-loop/issues/54')
+      expect(init?.method).toBe('PATCH')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        body: '## 用户故事\npatched markdown',
+      })
+
+      return new Response(JSON.stringify({
+        number: 54,
+        title: '[AL-14] apply',
+        body: '## 用户故事\npatched markdown',
+        html_url: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+        updated_at: '2026-04-12T08:06:00.000Z',
+      }), { status: 200 })
+    }) as typeof fetch
+
+    try {
+      await expect(updateIssueBody(
+        54,
+        '## 用户故事\npatched markdown',
+        config,
+      )).resolves.toEqual({
+        number: 54,
+        url: 'https://github.com/JamesWuHK/agent-loop/issues/54',
+        updatedAt: '2026-04-12T08:06:00.000Z',
+      })
+    } finally {
       globalThis.fetch = originalFetch
     }
   })
