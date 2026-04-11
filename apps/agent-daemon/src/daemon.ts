@@ -2663,21 +2663,21 @@ export class AgentDaemon {
         abortMessage: `Aborted because remote issue #${issueNumber} is already done`,
       })
 
-      const prCheck = await checkPrExists(branch, this.config)
-      const linkedPrContext = getIssueRecoveryLinkedPrContext(prCheck, branch)
-      const linkedOpenPr = linkedPrContext
-        ? (await listOpenAgentPullRequests(this.config)).find((pr) => pr.number === linkedPrContext.number) ?? null
-        : null
-      if (linkedOpenPr && shouldResetLinkedPrToRetryOnIssueResume(linkedOpenPr.labels)) {
-        await setManagedPrReviewLabels(linkedOpenPr.number, 'retry', this.config)
+      const linkedRecoveryPr = getOpenLinkedPrForIssueRecovery(
+        await checkPrExists(branch, this.config),
+        branch,
+        await listOpenAgentPullRequests(this.config),
+      )
+      if (linkedRecoveryPr && shouldResetLinkedPrToRetryOnIssueResume(linkedRecoveryPr.pr.labels)) {
+        await setManagedPrReviewLabels(linkedRecoveryPr.pr.number, 'retry', this.config)
         this.logger.log(
-          `[daemon] marked linked PR #${linkedOpenPr.number} as retry because issue #${issueNumber} resumed local recovery`,
+          `[daemon] marked linked PR #${linkedRecoveryPr.pr.number} as retry because issue #${issueNumber} resumed local recovery`,
         )
       }
       const recentBlockingReasons = [
         ...extractAutomatedIssuePreflightReasons(await listIssueComments(issueNumber, this.config)),
-        ...(linkedPrContext
-          ? extractAutomatedReviewReasons(await listIssueComments(linkedPrContext.number, this.config))
+        ...(linkedRecoveryPr
+          ? extractAutomatedReviewReasons(await listIssueComments(linkedRecoveryPr.pr.number, this.config))
           : []),
       ]
       const recoveryResult = await runIssueRecovery(
@@ -2687,7 +2687,7 @@ export class AgentDaemon {
         issue.body,
         this.config,
         this.logger,
-        linkedPrContext,
+        linkedRecoveryPr?.context ?? null,
         recentBlockingReasons,
         monitor,
       )
@@ -4895,6 +4895,26 @@ export function getIssueRecoveryLinkedPrContext(
     number: prCheck.prNumber,
     url: prCheck.prUrl,
     branch,
+  }
+}
+
+export function getOpenLinkedPrForIssueRecovery(
+  prCheck: Pick<PrCheckResult, 'prNumber' | 'prState' | 'prUrl'>,
+  branch: string,
+  openPrs: Array<Pick<ManagedPullRequest, 'number' | 'url' | 'headRefName' | 'labels'>>,
+): {
+  pr: Pick<ManagedPullRequest, 'number' | 'url' | 'headRefName' | 'labels'>
+  context: { number: number; url: string; branch: string }
+} | null {
+  const context = getIssueRecoveryLinkedPrContext(prCheck, branch)
+  if (!context) return null
+
+  const pr = openPrs.find((candidate) => candidate.number === context.number) ?? null
+  if (!pr) return null
+
+  return {
+    pr,
+    context,
   }
 }
 

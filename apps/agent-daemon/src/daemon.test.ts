@@ -36,6 +36,7 @@ import {
   shouldResumeFailedIssueWithLinkedPr,
   getStandaloneIssueTransitionForReviewLabels,
   getIssueRecoveryLinkedPrContext,
+  getOpenLinkedPrForIssueRecovery,
   isRetryableDaemonLoopError,
   isMergeabilityFailure,
   refreshResumableIssueBranchOntoDefault,
@@ -1813,6 +1814,46 @@ describe('daemon merge recovery helpers', () => {
       prState: 'merged',
       prUrl: 'https://example.com/pr/110',
     }, 'agent/110/codex-dev')).toBeNull()
+  })
+
+  test('only uses open linked PRs that are still present in the open PR list during issue recovery', () => {
+    const openPr = {
+      number: 110,
+      url: 'https://example.com/pr/110',
+      headRefName: 'agent/110/codex-dev',
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED],
+    }
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'open',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toEqual({
+      pr: openPr,
+      context: {
+        number: 110,
+        url: 'https://example.com/pr/110',
+        branch: 'agent/110/codex-dev',
+      },
+    })
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'closed',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toBeNull()
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'merged',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [openPr])).toBeNull()
+
+    expect(getOpenLinkedPrForIssueRecovery({
+      prNumber: 110,
+      prState: 'open',
+      prUrl: 'https://example.com/pr/110',
+    }, 'agent/110/codex-dev', [])).toBeNull()
   })
 
   test('prefers standalone PR handoff for resumable issues when the branch is already synced', () => {
