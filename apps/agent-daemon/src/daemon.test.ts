@@ -32,6 +32,8 @@ import {
   shouldDeferResumableIssueForActiveLinkedPrTask,
   shouldDeferResumableIssueForActiveLinkedPrLease,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
+  classifyApprovedPrMergeChecksGate,
+  classifyLinkedIssueApprovedMergeOutcome,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
   shouldResumeFailedIssueWithLinkedPr,
@@ -2236,6 +2238,94 @@ describe('daemon merge recovery helpers', () => {
     expect(isMergeabilityFailure('Pull Request is not mergeable')).toBe(true)
     expect(isMergeabilityFailure('Merge conflict between base and head')).toBe(true)
     expect(isMergeabilityFailure('Required status check "test" is failing')).toBe(false)
+  })
+
+  describe('approved PR merge checks gate', () => {
+    test('defers pending checks without forcing the linked issue into failed', () => {
+      expect(classifyApprovedPrMergeChecksGate({
+        state: 'pending',
+        summary: 'build-and-test is pending',
+      })).toEqual({
+        outcome: 'defer',
+        recoverable: true,
+        reason: 'PR checks not ready for merge: build-and-test is pending',
+      })
+    })
+
+    test('routes failing checks to human-needed', () => {
+      expect(classifyApprovedPrMergeChecksGate({
+        state: 'fail',
+        summary: 'build-and-test is fail',
+      })).toEqual({
+        outcome: 'human-needed',
+        recoverable: false,
+        reason: 'PR checks failed: build-and-test is fail',
+      })
+    })
+
+    test('skips merge calls when checks fail and keeps the linked issue recoverable', async () => {
+      const daemon = createTestDaemon()
+      const comments: string[] = []
+      const reviewStates: string[] = []
+      let mergeCalls = 0
+
+      ;(daemon as any).getPullRequestChecksStatus = async () => ({
+        state: 'fail',
+        summary: 'build-and-test is fail',
+      })
+      ;(daemon as any).commentOnManagedPr = async (_prNumber: number, body: string) => {
+        comments.push(body)
+      }
+      ;(daemon as any).setManagedPrReviewState = async (_prNumber: number, state: string) => {
+        reviewStates.push(state)
+      }
+      ;(daemon as any).mergeManagedPullRequest = async () => {
+        mergeCalls += 1
+        return { merged: true, message: 'unexpected merge' }
+      }
+
+      const mergeResult = await (daemon as any).attemptApprovedPrMergeWithRecovery(
+        110,
+        'https://github.com/JamesWuHK/agent-loop/pull/110',
+        'agent/61/codex-dev',
+        '/tmp/worktrees/issue-61-codex-dev',
+      )
+
+      expect(mergeCalls).toBe(0)
+      expect(reviewStates).toEqual(['human-needed'])
+      expect(comments).toHaveLength(1)
+      expect(comments[0]).toContain('PR checks failed: build-and-test is fail')
+      expect(mergeResult).toMatchObject({
+        merged: false,
+        message: 'PR checks failed: build-and-test is fail',
+        checksBlocked: true,
+      })
+      expect(classifyLinkedIssueApprovedMergeOutcome(mergeResult)).toEqual({
+        status: 'recoverable',
+        reason: 'PR checks failed: build-and-test is fail',
+      })
+    })
+
+    test('treats check lookup errors as recoverable deferrals', () => {
+      expect(classifyApprovedPrMergeChecksGate({
+        state: 'error',
+        summary: 'gh pr checks exited with code 4',
+      })).toEqual({
+        outcome: 'defer',
+        recoverable: true,
+        reason: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
+      })
+    })
+
+    test('keeps true merge failures on the failed linked-issue path', () => {
+      expect(classifyLinkedIssueApprovedMergeOutcome({
+        merged: false,
+        message: 'Pull Request is not mergeable',
+      })).toEqual({
+        status: 'failed',
+        reason: 'Pull Request is not mergeable',
+      })
+    })
   })
 
   test('builds a merge retry comment with recovery details', () => {

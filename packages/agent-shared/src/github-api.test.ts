@@ -18,6 +18,8 @@ import {
   fetchIssueBodySnapshot,
   getLatestManagedLease,
   getManagedPullRequestByNumber,
+  getPullRequestChecksStatus,
+  interpretPullRequestChecksResult,
   isGraphQlRateLimitErrorMessage,
   isManagedLeaseExpired,
   isManagedLeaseProgressStale,
@@ -431,6 +433,76 @@ describe('parseMergePrResponse', () => {
       message: 'Pull Request is not mergeable',
       sha: undefined,
     })
+  })
+})
+
+describe('interpretPullRequestChecksResult', () => {
+  test('treats failing checks as a merge blocker', () => {
+    expect(interpretPullRequestChecksResult({
+      stdout: 'build-and-test\tfail\t2m46s\thttps://example.test/run/1',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+    })).toEqual({
+      state: 'fail',
+      summary: 'build-and-test is fail',
+    })
+  })
+
+  test('treats pending checks as not ready yet', () => {
+    expect(interpretPullRequestChecksResult({
+      stdout: 'build-and-test\tpending\t0\thttps://example.test/run/1',
+      stderr: '',
+      exitCode: 8,
+      timedOut: false,
+    })).toEqual({
+      state: 'pending',
+      summary: 'build-and-test is pending',
+    })
+  })
+
+  test('allows merge when GitHub reports that no checks exist', () => {
+    expect(interpretPullRequestChecksResult({
+      stdout: "no checks reported on the 'agent/350/codex-dev-r1' branch",
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+    })).toEqual({
+      state: 'pass',
+      summary: 'No checks reported',
+    })
+  })
+})
+
+describe('getPullRequestChecksStatus', () => {
+  test('runs gh pr checks against the configured repository', async () => {
+    const calls: Array<{ args: string[]; pat: string }> = []
+
+    const status = await getPullRequestChecksStatus(
+      390,
+      {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+      async (args, config) => {
+        calls.push({ args, pat: config.pat })
+        return {
+          stdout: 'build-and-test\tpass\t2m43s\thttps://example.test/run/1',
+          stderr: '',
+          exitCode: 0,
+          timedOut: false,
+        }
+      },
+    )
+
+    expect(status).toEqual({
+      state: 'pass',
+      summary: '1 check(s) passed',
+    })
+    expect(calls).toEqual([{
+      args: ['pr', 'checks', '390', '-R', 'JamesWuHK/agent-loop'],
+      pat: 'test-token',
+    }])
   })
 })
 
