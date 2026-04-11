@@ -1,0 +1,31 @@
+{
+  "name": "self-bootstrap-closed-pr-recreate",
+  "openIssues": [
+    {
+      "number": 321,
+      "title": "ready issue after closed PR recreate path",
+      "body": "## 用户故事\n\n作为 agent-loop 维护者，我希望 closed PR 历史不会继续阻塞 fresh PR recreate path。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/replay-eval.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/pr-reporter.ts\n\n### MustPreserve\n- replay remains local and deterministic\n\n### OutOfScope\n- touching live GitHub PR state\n\n### RequiredSemantics\n- issue is still claimable when no open linked PR remains\n\n### ReviewHints\n- verify the case stays green without network access\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('self-bootstrap closed pr recreate fixture')\n```\n\n## 实现步骤\n1. add replay fixture\n\n## 验收\n- [ ] ready issue remains claimable",
+      "labels": [
+        "agent:ready"
+      ],
+      "assignees": [],
+      "state": "open",
+      "updatedAt": "2026-04-11T10:05:00.000Z"
+    }
+  ],
+  "issueComments": [
+    {
+      "issueNumber": 321,
+      "commentId": 1,
+      "body": "Historical note: a previous linked PR was closed and should not appear in the open PR replay state.",
+      "createdAt": "2026-04-11T10:04:00.000Z",
+      "updatedAt": "2026-04-11T10:04:00.000Z"
+    }
+  ],
+  "openPullRequests": [],
+  "expected": {
+    "claimable": 1,
+    "blocked": 0,
+    "invalid": 0
+  }
+}
