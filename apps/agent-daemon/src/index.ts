@@ -11,9 +11,17 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
-import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
+import {
+  buildConfig,
+  loadConfig,
+  loadRepoLocalConfig,
+  readConfigFile,
+  resolveLocalDaemonIdentity,
+  type CliArgs,
+} from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
 import { appendWakeRequest, buildWakeQueuePath, type WakeRequest } from './wake-queue'
 import { readWakeRequestFromGitHubEventContext } from './github-event-wake'
@@ -62,6 +70,13 @@ import {
   resolveBootstrapGateExitCode,
   type BootstrapGateReport,
 } from './bootstrap-gate'
+import {
+  evaluateBootstrapScenarioFixtureDirectory,
+  formatBootstrapScenarioSuiteReport,
+  formatBootstrapScenarioSuiteReportJson,
+  resolveBootstrapScenarioSuiteExitCode,
+  type BootstrapScenarioSuiteReport,
+} from './replay-eval'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -108,6 +123,10 @@ export interface ExecuteIssueLintInput {
 export interface ExecuteBootstrapGateInput {
   repo?: string
   pat?: string
+}
+
+export interface ExecuteBootstrapScenarioInput {
+  fixturesDir?: string
 }
 
 export interface RestartManagedRuntimeInput {
@@ -188,7 +207,14 @@ interface IssueLintCommandDependencies {
 }
 
 interface BootstrapGateCommandDependencies {
+  buildConfig: typeof buildConfig
+  loadRepoLocalConfig: typeof loadRepoLocalConfig
+  readConfigFile: typeof readConfigFile
   buildBootstrapGateReportForRepo: typeof buildBootstrapGateReportForRepo
+}
+
+interface BootstrapScenarioCommandDependencies {
+  evaluateBootstrapScenarioFixtureDirectory: typeof evaluateBootstrapScenarioFixtureDirectory
 }
 
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
@@ -218,8 +244,16 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
 }
 
 const DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES: BootstrapGateCommandDependencies = {
+  buildConfig,
+  loadRepoLocalConfig,
+  readConfigFile,
   buildBootstrapGateReportForRepo,
 }
+
+const DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES: BootstrapScenarioCommandDependencies = {
+  evaluateBootstrapScenarioFixtureDirectory,
+}
+const DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR = join(import.meta.dir, 'fixtures', 'replay')
 
 async function main() {
   const { values: args } = parseArgs({
@@ -260,6 +294,7 @@ async function main() {
       'github-event-path': { type: 'string' },
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
+      'bootstrap-scenarios': { type: 'boolean' },
       'bootstrap-gate': { type: 'boolean' },
       json: { type: 'boolean' },
       help: { type: 'boolean' },
@@ -296,6 +331,10 @@ async function main() {
     assertIssueLintCompatible(args)
   }
 
+  if (args['bootstrap-scenarios']) {
+    assertBootstrapScenarioCompatible(args)
+  }
+
   if (args['bootstrap-gate']) {
     assertBootstrapGateCompatible(args)
   }
@@ -307,6 +346,9 @@ async function main() {
     if (issueLintTarget) {
       throw new Error('--wake-from-github-event cannot be combined with --lint-issue or --lint-file')
     }
+    if (args['bootstrap-scenarios']) {
+      throw new Error('--wake-from-github-event cannot be combined with --bootstrap-scenarios')
+    }
     if (args['bootstrap-gate']) {
       throw new Error('--wake-from-github-event cannot be combined with --bootstrap-gate')
     }
@@ -315,6 +357,18 @@ async function main() {
 
   if (wakeCommand && issueLintTarget) {
     throw new Error('--lint-issue/--lint-file cannot be combined with wake commands')
+  }
+
+  if (args['bootstrap-scenarios'] && wakeCommand) {
+    throw new Error('--bootstrap-scenarios cannot be combined with wake commands')
+  }
+
+  if (args['bootstrap-scenarios'] && issueLintTarget) {
+    throw new Error('--bootstrap-scenarios cannot be combined with --lint-issue or --lint-file')
+  }
+
+  if (args['bootstrap-scenarios'] && args['bootstrap-gate']) {
+    throw new Error('--bootstrap-scenarios cannot be combined with --bootstrap-gate')
   }
 
   if (args['bootstrap-gate'] && wakeCommand) {
@@ -389,6 +443,12 @@ async function main() {
     })
     console.log(formatIssueLintOutput(report, args.json as boolean | undefined))
     process.exit(report.readyGateBlocked ? 1 : 0)
+  }
+
+  if (args['bootstrap-scenarios']) {
+    const report = await executeBootstrapScenarioCommand()
+    console.log(formatBootstrapScenarioOutput(report, args.json as boolean | undefined))
+    process.exit(resolveBootstrapScenarioSuiteExitCode(report))
   }
 
   if (args['bootstrap-gate']) {
@@ -757,6 +817,7 @@ Usage:
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
+  agent-loop --bootstrap-scenarios [--json]
   agent-loop --bootstrap-gate [--repo owner/repo --json]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
@@ -792,8 +853,9 @@ Options:
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
+      --bootstrap-scenarios   Evaluate the fixed self-bootstrap replay suite
       --bootstrap-gate        Evaluate the deterministic self-bootstrap release gate
-      --json                  Print machine-readable JSON for lint and bootstrap gate commands
+      --json                  Print machine-readable JSON for lint, bootstrap scenario, and bootstrap gate commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -837,6 +899,7 @@ Examples:
   agent-loop --wake-pr 381 --health-port 9311
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
+  agent-loop --bootstrap-scenarios --json
   agent-loop --bootstrap-gate --repo JamesWuHK/agent-loop --json
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
@@ -989,12 +1052,28 @@ export function formatIssueLintOutput(
   return asJson ? formatIssueLintReportJson(report) : formatIssueLintReport(report)
 }
 
+export async function executeBootstrapScenarioCommand(
+  input: ExecuteBootstrapScenarioInput = {},
+  deps: BootstrapScenarioCommandDependencies = DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES,
+): Promise<BootstrapScenarioSuiteReport> {
+  return deps.evaluateBootstrapScenarioFixtureDirectory(
+    input.fixturesDir ?? DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR,
+  )
+}
+
+export function formatBootstrapScenarioOutput(
+  report: BootstrapScenarioSuiteReport,
+  asJson = false,
+): string {
+  return asJson ? formatBootstrapScenarioSuiteReportJson(report) : formatBootstrapScenarioSuiteReport(report)
+}
+
 export async function executeBootstrapGateCommand(
   input: ExecuteBootstrapGateInput,
   deps: BootstrapGateCommandDependencies = DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES,
 ): Promise<BootstrapGateReport> {
   return deps.buildBootstrapGateReportForRepo({
-    config: buildBootstrapGateReadOnlyConfig(input),
+    config: buildBootstrapGateReadOnlyConfig(input, deps),
   })
 }
 
@@ -1007,55 +1086,30 @@ export function formatBootstrapGateOutput(
 
 function buildBootstrapGateReadOnlyConfig(
   input: ExecuteBootstrapGateInput,
+  deps: Pick<BootstrapGateCommandDependencies, 'buildConfig' | 'loadRepoLocalConfig' | 'readConfigFile'>,
 ): AgentConfig {
   const repo = input.repo?.trim()
   if (!repo) {
     throw new Error('--bootstrap-gate requires --repo owner/repo')
   }
 
-  return {
-    machineId: 'bootstrap-gate-readonly',
-    repo,
-    pat: input.pat ?? '',
-    pollIntervalMs: 60_000,
-    idlePollIntervalMs: 300_000,
-    concurrency: 1,
-    requestedConcurrency: 1,
-    concurrencyPolicy: {
-      requested: 1,
-      effective: 1,
-      repoCap: null,
-      profileCap: null,
-      projectCap: null,
+  const readOnlyMachineId = 'bootstrap-gate-readonly'
+  const fileConfig = deps.readConfigFile()
+
+  return deps.buildConfig(
+    {
+      repo,
+      pat: input.pat,
+      machineId: readOnlyMachineId,
     },
-    scheduling: {
-      concurrencyByRepo: {},
-      concurrencyByProfile: {},
+    {
+      fileConfig: {
+        ...fileConfig,
+        machineId: fileConfig.machineId ?? readOnlyMachineId,
+      },
+      repoConfig: deps.loadRepoLocalConfig(),
     },
-    recovery: {
-      heartbeatIntervalMs: 30_000,
-      leaseTtlMs: 60_000,
-      workerIdleTimeoutMs: 300_000,
-      leaseAdoptionBackoffMs: 5_000,
-      leaseNoProgressTimeoutMs: 360_000,
-    },
-    worktreesBase: '.agent-worktrees',
-    project: {
-      profile: 'generic',
-    },
-    agent: {
-      primary: 'codex',
-      fallback: 'claude',
-      claudePath: 'claude',
-      codexPath: 'codex',
-      timeoutMs: 300_000,
-    },
-    git: {
-      defaultBranch: 'main',
-      authorName: 'agent-loop',
-      authorEmail: 'agent-loop@example.com',
-    },
-  }
+  )
 }
 
 export function buildWakeRequestFromCli(
@@ -1384,6 +1438,7 @@ function assertIssueLintCompatible(args: {
 }
 
 function assertBootstrapGateCompatible(args: {
+  'bootstrap-scenarios'?: boolean
   'wake-now'?: boolean
   'wake-issue'?: string
   'wake-pr'?: string
@@ -1416,6 +1471,7 @@ function assertBootstrapGateCompatible(args: {
   'health-port'?: string
 }): void {
   const incompatibleFlags = [
+    args['bootstrap-scenarios'] ? '--bootstrap-scenarios' : null,
     args['wake-now'] ? '--wake-now' : null,
     typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
     typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
@@ -1450,6 +1506,78 @@ function assertBootstrapGateCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Bootstrap gate cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertBootstrapScenarioCompatible(args: {
+  'bootstrap-gate'?: boolean
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['bootstrap-gate'] ? '--bootstrap-gate' : null,
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Bootstrap scenarios cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 

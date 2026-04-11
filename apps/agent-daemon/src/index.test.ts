@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   buildWakeRequestFromCli,
   executeBootstrapGateCommand,
+  executeBootstrapScenarioCommand,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
@@ -12,6 +13,7 @@ import {
   executeWakeCommand,
   executeWakeRequest,
   formatBootstrapGateOutput,
+  formatBootstrapScenarioOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
@@ -343,11 +345,73 @@ describe('index helpers', () => {
   test('executes bootstrap gate with repo-aware config and supports json output', async () => {
     const report = await executeBootstrapGateCommand({
       repo: 'JamesWuHK/agent-loop',
-      pat: 'ghp_test',
     }, {
+      readConfigFile: () => ({
+        pat: 'ghp_from_config',
+      } as any),
+      loadRepoLocalConfig: () => ({
+        project: {
+          profile: 'generic',
+        },
+      }),
+      buildConfig: (args = {}, options = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: undefined,
+          machineId: 'bootstrap-gate-readonly',
+        })
+        expect(options.fileConfig).toMatchObject({
+          pat: 'ghp_from_config',
+          machineId: 'bootstrap-gate-readonly',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_from_config',
+          machineId: 'bootstrap-gate-readonly',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        } as any
+      },
       buildBootstrapGateReportForRepo: async ({ config }) => {
         expect(config.repo).toBe('JamesWuHK/agent-loop')
-        expect(config.pat).toBe('ghp_test')
+        expect(config.pat).toBe('ghp_from_config')
         expect(config.machineId).toBe('bootstrap-gate-readonly')
 
         return {
@@ -395,6 +459,43 @@ describe('index helpers', () => {
       ],
     })
     expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
+  })
+
+  test('executes bootstrap scenarios with the replay fixture suite and supports json output', async () => {
+    const report = await executeBootstrapScenarioCommand({}, {
+      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
+        expect(fixturesDir.endsWith(join('fixtures', 'replay'))).toBe(true)
+
+        return {
+          suite: 'self-bootstrap-v0.2',
+          ok: true,
+          failedCases: [],
+          cases: [
+            {
+              name: 'self-bootstrap-happy-path',
+              ok: true,
+              present: true,
+              mismatches: [],
+              actual: { claimable: 1, blocked: 0, invalid: 0 },
+              expected: { claimable: 1, blocked: 0, invalid: 0 },
+            },
+          ],
+          summary: {
+            requiredCases: 4,
+            presentCases: 4,
+            passedCases: 4,
+            failedCases: 0,
+          },
+        }
+      },
+    })
+
+    expect(report.ok).toBe(true)
+    expect(JSON.parse(formatBootstrapScenarioOutput(report, true))).toMatchObject({
+      suite: 'self-bootstrap-v0.2',
+      ok: true,
+    })
+    expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
   })
 
   test('requires an explicit repo for the bootstrap gate command', async () => {
