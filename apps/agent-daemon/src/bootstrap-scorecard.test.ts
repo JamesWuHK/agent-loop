@@ -71,13 +71,30 @@ describe('buildBootstrapScorecard', () => {
       prBlockers: [{ issueNumber: 60, reason: 'closed PR blocked fresh PR creation' }],
       reviewBlockers: [{ issueNumber: 61, reason: 'agent:human-needed review blocker remains open' }],
       releaseEvidenceMissing: ['self_bootstrap_suite_green'],
+      suppressedBlockers: [{
+        category: 'review_failure',
+        issueNumber: 39,
+        prNumber: 81,
+        reason: 'auto-fix changed files outside AllowedFiles',
+        suppressionKind: 'local_implementation',
+        localImplementationHeadline: 'feat(#39): add parent issue splitter',
+      }],
     })
 
     expect(scorecard.ready).toBe(false)
     expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(1)
     expect(scorecard.categoryCounts.release_process_failure).toBe(1)
     expect(scorecard.categoryCounts.contract_failure).toBe(2)
+    expect(scorecard.suppressedCategoryCounts.review_failure).toBe(1)
+    expect(scorecard.suppressedBlockers).toEqual([
+      expect.objectContaining({
+        category: 'review_failure',
+        suppressionKind: 'local_implementation',
+        issueNumber: 39,
+      }),
+    ])
     expect(resolveBootstrapScorecardExitCode(scorecard)).toBe(1)
+    expect(formatBootstrapScorecard(scorecard)).toContain('suppressedBlockers:')
     expect(formatBootstrapScorecard(scorecard)).toContain('Bootstrap Scorecard')
   })
 })
@@ -209,6 +226,15 @@ describe('buildBootstrapScorecardForRepo', () => {
         reason: 'Approval bar flow regressed',
       }),
     ])
+    expect(scorecard.suppressedCategoryCounts).toEqual({
+      contract_failure: 0,
+      runtime_failure: 0,
+      pr_lifecycle_failure: 0,
+      review_failure: 0,
+      github_transport_failure: 0,
+      release_process_failure: 0,
+    })
+    expect(scorecard.suppressedBlockers).toEqual([])
   })
 
   test('does not derive release blockers from issue titles alone', async () => {
@@ -550,5 +576,23 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.ready).toBe(true)
     expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(0)
     expect(scorecard.categoryCounts.review_failure).toBe(0)
+    expect(scorecard.suppressedCategoryCounts.pr_lifecycle_failure).toBe(1)
+    expect(scorecard.suppressedCategoryCounts.review_failure).toBe(1)
+    expect(scorecard.suppressedBlockers).toEqual([
+      expect.objectContaining({
+        category: 'pr_lifecycle_failure',
+        issueNumber: 70,
+        prNumber: 77,
+        suppressionKind: 'local_implementation',
+        localImplementationHeadline: 'Fix #70 add bootstrap scorecard taxonomy report',
+      }),
+      expect.objectContaining({
+        category: 'review_failure',
+        issueNumber: 70,
+        prNumber: 77,
+        suppressionKind: 'local_implementation',
+        localImplementationHeadline: 'Fix #70 add bootstrap scorecard taxonomy report',
+      }),
+    ])
   })
 })

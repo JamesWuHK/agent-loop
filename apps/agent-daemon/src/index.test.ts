@@ -7,6 +7,7 @@ import {
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeBootstrapConvergenceCommand,
   executeBootstrapGateCommand,
   executeBootstrapScorecardCommand,
   executeBootstrapScenarioCommand,
@@ -20,6 +21,7 @@ import {
   executeWakeCommand,
   executeWakeRequest,
   formatAuditIssuesOutput,
+  formatBootstrapConvergenceOutput,
   formatBootstrapGateOutput,
   formatBootstrapScorecardOutput,
   formatBootstrapScenarioOutput,
@@ -633,6 +635,7 @@ describe('index helpers', () => {
               title: '[AL-7] repo grounded context',
             },
           ],
+          suppressedBlockers: [],
           requiredEvidence: [
             {
               code: 'self_bootstrap_suite_green',
@@ -819,6 +822,15 @@ describe('index helpers', () => {
               reason: '2 invalid ready issue(s) require executable contracts',
             },
           ],
+          suppressedCategoryCounts: {
+            contract_failure: 0,
+            runtime_failure: 0,
+            pr_lifecycle_failure: 0,
+            review_failure: 0,
+            github_transport_failure: 0,
+            release_process_failure: 0,
+          },
+          suppressedBlockers: [],
           auditSummary: {
             managedIssueCount: 8,
             readyIssueCount: 3,
@@ -842,6 +854,66 @@ describe('index helpers', () => {
       },
     })
     expect(formatBootstrapScorecardOutput(scorecard)).toContain('Bootstrap Scorecard')
+  })
+
+  test('executes bootstrap convergence with repo-aware config and supports json output', async () => {
+    const report = await executeBootstrapConvergenceCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/agent-loop',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+        } as never
+      },
+      buildBootstrapConvergenceReportForRepo: async ({ config, repoRoot }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+        expect(repoRoot).toBe('/tmp/agent-loop')
+
+        return {
+          gateReady: true,
+          scorecardReady: true,
+          converged: false,
+          summary: {
+            totalActions: 2,
+            issueActions: 1,
+            pullRequestActions: 1,
+          },
+          actions: [
+            {
+              kind: 'issue_state_sync',
+              issueNumber: 37,
+              prNumber: null,
+              remoteState: 'failed',
+              categories: [],
+              reasons: [],
+              localImplementationHeadline: 'feat(#37): add repo authoring context',
+              recommendedAction: 'sync_issue_state',
+              summary: 'Issue #37 is still failed remotely even though the current branch already contains the implementation.',
+            },
+          ],
+        }
+      },
+    })
+
+    expect(report.converged).toBe(false)
+    expect(JSON.parse(formatBootstrapConvergenceOutput(report, true))).toMatchObject({
+      gateReady: true,
+      scorecardReady: true,
+      converged: false,
+      summary: {
+        totalActions: 2,
+      },
+    })
+    expect(formatBootstrapConvergenceOutput(report)).toContain('Bootstrap Convergence')
   })
 
   test('resolves rewrite file paths and rejects empty values', () => {

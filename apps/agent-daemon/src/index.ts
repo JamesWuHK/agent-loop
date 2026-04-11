@@ -68,6 +68,13 @@ import {
   type BootstrapGateReport,
 } from './bootstrap-gate'
 import {
+  buildBootstrapConvergenceReportForRepo,
+  formatBootstrapConvergenceReport,
+  formatBootstrapConvergenceReportJson,
+  resolveBootstrapConvergenceExitCode,
+  type BootstrapConvergenceReport,
+} from './bootstrap-convergence'
+import {
   buildBootstrapScorecardForRepo,
   formatBootstrapScorecard,
   formatBootstrapScorecardJson,
@@ -174,6 +181,12 @@ export interface ExecuteBootstrapScenarioInput {
 export interface ExecuteBootstrapScorecardInput {
   repo?: string
   pat?: string
+}
+
+export interface ExecuteBootstrapConvergenceInput {
+  repo?: string
+  pat?: string
+  repoRoot?: string
 }
 
 export interface ExecuteAuditIssuesInput {
@@ -333,6 +346,11 @@ interface BootstrapScorecardCommandDependencies {
   buildBootstrapScorecardForRepo: typeof buildBootstrapScorecardForRepo
 }
 
+interface BootstrapConvergenceCommandDependencies {
+  loadConfig: typeof loadConfig
+  buildBootstrapConvergenceReportForRepo: typeof buildBootstrapConvergenceReportForRepo
+}
+
 interface AuditIssuesCommandDependencies {
   loadConfig: typeof loadConfig
   loadIssuesForAudit: typeof loadIssuesForAudit
@@ -414,6 +432,11 @@ const DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR = join(import.meta.dir, 'fixtures'
 const DEFAULT_BOOTSTRAP_SCORECARD_COMMAND_DEPENDENCIES: BootstrapScorecardCommandDependencies = {
   loadConfig,
   buildBootstrapScorecardForRepo,
+}
+
+const DEFAULT_BOOTSTRAP_CONVERGENCE_COMMAND_DEPENDENCIES: BootstrapConvergenceCommandDependencies = {
+  loadConfig,
+  buildBootstrapConvergenceReportForRepo,
 }
 
 const DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES: AuditIssuesCommandDependencies = {
@@ -506,6 +529,7 @@ async function main() {
       'bootstrap-gate': { type: 'boolean' },
       'bootstrap-scenarios': { type: 'boolean' },
       'bootstrap-scorecard': { type: 'boolean' },
+      'bootstrap-convergence': { type: 'boolean' },
       'simulate-issue': { type: 'string' },
       'simulate-file': { type: 'string' },
       'repair-file': { type: 'string' },
@@ -726,6 +750,55 @@ async function main() {
       'lint-file': args['lint-file'] as string | undefined,
       'bootstrap-gate': args['bootstrap-gate'] as boolean | undefined,
       'bootstrap-scenarios': args['bootstrap-scenarios'] as boolean | undefined,
+      'simulate-issue': args['simulate-issue'] as string | undefined,
+      'simulate-file': args['simulate-file'] as string | undefined,
+      'rewrite-file': args['rewrite-file'] as string | undefined,
+      'split-file': args['split-file'] as string | undefined,
+      'split-start-number': args['split-start-number'] as string | undefined,
+      simulate: args.simulate as boolean | undefined,
+      concurrency: args.concurrency as string | undefined,
+      'poll-interval': args['poll-interval'] as string | undefined,
+      'idle-poll-interval': args['idle-poll-interval'] as string | undefined,
+      'machine-id': args['machine-id'] as string | undefined,
+      'dry-run': args['dry-run'] as boolean | undefined,
+      'metrics-port': args['metrics-port'] as string | undefined,
+      dashboard: args.dashboard as boolean | undefined,
+      'dashboard-host': args['dashboard-host'] as string | undefined,
+      'dashboard-port': args['dashboard-port'] as string | undefined,
+      daemonize: args.daemonize as boolean | undefined,
+      'join-project': args['join-project'] as boolean | undefined,
+      'repo-cap': args['repo-cap'] as string | undefined,
+      runtimes: args.runtimes as boolean | undefined,
+      start: args.start as boolean | undefined,
+      logs: args.logs as boolean | undefined,
+      reconcile: args.reconcile as boolean | undefined,
+      restart: args.restart as boolean | undefined,
+      'launchd-install': args['launchd-install'] as boolean | undefined,
+      'launchd-uninstall': args['launchd-uninstall'] as boolean | undefined,
+      'launchd-status': args['launchd-status'] as boolean | undefined,
+      stop: args.stop as boolean | undefined,
+      once: args.once as boolean | undefined,
+      status: args.status as boolean | undefined,
+      doctor: args.doctor as boolean | undefined,
+      'health-host': args['health-host'] as string | undefined,
+      'health-port': args['health-port'] as string | undefined,
+    })
+  }
+
+  if (args['bootstrap-convergence']) {
+    assertBootstrapConvergenceCompatible({
+      'wake-now': args['wake-now'] as boolean | undefined,
+      'wake-issue': args['wake-issue'] as string | undefined,
+      'wake-pr': args['wake-pr'] as string | undefined,
+      'wake-from-github-event': args['wake-from-github-event'] as boolean | undefined,
+      'audit-issues': args['audit-issues'] as boolean | undefined,
+      'apply-file': args['apply-file'] as string | undefined,
+      'repair-file': args['repair-file'] as string | undefined,
+      'lint-issue': args['lint-issue'] as string | undefined,
+      'lint-file': args['lint-file'] as string | undefined,
+      'bootstrap-gate': args['bootstrap-gate'] as boolean | undefined,
+      'bootstrap-scenarios': args['bootstrap-scenarios'] as boolean | undefined,
+      'bootstrap-scorecard': args['bootstrap-scorecard'] as boolean | undefined,
       'simulate-issue': args['simulate-issue'] as string | undefined,
       'simulate-file': args['simulate-file'] as string | undefined,
       'rewrite-file': args['rewrite-file'] as string | undefined,
@@ -1010,6 +1083,9 @@ async function main() {
     if (args['bootstrap-scorecard']) {
       throw new Error('--wake-from-github-event cannot be combined with --bootstrap-scorecard')
     }
+    if (args['bootstrap-convergence']) {
+      throw new Error('--wake-from-github-event cannot be combined with --bootstrap-convergence')
+    }
     assertWakeCommandCompatible(args)
   }
 
@@ -1109,6 +1185,16 @@ async function main() {
     })
     console.log(formatBootstrapScorecardOutput(scorecard, args.json as boolean | undefined))
     process.exit(resolveBootstrapScorecardExitCode(scorecard))
+  }
+
+  if (args['bootstrap-convergence']) {
+    const report = await executeBootstrapConvergenceCommand({
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(formatBootstrapConvergenceOutput(report, args.json as boolean | undefined))
+    process.exit(resolveBootstrapConvergenceExitCode(report))
   }
 
   if (issueApplyInput) {
@@ -1543,6 +1629,7 @@ Usage:
   agent-loop --bootstrap-gate [--repo owner/repo --json]
   agent-loop --bootstrap-scenarios [--json]
   agent-loop --bootstrap-scorecard [--repo owner/repo --json]
+  agent-loop --bootstrap-convergence [--repo owner/repo --json]
   agent-loop --simulate-file <path> [--repo owner/repo --json]
   agent-loop --simulate-issue <number> [--repo owner/repo --json]
   agent-loop --rewrite-file <path> [--repo owner/repo]
@@ -1592,6 +1679,7 @@ Options:
       --bootstrap-gate        Evaluate the deterministic self-bootstrap release gate
       --bootstrap-scenarios   Evaluate the fixed self-bootstrap replay suite
       --bootstrap-scorecard   Evaluate the self-bootstrap failure taxonomy scorecard
+      --bootstrap-convergence Report suppressed remote drift that still needs GitHub-side convergence
       --simulate-file <path>  Run read-only executability simulation for a local issue markdown file
       --simulate-issue <number>
                               Run read-only executability simulation for a remote GitHub issue body
@@ -1650,6 +1738,7 @@ Examples:
   agent-loop --bootstrap-gate --repo JamesWuHK/agent-loop --json
   agent-loop --bootstrap-scenarios --json
   agent-loop --bootstrap-scorecard --repo JamesWuHK/agent-loop --json
+  agent-loop --bootstrap-convergence --repo JamesWuHK/agent-loop --json
   agent-loop --simulate-file docs/issues/ready-gate.md --json
   agent-loop --simulate-issue 374 --repo owner/repo --json
   agent-loop --rewrite-file docs/issues/draft.md
@@ -2026,6 +2115,21 @@ export async function executeBootstrapScorecardCommand(
   })
 }
 
+export async function executeBootstrapConvergenceCommand(
+  input: ExecuteBootstrapConvergenceInput,
+  deps: BootstrapConvergenceCommandDependencies = DEFAULT_BOOTSTRAP_CONVERGENCE_COMMAND_DEPENDENCIES,
+): Promise<BootstrapConvergenceReport> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+
+  return deps.buildBootstrapConvergenceReportForRepo({
+    config,
+    repoRoot: input.repoRoot,
+  })
+}
+
 export async function executeAuditIssuesCommand(
   input: ExecuteAuditIssuesInput,
   deps: AuditIssuesCommandDependencies = DEFAULT_AUDIT_ISSUES_COMMAND_DEPENDENCIES,
@@ -2326,6 +2430,13 @@ export function formatBootstrapScorecardOutput(
   asJson = false,
 ): string {
   return asJson ? formatBootstrapScorecardJson(scorecard) : formatBootstrapScorecard(scorecard)
+}
+
+export function formatBootstrapConvergenceOutput(
+  report: BootstrapConvergenceReport,
+  asJson = false,
+): string {
+  return asJson ? formatBootstrapConvergenceReportJson(report) : formatBootstrapConvergenceReport(report)
 }
 
 export function formatAuditIssuesOutput(
@@ -3000,6 +3111,104 @@ function assertBootstrapScorecardCompatible(args: {
 
   if (incompatibleFlags.length > 0) {
     throw new Error(`Bootstrap scorecard cannot be combined with ${incompatibleFlags.join(', ')}`)
+  }
+}
+
+function assertBootstrapConvergenceCompatible(args: {
+  'wake-now'?: boolean
+  'wake-issue'?: string
+  'wake-pr'?: string
+  'wake-from-github-event'?: boolean
+  'audit-issues'?: boolean
+  'apply-file'?: string
+  'repair-file'?: string
+  'lint-issue'?: string
+  'lint-file'?: string
+  'bootstrap-gate'?: boolean
+  'bootstrap-scenarios'?: boolean
+  'bootstrap-scorecard'?: boolean
+  'simulate-issue'?: string
+  'simulate-file'?: string
+  'rewrite-file'?: string
+  'split-file'?: string
+  'split-start-number'?: string
+  simulate?: boolean
+  concurrency?: string
+  'poll-interval'?: string
+  'idle-poll-interval'?: string
+  'machine-id'?: string
+  'dry-run'?: boolean
+  'metrics-port'?: string
+  dashboard?: boolean
+  'dashboard-host'?: string
+  'dashboard-port'?: string
+  daemonize?: boolean
+  'join-project'?: boolean
+  'repo-cap'?: string
+  runtimes?: boolean
+  start?: boolean
+  logs?: boolean
+  reconcile?: boolean
+  restart?: boolean
+  'launchd-install'?: boolean
+  'launchd-uninstall'?: boolean
+  'launchd-status'?: boolean
+  stop?: boolean
+  once?: boolean
+  status?: boolean
+  doctor?: boolean
+  'health-host'?: string
+  'health-port'?: string
+}): void {
+  const incompatibleFlags = [
+    args['wake-now'] ? '--wake-now' : null,
+    typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
+    typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
+    args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    args['audit-issues'] ? '--audit-issues' : null,
+    typeof args['apply-file'] === 'string' ? '--apply-file' : null,
+    typeof args['repair-file'] === 'string' ? '--repair-file' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    args['bootstrap-gate'] ? '--bootstrap-gate' : null,
+    args['bootstrap-scenarios'] ? '--bootstrap-scenarios' : null,
+    args['bootstrap-scorecard'] ? '--bootstrap-scorecard' : null,
+    typeof args['simulate-issue'] === 'string' ? '--simulate-issue' : null,
+    typeof args['simulate-file'] === 'string' ? '--simulate-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    typeof args['split-file'] === 'string' ? '--split-file' : null,
+    typeof args['split-start-number'] === 'string' ? '--split-start-number' : null,
+    args.simulate ? '--simulate' : null,
+    typeof args.concurrency === 'string' ? '--concurrency' : null,
+    typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
+    typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
+    typeof args['machine-id'] === 'string' ? '--machine-id' : null,
+    args['dry-run'] ? '--dry-run' : null,
+    typeof args['metrics-port'] === 'string' ? '--metrics-port' : null,
+    args.dashboard ? '--dashboard' : null,
+    typeof args['dashboard-host'] === 'string' ? '--dashboard-host' : null,
+    typeof args['dashboard-port'] === 'string' ? '--dashboard-port' : null,
+    args.daemonize ? '--daemonize' : null,
+    args['join-project'] ? '--join-project' : null,
+    typeof args['repo-cap'] === 'string' ? '--repo-cap' : null,
+    args.runtimes ? '--runtimes' : null,
+    args.start ? '--start' : null,
+    args.logs ? '--logs' : null,
+    args.reconcile ? '--reconcile' : null,
+    args.restart ? '--restart' : null,
+    args['launchd-install'] ? '--launchd-install' : null,
+    args['launchd-uninstall'] ? '--launchd-uninstall' : null,
+    args['launchd-status'] ? '--launchd-status' : null,
+    args.stop ? '--stop' : null,
+    args.once ? '--once' : null,
+    args.status ? '--status' : null,
+    args.doctor ? '--doctor' : null,
+    typeof args['health-host'] === 'string' ? '--health-host' : null,
+    typeof args['health-port'] === 'string' ? '--health-port' : null,
+  ].filter((flag): flag is string => flag !== null)
+
+  if (incompatibleFlags.length > 0) {
+    throw new Error(`Bootstrap convergence cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 

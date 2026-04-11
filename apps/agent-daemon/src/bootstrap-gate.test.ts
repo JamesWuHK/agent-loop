@@ -40,6 +40,7 @@ describe('buildBootstrapGateReport', () => {
     expect(report.ready).toBe(true)
     expect(report.blockingReasons).toEqual([])
     expect(resolveBootstrapGateExitCode(report)).toBe(0)
+    expect(report.suppressedBlockers).toEqual([])
     expect(formatBootstrapGateReport(report)).toContain('ready=true')
   })
 
@@ -62,7 +63,14 @@ describe('buildBootstrapGateReport', () => {
 
     expect(report.ready).toBe(true)
     expect(report.blockingReasons).toEqual([])
+    expect(report.suppressedBlockers).toEqual([
+      expect.objectContaining({
+        issueNumber: 37,
+        suppressionKind: 'local_implementation',
+      }),
+    ])
     expect(formatBootstrapGateReport(report)).toContain('locallyImplemented=true')
+    expect(formatBootstrapGateReport(report)).toContain('suppressedBlockers:')
   })
 })
 
@@ -152,6 +160,15 @@ describe('buildBootstrapGateReportForRepo', () => {
             prNumber: 81,
             reason: 'auto-fix changed files outside AllowedFiles',
           }],
+          suppressedCategoryCounts: {
+            contract_failure: 0,
+            runtime_failure: 0,
+            pr_lifecycle_failure: 0,
+            review_failure: 0,
+            github_transport_failure: 0,
+            release_process_failure: 0,
+          },
+          suppressedBlockers: [],
           auditSummary: {
             managedIssueCount: 10,
             readyIssueCount: 0,
@@ -182,6 +199,7 @@ describe('buildBootstrapGateReportForRepo', () => {
     ])
     expect(report.blockingReasons).toContain('issue #37 is not done (state=ready, labels=agent:ready)')
     expect(report.blockingReasons).toContain('missing required evidence: bootstrap_scorecard_green')
+    expect(report.suppressedBlockers).toEqual([])
   })
 
   test('marks executable evidence missing when local suite evaluation throws', async () => {
@@ -222,6 +240,15 @@ describe('buildBootstrapGateReportForRepo', () => {
           release_process_failure: 0,
         },
         topBlockers: [],
+        suppressedCategoryCounts: {
+          contract_failure: 0,
+          runtime_failure: 0,
+          pr_lifecycle_failure: 0,
+          review_failure: 0,
+          github_transport_failure: 0,
+          release_process_failure: 0,
+        },
+        suppressedBlockers: [],
         auditSummary: {
           managedIssueCount: 0,
           readyIssueCount: 0,
@@ -251,6 +278,7 @@ describe('buildBootstrapGateReportForRepo', () => {
     expect(report.blockingReasons).toEqual([
       'missing required evidence: self_bootstrap_suite_green',
     ])
+    expect(report.suppressedBlockers).toEqual([])
   })
 
   test('marks remotely failed blockers as satisfied when the current branch already contains their implementation', async () => {
@@ -300,6 +328,15 @@ describe('buildBootstrapGateReportForRepo', () => {
           release_process_failure: 0,
         },
         topBlockers: [],
+        suppressedCategoryCounts: {
+          contract_failure: 0,
+          runtime_failure: 0,
+          pr_lifecycle_failure: 0,
+          review_failure: 0,
+          github_transport_failure: 0,
+          release_process_failure: 0,
+        },
+        suppressedBlockers: [],
         auditSummary: {
           managedIssueCount: 0,
           readyIssueCount: 0,
@@ -365,5 +402,6 @@ describe('buildBootstrapGateReportForRepo', () => {
     expect(report.ready).toBe(true)
     expect(report.blockingReasons).toEqual([])
     expect(report.blockers.every((blocker) => blocker.implementedLocally)).toBe(true)
+    expect(report.suppressedBlockers).toHaveLength(10)
   })
 })

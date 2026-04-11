@@ -46,6 +46,10 @@ export interface BootstrapGateBlocker {
   localImplementationHeadline?: string | null
 }
 
+export interface SuppressedBootstrapGateBlocker extends BootstrapGateBlocker {
+  suppressionKind: 'local_implementation'
+}
+
 export interface BootstrapGateEvidence {
   code: string
   satisfied: boolean
@@ -57,6 +61,7 @@ export interface BootstrapGateReport {
   version: string
   ready: boolean
   blockers: BootstrapGateBlocker[]
+  suppressedBlockers: SuppressedBootstrapGateBlocker[]
   requiredEvidence: BootstrapGateEvidence[]
   blockingReasons: string[]
 }
@@ -98,6 +103,12 @@ export function buildBootstrapGateReport(
   const requiredEvidence = input.requiredEvidence.map((evidence) => ({
     ...evidence,
   }))
+  const suppressedBlockers = blockers
+    .filter((blocker) => blocker.implementedLocally === true && !isTerminalDoneState(blocker.state))
+    .map<SuppressedBootstrapGateBlocker>((blocker) => ({
+      ...blocker,
+      suppressionKind: 'local_implementation',
+    }))
   const blockingReasons = [
     ...blockers
       .filter((blocker) => !isBootstrapBlockerDone(blocker))
@@ -111,6 +122,7 @@ export function buildBootstrapGateReport(
     version: input.version,
     ready: blockingReasons.length === 0,
     blockers,
+    suppressedBlockers,
     requiredEvidence,
     blockingReasons,
   }
@@ -161,6 +173,10 @@ export function formatBootstrapGateReport(
     `ready=${report.ready}`,
     'blockers:',
     ...report.blockers.map((blocker) => `- #${blocker.issueNumber} state=${blocker.state} labels=${formatBootstrapLabels(blocker.labels)}${blocker.title ? ` title=${blocker.title}` : ''}${blocker.implementedLocally ? ` locallyImplemented=true${blocker.localImplementationHeadline ? ` localCommit=${blocker.localImplementationHeadline}` : ''}` : ''}`),
+    'suppressedBlockers:',
+    ...(report.suppressedBlockers.length > 0
+      ? report.suppressedBlockers.map((blocker) => `- ${blocker.suppressionKind}: #${blocker.issueNumber} state=${blocker.state}${blocker.title ? ` title=${blocker.title}` : ''}${blocker.localImplementationHeadline ? ` localCommit=${blocker.localImplementationHeadline}` : ''}`)
+      : ['- none']),
     'requiredEvidence:',
     ...report.requiredEvidence.map((evidence) => `- ${evidence.code}: ${evidence.satisfied ? 'satisfied' : 'missing'}${evidence.sourceIssueNumber ? ` sourceIssue=#${evidence.sourceIssueNumber}` : ''}${evidence.summary ? ` summary=${evidence.summary}` : ''}`),
     'blockingReasons:',
@@ -187,6 +203,11 @@ function isBootstrapBlockerDone(
 ): boolean {
   const normalized = blocker.state.trim().toLowerCase()
   return normalized === 'done' || normalized === 'closed' || blocker.implementedLocally === true
+}
+
+function isTerminalDoneState(state: string): boolean {
+  const normalized = state.trim().toLowerCase()
+  return normalized === 'done' || normalized === 'closed'
 }
 
 function formatBootstrapLabels(labels: string[]): string {

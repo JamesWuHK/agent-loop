@@ -46,10 +46,17 @@ export interface BootstrapScorecardBlocker extends BootstrapScorecardSignal {
   category: BootstrapFailureKind
 }
 
+export interface SuppressedBootstrapScorecardBlocker extends BootstrapScorecardBlocker {
+  suppressionKind: 'local_implementation'
+  localImplementationHeadline?: string | null
+}
+
 export interface BootstrapScorecard {
   ready: boolean
   categoryCounts: Record<BootstrapFailureKind, number>
   topBlockers: BootstrapScorecardBlocker[]
+  suppressedCategoryCounts: Record<BootstrapFailureKind, number>
+  suppressedBlockers: SuppressedBootstrapScorecardBlocker[]
   auditSummary: AuditIssueSummary
 }
 
@@ -60,6 +67,7 @@ interface BootstrapScorecardInput {
   runtimeBlockers?: BootstrapScorecardSignal[]
   transportBlockers?: BootstrapScorecardSignal[]
   releaseEvidenceMissing: string[]
+  suppressedBlockers?: SuppressedBootstrapScorecardBlocker[]
 }
 
 interface BootstrapScorecardDependencies {
@@ -146,6 +154,10 @@ export function buildBootstrapScorecard(
 ): BootstrapScorecard {
   const categoryCounts = createEmptyCategoryCounts()
   const blockers: BootstrapScorecardBlocker[] = []
+  const suppressedCategoryCounts = createEmptyCategoryCounts()
+  const suppressedBlockers = (input.suppressedBlockers ?? []).map((blocker) => ({
+    ...blocker,
+  }))
 
   if (input.audit.invalidReadyIssueCount > 0) {
     categoryCounts.contract_failure += input.audit.invalidReadyIssueCount
@@ -199,6 +211,10 @@ export function buildBootstrapScorecard(
     })
   }
 
+  for (const blocker of suppressedBlockers) {
+    suppressedCategoryCounts[blocker.category] += 1
+  }
+
   return {
     ready: BOOTSTRAP_FAILURE_KIND_ORDER.every((category) => categoryCounts[category] === 0),
     categoryCounts,
@@ -206,6 +222,8 @@ export function buildBootstrapScorecard(
       const blocker = blockers.find((candidate) => candidate.category === category)
       return blocker ? [blocker] : []
     }),
+    suppressedCategoryCounts,
+    suppressedBlockers,
     auditSummary: input.audit,
   }
 }
@@ -263,16 +281,30 @@ export async function buildBootstrapScorecardForRepo(
       linkedIssueLoader,
     ),
   ])
+  const prLifecycleSignals = partitionLocallyImplementedSignals(
+    prBlockers,
+    'pr_lifecycle_failure',
+    localImplementationIndex,
+  )
+  const reviewSignals = partitionLocallyImplementedSignals(
+    reviewBlockers,
+    'review_failure',
+    localImplementationIndex,
+  )
 
   return buildBootstrapScorecard({
     audit: issuesResult
       ? buildAuditIssueSummary(managedIssues.map(buildAuditedIssue))
       : buildEmptyAuditIssueSummary(),
     runtimeBlockers: [],
-    prBlockers: filterLocallyImplementedSignals(prBlockers, localImplementationIndex),
-    reviewBlockers: filterLocallyImplementedSignals(reviewBlockers, localImplementationIndex),
+    prBlockers: prLifecycleSignals.active,
+    reviewBlockers: reviewSignals.active,
     transportBlockers,
     releaseEvidenceMissing: [],
+    suppressedBlockers: [
+      ...prLifecycleSignals.suppressed,
+      ...reviewSignals.suppressed,
+    ],
   })
 }
 
@@ -288,6 +320,12 @@ export function formatBootstrapScorecard(
     'topBlockers:',
     ...(scorecard.topBlockers.length > 0
       ? scorecard.topBlockers.map((blocker) => `- ${blocker.category}: ${formatScorecardBlockerTarget(blocker)}${blocker.reason}`)
+      : ['- none']),
+    'suppressedCategoryCounts:',
+    ...BOOTSTRAP_FAILURE_KIND_ORDER.map((category) => `- ${category}: ${scorecard.suppressedCategoryCounts[category]}`),
+    'suppressedBlockers:',
+    ...(scorecard.suppressedBlockers.length > 0
+      ? scorecard.suppressedBlockers.map((blocker) => `- ${blocker.suppressionKind}: ${blocker.category}: ${formatScorecardBlockerTarget(blocker)}${blocker.reason}${blocker.localImplementationHeadline ? ` localCommit=${blocker.localImplementationHeadline}` : ''}`)
       : ['- none']),
   ].join('\n')
 }
@@ -323,15 +361,40 @@ function normalizeScorecardSignal(signal: BootstrapScorecardSignal): BootstrapSc
   }
 }
 
-function filterLocallyImplementedSignals(
+function partitionLocallyImplementedSignals(
   signals: BootstrapScorecardSignal[],
+  category: BootstrapFailureKind,
   localImplementationIndex: Map<number, LocalImplementationRecord>,
-): BootstrapScorecardSignal[] {
-  return signals.filter((signal) => (
-    signal.issueNumber === null
-    || signal.issueNumber === undefined
-    || !localImplementationIndex.has(signal.issueNumber)
-  ))
+): {
+  active: BootstrapScorecardSignal[]
+  suppressed: SuppressedBootstrapScorecardBlocker[]
+} {
+  const active: BootstrapScorecardSignal[] = []
+  const suppressed: SuppressedBootstrapScorecardBlocker[] = []
+
+  for (const signal of signals) {
+    const normalized = normalizeScorecardSignal(signal)
+    const localImplementation = typeof normalized.issueNumber === 'number'
+      ? localImplementationIndex.get(normalized.issueNumber)
+      : undefined
+
+    if (!localImplementation) {
+      active.push(normalized)
+      continue
+    }
+
+    suppressed.push({
+      category,
+      ...normalized,
+      suppressionKind: 'local_implementation',
+      localImplementationHeadline: localImplementation.latestCommitHeadline,
+    })
+  }
+
+  return {
+    active,
+    suppressed,
+  }
 }
 
 function buildEmptyAuditIssueSummary(): AuditIssueSummary {
