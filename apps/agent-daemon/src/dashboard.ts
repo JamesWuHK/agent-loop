@@ -28,7 +28,10 @@ import {
 import {
   listActiveManagedDaemonPresence,
   listActiveManagedDaemonUpgradeFailureAlerts,
+  listRecentManagedDaemonUpgradeAnnouncements,
+  listRecentManagedDaemonUpgradeFailureAlerts,
   listRecentManagedDaemonUpgradeSuccesses,
+  type ManagedDaemonUpgradeAnnouncementComment,
   type ManagedDaemonPresenceComment,
   type ManagedDaemonUpgradeFailureAlertComment,
   type ManagedDaemonUpgradeSuccessComment,
@@ -188,6 +191,19 @@ export interface DashboardPullRequestView {
   mergeLease: DashboardLeaseView | null
 }
 
+export interface DashboardUpgradeEvent {
+  kind: 'announcement' | 'failure' | 'success'
+  occurredAt: string
+  machineId: string | null
+  daemonInstanceId: string | null
+  channel: string | null
+  targetVersion: string | null
+  targetRevision: string | null
+  title: string
+  detail: string | null
+  tone: '' | 'accent' | 'gold' | 'error'
+}
+
 export interface DashboardSnapshot {
   generatedAt: string
   repo: string
@@ -195,6 +211,7 @@ export interface DashboardSnapshot {
   machines: DashboardMachineCard[]
   issues: DashboardIssueView[]
   prs: DashboardPullRequestView[]
+  upgradeEvents: DashboardUpgradeEvent[]
   notes: string[]
   errors: string[]
 }
@@ -264,6 +281,9 @@ export async function collectDashboardSnapshot(
   let prs: DashboardPullRequestView[] = []
   let remoteLeases: DashboardLeaseView[] = []
   let remotePresences: DashboardPresenceView[] = []
+  let recentUpgradeAnnouncements: ManagedDaemonUpgradeAnnouncementComment[] = []
+  let recentUpgradeFailures: ManagedDaemonUpgradeFailureAlertComment[] = []
+  let recentUpgradeSuccesses: ManagedDaemonUpgradeSuccessComment[] = []
 
   try {
     const githubCollection = await collectGitHubDashboardData({
@@ -305,17 +325,35 @@ export async function collectDashboardSnapshot(
   }
 
   try {
-    const successes = await listRecentManagedDaemonUpgradeSuccesses({
+    recentUpgradeSuccesses = await listRecentManagedDaemonUpgradeSuccesses({
       ...options.config,
       repo,
     }, Date.parse(generatedAt))
     notes.push(...buildDashboardUpgradeSuccessNoteMessages(
-      successes,
+      recentUpgradeSuccesses,
       remotePresences,
       Date.parse(generatedAt),
     ))
   } catch (error) {
     errors.push(`GitHub 升级完成记录不可用：${formatError(error)}`)
+  }
+
+  try {
+    recentUpgradeAnnouncements = await listRecentManagedDaemonUpgradeAnnouncements({
+      ...options.config,
+      repo,
+    }, Date.parse(generatedAt))
+  } catch (error) {
+    errors.push(`GitHub 升级广播记录不可用：${formatError(error)}`)
+  }
+
+  try {
+    recentUpgradeFailures = await listRecentManagedDaemonUpgradeFailureAlerts({
+      ...options.config,
+      repo,
+    }, Date.parse(generatedAt))
+  } catch (error) {
+    errors.push(`GitHub 升级失败历史不可用：${formatError(error)}`)
   }
 
   const machines = buildDashboardMachineCards(localSnapshots, remoteLeases, remotePresences)
@@ -327,6 +365,11 @@ export async function collectDashboardSnapshot(
     machines,
     issues,
     prs,
+    upgradeEvents: buildDashboardUpgradeEvents(
+      recentUpgradeAnnouncements,
+      recentUpgradeFailures,
+      recentUpgradeSuccesses,
+    ),
     notes,
     errors,
   }
@@ -557,6 +600,72 @@ export function buildDashboardUpgradeSuccessNoteMessages(
   }
 
   return [...new Set(messages)]
+}
+
+export function buildDashboardUpgradeEvents(
+  announcements: ManagedDaemonUpgradeAnnouncementComment[],
+  failures: ManagedDaemonUpgradeFailureAlertComment[],
+  successes: ManagedDaemonUpgradeSuccessComment[],
+  limit = 12,
+): DashboardUpgradeEvent[] {
+  const events: DashboardUpgradeEvent[] = []
+  const abbreviate = (value: string | null): string => {
+    const normalized = value ?? 'unknown'
+    return normalized.length <= 18 ? normalized : `${normalized.slice(0, 18)}...`
+  }
+
+  for (const comment of announcements) {
+    events.push({
+      kind: 'announcement',
+      occurredAt: comment.announcement.announcedAt,
+      machineId: comment.announcement.announcedByMachineId,
+      daemonInstanceId: comment.announcement.announcedByDaemonInstanceId,
+      channel: comment.announcement.channel,
+      targetVersion: comment.announcement.latestVersion,
+      targetRevision: comment.announcement.latestRevision,
+      title: `${comment.announcement.announcedByMachineId} 广播了 agent-loop 升级`,
+      detail: `目标 v${comment.announcement.latestVersion ?? 'unknown'}@${abbreviate(comment.announcement.latestRevision)} · channel ${comment.announcement.channel ?? 'default'}`,
+      tone: 'gold',
+    })
+  }
+
+  for (const comment of failures) {
+    events.push({
+      kind: 'failure',
+      occurredAt: comment.alert.alertedAt,
+      machineId: comment.alert.machineId,
+      daemonInstanceId: comment.alert.daemonInstanceId,
+      channel: comment.alert.channel,
+      targetVersion: comment.alert.targetVersion,
+      targetRevision: comment.alert.targetRevision,
+      title: `${comment.alert.machineId} 自动升级失败并进入退避`,
+      detail: `目标 v${comment.alert.targetVersion ?? 'unknown'}@${abbreviate(comment.alert.targetRevision)} · 连续失败 ${comment.alert.consecutiveFailureCount} 次${comment.alert.lastError ? ` · ${comment.alert.lastError}` : ''}`,
+      tone: 'error',
+    })
+  }
+
+  for (const comment of successes) {
+    events.push({
+      kind: 'success',
+      occurredAt: comment.success.succeededAt,
+      machineId: comment.success.machineId,
+      daemonInstanceId: comment.success.daemonInstanceId,
+      channel: comment.success.channel,
+      targetVersion: comment.success.targetVersion,
+      targetRevision: comment.success.targetRevision,
+      title: `${comment.success.machineId} 已升级并恢复在线`,
+      detail: `目标 v${comment.success.targetVersion ?? 'unknown'}@${abbreviate(comment.success.targetRevision)} · channel ${comment.success.channel ?? 'default'}`,
+      tone: 'accent',
+    })
+  }
+
+  return events
+    .sort((left, right) => {
+      const occurredDiff = Date.parse(right.occurredAt) - Date.parse(left.occurredAt)
+      if (occurredDiff !== 0) return occurredDiff
+      return left.kind.localeCompare(right.kind)
+    })
+    .slice(0, Math.max(0, Math.floor(limit)))
 }
 
 export function readDashboardLog(
@@ -1228,6 +1337,16 @@ export function renderDashboardHtml(): string {
       <section class="panel">
         <div class="section-header">
           <div>
+            <p class="section-eyebrow">升级事件</p>
+            <h2>最近这波 rollout 发生了什么</h2>
+          </div>
+          <p class="section-note">聚合最近的升级广播、失败退避和成功恢复信号，帮助你快速判断多机升级是否正在推进。</p>
+        </div>
+        <div id="upgrade-events" class="upgrade-event-list"></div>
+      </section>
+      <section class="panel">
+        <div class="section-header">
+          <div>
             <p class="section-eyebrow">机器状态</p>
             <h2>当前有哪些机器在工作</h2>
           </div>
@@ -1598,14 +1717,16 @@ select:hover {
 
 .runtime-list,
 .warning-list,
-.lease-list {
+.lease-list,
+.upgrade-event-list {
   display: grid;
   gap: 10px;
 }
 
 .runtime-item,
 .warning-item,
-.lease-item {
+.lease-item,
+.upgrade-event-item {
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(60, 86, 76, 0.1);
@@ -1619,6 +1740,21 @@ select:hover {
 
 .lease-item {
   background: rgba(242, 249, 245, 0.96);
+}
+
+.upgrade-event-item.accent {
+  background: rgba(242, 249, 245, 0.96);
+  border-color: rgba(47, 143, 113, 0.18);
+}
+
+.upgrade-event-item.gold {
+  background: rgba(255, 250, 243, 0.96);
+  border-color: rgba(215, 154, 70, 0.18);
+}
+
+.upgrade-event-item.error {
+  background: rgba(255, 248, 244, 0.96);
+  border-color: rgba(179, 77, 61, 0.16);
 }
 
 .muted {
@@ -1762,6 +1898,7 @@ const state = {
 
 const alertsEl = document.getElementById('alerts');
 const summaryEl = document.getElementById('summary');
+const upgradeEventsEl = document.getElementById('upgrade-events');
 const machinesEl = document.getElementById('machines');
 const issuesBodyEl = document.getElementById('issues-body');
 const prsBodyEl = document.getElementById('prs-body');
@@ -1836,6 +1973,7 @@ function renderSnapshot(snapshot) {
   updatedAtEl.textContent = '仓库 ' + snapshot.repo + ' | 更新于 ' + formatTimestamp(snapshot.generatedAt) + ' | 自动刷新 ' + Math.round(refreshIntervalMs / 1000) + ' 秒';
   renderAlerts(snapshot);
   renderSummary(snapshot);
+  renderUpgradeEvents(snapshot.upgradeEvents);
   renderMachines(snapshot.machines);
   renderIssues(snapshot.issues);
   renderPullRequests(snapshot.prs);
@@ -1878,6 +2016,31 @@ function renderSummary(snapshot) {
 
   summaryEl.innerHTML = stats.map((stat) => {
     return '<article class="stat-card ' + stat.tone + '"><span class="muted">' + escapeHtml(stat.label) + '</span><strong>' + escapeHtml(String(stat.value)) + '</strong></article>';
+  }).join('');
+}
+
+function renderUpgradeEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    upgradeEventsEl.innerHTML = '<div class="empty-state">最近没有记录到升级事件。</div>';
+    return;
+  }
+
+  upgradeEventsEl.innerHTML = events.map((event) => {
+    const chips = [
+      renderChip(localizeUpgradeEventKind(event.kind), event.tone),
+      event.machineId ? renderChip('机器 ' + event.machineId, '') : '',
+      event.channel ? renderChip('channel ' + event.channel, '') : renderChip('channel default', ''),
+      event.targetVersion ? renderChip('v' + event.targetVersion, '') : '',
+    ].filter(Boolean).join('');
+
+    return [
+      '<article class="upgrade-event-item ' + (event.tone || '') + '">',
+      '<div><strong>' + escapeHtml(event.title) + '</strong></div>',
+      chips ? '<div class="chip-row" style="margin-top:8px">' + chips + '</div>' : '',
+      event.detail ? '<div class="muted" style="margin-top:8px">' + escapeHtml(event.detail) + '</div>' : '',
+      '<div class="muted" style="margin-top:6px">发生于 ' + escapeHtml(formatTimestamp(event.occurredAt)) + '</div>',
+      '</article>',
+    ].join('');
   }).join('');
 }
 
@@ -2238,6 +2401,19 @@ function localizeUpgradeStatus(status) {
       return '检查失败'
     default:
       return status || '未知'
+  }
+}
+
+function localizeUpgradeEventKind(kind) {
+  switch (kind) {
+    case 'announcement':
+      return '升级广播'
+    case 'failure':
+      return '升级失败'
+    case 'success':
+      return '升级成功'
+    default:
+      return kind || '未知'
   }
 }
 

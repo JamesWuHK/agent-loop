@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildDashboardMachineCards,
+  buildDashboardUpgradeEvents,
   buildDashboardSummary,
   buildDashboardUpgradeFailureAlertMessages,
   buildDashboardUpgradeSuccessNoteMessages,
@@ -13,6 +14,7 @@ import {
   renderDashboardHtml,
 } from './dashboard'
 import type {
+  ManagedDaemonUpgradeAnnouncementComment,
   ManagedDaemonUpgradeFailureAlertComment,
   ManagedDaemonUpgradeSuccessComment,
 } from './presence'
@@ -553,6 +555,86 @@ describe('dashboard machine aggregation', () => {
       'GitHub 升级完成：machine-ready 已切换到 v0.1.2@fedcba9876543210 并恢复在线',
     ])
   })
+
+  test('builds a recent upgrade event timeline sorted by newest first', () => {
+    const announcements: ManagedDaemonUpgradeAnnouncementComment[] = [
+      {
+        commentId: 701,
+        body: 'ignored',
+        createdAt: '2026-04-05T09:10:21.000Z',
+        updatedAt: '2026-04-05T09:10:21.000Z',
+        announcement: {
+          repo: 'JamesWuHK/digital-employee',
+          channel: 'master',
+          latestVersion: '0.1.2',
+          latestRevision: 'fedcba9876543210',
+          latestCommitAt: '2026-04-05T09:10:20.000Z',
+          announcedAt: '2026-04-05T09:10:21.000Z',
+          announcedByMachineId: 'machine-discoverer',
+          announcedByDaemonInstanceId: 'daemon-discoverer',
+        },
+      },
+    ]
+    const failures: ManagedDaemonUpgradeFailureAlertComment[] = [
+      {
+        commentId: 702,
+        body: 'ignored',
+        createdAt: '2026-04-05T09:11:21.000Z',
+        updatedAt: '2026-04-05T09:11:21.000Z',
+        alert: {
+          repo: 'JamesWuHK/digital-employee',
+          machineId: 'machine-busy',
+          daemonInstanceId: 'daemon-busy',
+          channel: 'master',
+          targetVersion: '0.1.2',
+          targetRevision: 'fedcba9876543210',
+          consecutiveFailureCount: 2,
+          pausedUntil: '2026-04-05T09:25:20.000Z',
+          lastAttemptAt: '2026-04-05T09:11:20.000Z',
+          lastError: 'git pull failed',
+          alertedAt: '2026-04-05T09:11:21.000Z',
+        },
+      },
+    ]
+    const successes: ManagedDaemonUpgradeSuccessComment[] = [
+      {
+        commentId: 703,
+        body: 'ignored',
+        createdAt: '2026-04-05T09:12:21.000Z',
+        updatedAt: '2026-04-05T09:12:21.000Z',
+        success: {
+          repo: 'JamesWuHK/digital-employee',
+          machineId: 'machine-ready',
+          daemonInstanceId: 'daemon-ready',
+          channel: 'master',
+          targetVersion: '0.1.2',
+          targetRevision: 'fedcba9876543210',
+          succeededAt: '2026-04-05T09:12:20.000Z',
+          acknowledgedAt: '2026-04-05T09:12:21.000Z',
+        },
+      },
+    ]
+
+    const events = buildDashboardUpgradeEvents(announcements, failures, successes)
+
+    expect(events).toHaveLength(3)
+    expect(events.map((event) => event.kind)).toEqual(['success', 'failure', 'announcement'])
+    expect(events[0]).toMatchObject({
+      kind: 'success',
+      title: 'machine-ready 已升级并恢复在线',
+      tone: 'accent',
+    })
+    expect(events[1]).toMatchObject({
+      kind: 'failure',
+      title: 'machine-busy 自动升级失败并进入退避',
+      tone: 'error',
+    })
+    expect(events[2]).toMatchObject({
+      kind: 'announcement',
+      title: 'machine-discoverer 广播了 agent-loop 升级',
+      tone: 'gold',
+    })
+  })
 })
 
 describe('dashboard localization', () => {
@@ -563,12 +645,18 @@ describe('dashboard localization', () => {
     expect(html).toContain('<title>Agent Loop 监控台</title>')
     expect(html).toContain('分布式开发监控台')
     expect(html).toContain('立即刷新')
+    expect(html).toContain('升级事件')
+    expect(html).toContain('最近这波 rollout 发生了什么')
     expect(html).toContain('机器状态')
     expect(html).toContain('问题队列')
     expect(html).toContain('日志')
 
     expect(script).toContain('仪表盘快照加载失败')
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
+    expect(script).toContain('最近没有记录到升级事件。')
+    expect(script).toContain('升级广播')
+    expect(script).toContain('升级成功')
+    expect(script).toContain('升级失败')
     expect(script).toContain('机器数')
     expect(script).toContain('待升级机器')
     expect(script).toContain('已升级最新')
