@@ -2,32 +2,38 @@
   "name": "self-bootstrap-checks-pending",
   "openIssues": [
     {
-      "number": 351,
-      "title": "upstream blocker still running",
-      "body": "## 用户故事\n\n作为 agent-loop 维护者，我希望 replay 能稳定表达 pending gate 仍未 ready 的场景。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/replay-eval.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- supporting issue stays valid\n\n### OutOfScope\n- live merge or review execution\n\n### RequiredSemantics\n- dependency issue remains unfinished\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('self-bootstrap pending support fixture')\n```\n\n## 实现步骤\n1. add support issue fixture\n\n## 验收\n- [ ] support issue stays non-terminal",
-      "labels": [
-        "agent:working"
-      ],
-      "assignees": [
-        "codex-dev"
-      ],
-      "state": "open",
-      "updatedAt": "2026-04-11T10:10:00.000Z"
-    },
-    {
       "number": 352,
-      "title": "merge gate still pending downstream work",
-      "body": "## 用户故事\n\n作为 agent-loop 维护者，我希望 pending merge gate 场景在 replay 里保持 deferred，而不是误判为 pass。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[351]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/replay-eval.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- scenario remains deterministic\n\n### OutOfScope\n- live GitHub checks API\n\n### RequiredSemantics\n- downstream issue is blocked until dependency resolves\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('self-bootstrap checks pending fixture')\n```\n\n## 实现步骤\n1. add replay fixture\n\n## 验收\n- [ ] blocked issue stays non-claimable",
+      "title": "failed issue waiting on linked PR checks to finish",
+      "body": "## 用户故事\n\n作为 agent-loop 维护者，我希望 self-bootstrap replay 能稳定覆盖 linked PR checks 仍在 pending 的恢复场景。\n\n## Context\n\n### Dependencies\n```json\n{\"dependsOn\":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/replay-eval.ts\n\n### ForbiddenFiles\n- apps/agent-daemon/src/daemon.ts\n\n### MustPreserve\n- scenario stays local and deterministic\n\n### OutOfScope\n- live GitHub checks API or daemon polling\n\n### RequiredSemantics\n- failed issue remains blocked while the linked PR is still waiting on checks\n\n### Validation\n- `bun test apps/agent-daemon/src/replay-eval.test.ts`\n\n## RED 测试\n\n```ts\nthrow new Error('self-bootstrap checks pending fixture')\n```\n\n## 实现步骤\n1. add replay fixture for pending linked PR checks\n\n## 验收\n- [ ] linked PR checks pending path stays reproducible",
       "labels": [
-        "agent:ready"
+        "agent:failed"
       ],
       "assignees": [],
       "state": "open",
       "updatedAt": "2026-04-11T10:11:00.000Z"
     }
   ],
-  "issueComments": [],
-  "openPullRequests": [],
+  "issueComments": [
+    {
+      "issueNumber": 352,
+      "commentId": 1,
+      "body": "<!-- agent-loop:issue-resume-blocked {\"issueNumber\":352,\"prNumber\":452,\"blockedSince\":\"2026-04-11T10:08:00.000Z\",\"escalatedAt\":\"2026-04-11T10:11:00.000Z\",\"thresholdSeconds\":300,\"reason\":\"linked PR #452 is still waiting for required self-bootstrap checks to finish before merge can resume\",\"machineId\":\"codex-dev\",\"daemonInstanceId\":\"daemon-self-bootstrap\"} -->\n## agent-loop blocked resume escalation",
+      "createdAt": "2026-04-11T10:11:00.000Z",
+      "updatedAt": "2026-04-11T10:11:00.000Z"
+    }
+  ],
+  "openPullRequests": [
+    {
+      "number": 452,
+      "title": "Fix #352: failed issue waiting on linked PR checks to finish",
+      "labels": [
+        "agent:review-approved"
+      ],
+      "isDraft": false,
+      "headRefName": "agent/352/codex-dev",
+      "headRefOid": "abc452"
+    }
+  ],
   "expected": {
     "claimable": 0,
     "blocked": 1,

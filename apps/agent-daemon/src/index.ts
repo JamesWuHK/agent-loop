@@ -377,10 +377,6 @@ async function main() {
     throw new Error('--launchd-status cannot be combined with other control flags')
   }
 
-  const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
-  const runtimeMachineIdHint = args['machine-id'] as string | undefined
-  const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
-
   if (issueLintTarget) {
     const report = await executeIssueLintCommand({
       target: issueLintTarget,
@@ -396,6 +392,10 @@ async function main() {
     console.log(formatBootstrapScenarioOutput(report, args.json as boolean | undefined))
     process.exit(resolveBootstrapScenarioSuiteExitCode(report))
   }
+
+  const runtimeRepoHint = resolveRepoHint(args.repo as string | undefined)
+  const runtimeMachineIdHint = args['machine-id'] as string | undefined
+  const runtimeHealthPortHint = args['health-port'] ? parseInt(args['health-port'] as string) : undefined
 
   if (args['join-project']) {
     const result = joinProjectMachine({

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import {
   applyDependencyClaimability,
@@ -185,18 +185,19 @@ export function evaluateBootstrapScenarioSuite(input: {
 export function evaluateBootstrapScenarioFixtureDirectory(
   fixturesDir: string,
 ): BootstrapScenarioSuiteReport {
-  const replayReport = evaluateReplayFixtureDirectory(fixturesDir)
-
   return evaluateBootstrapScenarioSuite({
     suite: DEFAULT_BOOTSTRAP_SCENARIO_SUITE,
-    cases: replayReport.cases.map((fixture) => ({
-      name: fixture.name,
-      ok: fixture.ok,
-      present: true,
-      mismatches: fixture.mismatches,
-      actual: fixture.actual,
-      expected: fixture.expected,
-    })),
+    cases: REQUIRED_BOOTSTRAP_SCENARIO_CASES.flatMap((name) => {
+      const fixture = loadReplayFixtureByName(fixturesDir, name)
+      if (fixture === null) {
+        return []
+      }
+
+      return [{
+        ...evaluateReplayFixtureCase(fixture),
+        present: true,
+      }]
+    }),
   })
 }
 
@@ -208,9 +209,22 @@ export function loadReplayFixtures(fixturesDir: string): ReplayFixtureCase[] {
 
   return fixtureFiles.map((entry) => {
     const filePath = join(resolvedDir, entry)
-    const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as Partial<ReplayFixtureCase>
-    return normalizeReplayFixture(parsed, basename(entry, '.json'))
+    return loadReplayFixtureFile(filePath)
   })
+}
+
+function loadReplayFixtureByName(fixturesDir: string, fixtureName: string): ReplayFixtureCase | null {
+  const filePath = join(resolve(fixturesDir), `${fixtureName}.json`)
+  if (!existsSync(filePath)) {
+    return null
+  }
+
+  return loadReplayFixtureFile(filePath)
+}
+
+function loadReplayFixtureFile(filePath: string): ReplayFixtureCase {
+  const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as Partial<ReplayFixtureCase>
+  return normalizeReplayFixture(parsed, basename(filePath, '.json'))
 }
 
 export function formatReplayFixtureReport(report: ReplayFixtureReport): string {

@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   evaluateBootstrapScenarioFixtureDirectory,
@@ -161,5 +163,88 @@ describe('evaluateBootstrapScenarioSuite', () => {
       passedCases: 4,
       failedCases: 0,
     })
+  })
+
+  test('isolates the fixed suite from unrelated replay fixtures', () => {
+    const fixturesDir = mkdtempSync(join(tmpdir(), 'bootstrap-suite-fixtures-'))
+
+    try {
+      for (const fixtureName of [
+        'self-bootstrap-happy-path',
+        'self-bootstrap-closed-pr-recreate',
+        'self-bootstrap-checks-pending',
+        'self-bootstrap-checks-fail',
+      ]) {
+        writeFileSync(
+          join(fixturesDir, `${fixtureName}.json`),
+          readFileSync(join(import.meta.dir, 'fixtures', 'replay', `${fixtureName}.json`), 'utf-8'),
+          'utf-8',
+        )
+      }
+
+      writeFileSync(
+        join(fixturesDir, 'zzz-unrelated-broken.json'),
+        JSON.stringify({
+          name: 'zzz-unrelated-broken',
+          openIssues: 'not-an-array',
+          issueComments: [],
+          openPullRequests: [],
+          expected: {
+            claimable: 0,
+            blocked: 0,
+            invalid: 0,
+          },
+        }, null, 2),
+        'utf-8',
+      )
+
+      const report = evaluateBootstrapScenarioFixtureDirectory(fixturesDir)
+
+      expect(report.ok).toBe(true)
+      expect(report.cases.map((fixture) => fixture.name)).toEqual([
+        'self-bootstrap-happy-path',
+        'self-bootstrap-closed-pr-recreate',
+        'self-bootstrap-checks-pending',
+        'self-bootstrap-checks-fail',
+      ])
+      expect(report.failedCases).toEqual([])
+    } finally {
+      rmSync(fixturesDir, { recursive: true, force: true })
+    }
+  })
+
+  test('reports missing required fixtures without loading unrelated files', () => {
+    const fixturesDir = mkdtempSync(join(tmpdir(), 'bootstrap-suite-missing-'))
+
+    try {
+      mkdirSync(fixturesDir, { recursive: true })
+      writeFileSync(
+        join(fixturesDir, 'self-bootstrap-happy-path.json'),
+        readFileSync(join(import.meta.dir, 'fixtures', 'replay', 'self-bootstrap-happy-path.json'), 'utf-8'),
+        'utf-8',
+      )
+      writeFileSync(
+        join(fixturesDir, 'self-bootstrap-closed-pr-recreate.json'),
+        readFileSync(join(import.meta.dir, 'fixtures', 'replay', 'self-bootstrap-closed-pr-recreate.json'), 'utf-8'),
+        'utf-8',
+      )
+      writeFileSync(
+        join(fixturesDir, 'self-bootstrap-checks-pending.json'),
+        readFileSync(join(import.meta.dir, 'fixtures', 'replay', 'self-bootstrap-checks-pending.json'), 'utf-8'),
+        'utf-8',
+      )
+
+      const report = evaluateBootstrapScenarioFixtureDirectory(fixturesDir)
+
+      expect(report.ok).toBe(false)
+      expect(report.failedCases).toEqual(['self-bootstrap-checks-fail'])
+      expect(report.cases[3]).toMatchObject({
+        name: 'self-bootstrap-checks-fail',
+        ok: false,
+        present: false,
+      })
+    } finally {
+      rmSync(fixturesDir, { recursive: true, force: true })
+    }
   })
 })
