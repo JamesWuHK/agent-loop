@@ -958,6 +958,18 @@ describe('daemon merge recovery helpers', () => {
         },
       ],
       oldestBlockedIssueResumeEscalationAgeSeconds: 6,
+      autoUpgrade: {
+        attemptCount: 1,
+        successCount: 1,
+        failureCount: 0,
+        noChangeCount: 0,
+        lastAttemptAt: '2026-04-05T08:11:05.000Z',
+        lastSuccessAt: '2026-04-05T08:11:05.000Z',
+        lastOutcome: 'succeeded',
+        lastTargetVersion: '0.1.1',
+        lastTargetRevision: '2222222222222222222222222222222222222222',
+        lastError: null,
+      },
     })).toEqual({
       supervisor: 'launchd',
       workingDirectory: '/Users/wujames/codeRepo/digital-employee-main',
@@ -1037,6 +1049,18 @@ describe('daemon merge recovery helpers', () => {
         },
       ],
       oldestBlockedIssueResumeEscalationAgeSeconds: 6,
+      autoUpgrade: {
+        attemptCount: 1,
+        successCount: 1,
+        failureCount: 0,
+        noChangeCount: 0,
+        lastAttemptAt: '2026-04-05T08:11:05.000Z',
+        lastSuccessAt: '2026-04-05T08:11:05.000Z',
+        lastOutcome: 'succeeded',
+        lastTargetVersion: '0.1.1',
+        lastTargetRevision: '2222222222222222222222222222222222222222',
+        lastError: null,
+      },
     })
   })
 

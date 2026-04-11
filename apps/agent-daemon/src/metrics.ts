@@ -28,6 +28,12 @@
  * - agent_loop_wake_requests_total: Counter of wake requests queued/handled (labels: kind, outcome)
  * - agent_loop_last_transient_loop_error_age_seconds: Gauge of the most recent transient loop error age
  * - agent_loop_pending_wake_requests: Gauge of queued wake requests waiting in memory
+ * - agent_loop_auto_upgrade_attempts: Gauge of persisted automatic self-upgrade attempts
+ * - agent_loop_auto_upgrade_successes: Gauge of persisted successful automatic self-upgrades
+ * - agent_loop_auto_upgrade_failures: Gauge of persisted failed automatic self-upgrades
+ * - agent_loop_auto_upgrade_no_changes: Gauge of automatic self-upgrades that found no revision change
+ * - agent_loop_auto_upgrade_last_attempt_age_seconds: Gauge of the last automatic self-upgrade attempt age
+ * - agent_loop_auto_upgrade_last_success_age_seconds: Gauge of the last successful automatic self-upgrade age
  * - agent_loop_blocked_issue_resumes: Gauge of failed issue resumes currently blocked by linked PR state
  * - agent_loop_blocked_issue_resume_age_seconds: Gauge of the oldest blocked failed-issue resume age
  * - agent_loop_poll_duration_seconds: Histogram of poll cycle durations
@@ -45,6 +51,7 @@ import {
   collectDefaultMetrics,
 } from 'prom-client'
 import type {
+  AgentLoopAutoUpgradeRuntimeState,
   ConcurrencyPolicy,
   GitHubApiMode,
   GitHubApiOutcome,
@@ -444,6 +451,60 @@ export const lastTransientLoopErrorAgeSeconds = new Gauge({
 export const pendingWakeRequests = new Gauge({
   name: 'agent_loop_pending_wake_requests',
   help: 'Current number of pending wake requests held in the daemon in-memory queue',
+  registers: [registry],
+})
+
+/**
+ * Persisted automatic self-upgrade attempt count.
+ */
+export const autoUpgradeAttempts = new Gauge({
+  name: 'agent_loop_auto_upgrade_attempts',
+  help: 'Persisted count of automatic agent-loop self-upgrade attempts',
+  registers: [registry],
+})
+
+/**
+ * Persisted successful automatic self-upgrade count.
+ */
+export const autoUpgradeSuccesses = new Gauge({
+  name: 'agent_loop_auto_upgrade_successes',
+  help: 'Persisted count of successful automatic agent-loop self-upgrades',
+  registers: [registry],
+})
+
+/**
+ * Persisted failed automatic self-upgrade count.
+ */
+export const autoUpgradeFailures = new Gauge({
+  name: 'agent_loop_auto_upgrade_failures',
+  help: 'Persisted count of failed automatic agent-loop self-upgrades',
+  registers: [registry],
+})
+
+/**
+ * Persisted automatic self-upgrade no-change count.
+ */
+export const autoUpgradeNoChanges = new Gauge({
+  name: 'agent_loop_auto_upgrade_no_changes',
+  help: 'Persisted count of automatic agent-loop self-upgrades that found no local revision change',
+  registers: [registry],
+})
+
+/**
+ * Age of the most recent automatic self-upgrade attempt.
+ */
+export const autoUpgradeLastAttemptAgeSeconds = new Gauge({
+  name: 'agent_loop_auto_upgrade_last_attempt_age_seconds',
+  help: 'Age in seconds of the most recent automatic agent-loop self-upgrade attempt',
+  registers: [registry],
+})
+
+/**
+ * Age of the most recent successful automatic self-upgrade.
+ */
+export const autoUpgradeLastSuccessAgeSeconds = new Gauge({
+  name: 'agent_loop_auto_upgrade_last_success_age_seconds',
+  help: 'Age in seconds of the most recent successful automatic agent-loop self-upgrade',
   registers: [registry],
 })
 
@@ -847,6 +908,21 @@ export function setPendingWakeRequests(count: number): void {
 }
 
 /**
+ * Update persisted automatic self-upgrade gauges.
+ */
+export function setAutoUpgradeSnapshot(
+  state: AgentLoopAutoUpgradeRuntimeState,
+  nowMs = Date.now(),
+): void {
+  autoUpgradeAttempts.set(state.attemptCount)
+  autoUpgradeSuccesses.set(state.successCount)
+  autoUpgradeFailures.set(state.failureCount)
+  autoUpgradeNoChanges.set(state.noChangeCount)
+  autoUpgradeLastAttemptAgeSeconds.set(computeIsoAgeSeconds(state.lastAttemptAt, nowMs))
+  autoUpgradeLastSuccessAgeSeconds.set(computeIsoAgeSeconds(state.lastSuccessAt, nowMs))
+}
+
+/**
  * Record poll duration.
  */
 export function recordPollDuration(durationMs: number): void {
@@ -858,6 +934,19 @@ export function recordPollDuration(durationMs: number): void {
  */
 export function recordIssueProcessingDuration(durationMs: number): void {
   issueProcessingDurationSeconds.observe(durationMs / 1000)
+}
+
+function computeIsoAgeSeconds(iso: string | null, nowMs: number): number {
+  if (!iso) {
+    return 0
+  }
+
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) {
+    return 0
+  }
+
+  return Math.max(0, (nowMs - parsed) / 1000)
 }
 
 /**

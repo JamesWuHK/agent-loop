@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import type {
   ActiveLeaseRuntimeDetail,
   AgentConfig,
+  AgentLoopAutoUpgradeRuntimeState,
   AgentLoopBuildMetadata,
   AgentLoopUpgradeMetadata,
   AgentIssue,
@@ -64,11 +65,19 @@ import {
   setLastTransientLoopErrorAgeSeconds,
   setPendingWakeRequests,
   setStartupRecoveryPending,
+  setAutoUpgradeSnapshot,
   startMetricsServer,
   METRICS_PORT_DEFAULT,
   METRICS_PATH,
   type MetricsServer,
 } from './metrics'
+import {
+  readAutoUpgradeRuntimeState,
+  recordAutoUpgradeAttemptCompleted,
+  recordAutoUpgradeAttemptStarted,
+  resolveAutoUpgradeStatePath,
+  writeAutoUpgradeRuntimeState,
+} from './auto-upgrade-state'
 import { resolveCurrentRuntimeSupervisor, sanitizeDaemonBackgroundArgs } from './background'
 import {
   buildWakeQueuePath,
@@ -269,6 +278,7 @@ export class AgentDaemon {
     port: DEFAULT_HEALTH_SERVER_PORT,
   }
   private readonly wakeQueuePath: string
+  private readonly autoUpgradeStatePath: string | null
   private metricsServer: MetricsServer | null = null
   private metricsPort: number
   private presencePublisher: ManagedDaemonPresencePublisher | null = null
@@ -289,6 +299,7 @@ export class AgentDaemon {
   private lastUpgradeReminderAt: number | null = null
   private lastUpgradeReminderTargetKey: string | null = null
   private autoUpgradePromise: Promise<boolean> | null = null
+  private autoUpgradeState: AgentLoopAutoUpgradeRuntimeState
   private lastAutoUpgradeAttemptAt: number | null = null
   private lastAutoUpgradeAttemptTarget: string | null = null
   private lastPublishedUpgradeAnnouncementKey: string | null = null
@@ -310,6 +321,8 @@ export class AgentDaemon {
       machineId: this.config.machineId,
       homeDir: resolveWakeQueueHomeDirFromWorktreesBase(this.config.worktreesBase),
     })
+    this.autoUpgradeStatePath = resolveAutoUpgradeStatePath(process.env.AGENT_LOOP_RUNTIME_FILE ?? null)
+    this.autoUpgradeState = readAutoUpgradeRuntimeState(this.autoUpgradeStatePath)
     this.agentLoopBuild = resolveAgentLoopBuildMetadata()
     this.agentLoopUpgrade = createInitialAgentLoopUpgradeMetadata(
       this.config,
@@ -3479,6 +3492,7 @@ export class AgentDaemon {
       lastRecoveryActionKind: this.lastRecoveryActionKind,
       recentRecoveryActions: [...this.recoveryActionHistory],
       oldestBlockedIssueResumeEscalationAgeSeconds: this.getOldestBlockedIssueResumeEscalationAgeSeconds(),
+      autoUpgrade: this.autoUpgradeState,
     })
   }
 
@@ -3692,8 +3706,10 @@ export class AgentDaemon {
 
     this.lastAutoUpgradeAttemptTarget = attemptTarget
     this.lastAutoUpgradeAttemptAt = Date.now()
+    this.noteAutoUpgradeAttemptStarted(upgrade)
     this.autoUpgradePromise = this.performAutomaticAgentLoopUpgrade(upgrade)
       .catch((error) => {
+        this.noteAutoUpgradeAttemptCompleted('failed', upgrade, formatDaemonError(error))
         this.logger.warn(`[daemon] automatic agent-loop upgrade failed: ${formatDaemonError(error)}`)
         return false
       })
@@ -3709,6 +3725,11 @@ export class AgentDaemon {
   ): Promise<boolean> {
     const supervisor = resolveCurrentRuntimeSupervisor()
     if (supervisor === 'direct') {
+      this.noteAutoUpgradeAttemptCompleted(
+        'failed',
+        upgrade,
+        'automatic agent-loop upgrade requires a managed detached or launchd runtime',
+      )
       this.logger.warn('[daemon] automatic agent-loop upgrade requires a managed detached or launchd runtime; direct mode will keep reminder-only behavior')
       return false
     }
@@ -3721,6 +3742,7 @@ export class AgentDaemon {
       upgrade,
     })
     if (!result.changed) {
+      this.noteAutoUpgradeAttemptCompleted('no_change', upgrade)
       this.logger.log('[daemon] agent-loop auto-upgrade found no local revision change after pull; keeping current daemon process')
       return false
     }
@@ -3729,6 +3751,7 @@ export class AgentDaemon {
     this.logger.log(
       `[daemon] upgraded local agent-loop checkout on ${result.currentBranch}: v${this.agentLoopBuild.version}@${fromRevision} -> v${upgrade.latestVersion ?? this.agentLoopBuild.version}@${toRevision}`,
     )
+    this.noteAutoUpgradeAttemptCompleted('succeeded', upgrade)
 
     await this.stop({
       preserveActiveIssueStates: true,
@@ -3870,6 +3893,39 @@ export class AgentDaemon {
     setBlockedIssueResumeEscalations(runtime.blockedIssueResumeEscalationCount)
     setBlockedIssueResumeEscalationAgeSeconds(runtime.oldestBlockedIssueResumeEscalationAgeSeconds)
     setPendingWakeRequests(this.pendingWakeRequests.length)
+    setAutoUpgradeSnapshot(this.autoUpgradeState)
+  }
+
+  private noteAutoUpgradeAttemptStarted(upgrade: AgentLoopUpgradeMetadata): void {
+    const attemptedAt = new Date().toISOString()
+    this.autoUpgradeState = writeAutoUpgradeRuntimeState(
+      this.autoUpgradeStatePath,
+      recordAutoUpgradeAttemptStarted(this.autoUpgradeState, {
+        attemptedAt,
+        targetVersion: upgrade.latestVersion,
+        targetRevision: upgrade.latestRevision,
+      }),
+    )
+    this.syncRuntimeMetrics()
+  }
+
+  private noteAutoUpgradeAttemptCompleted(
+    outcome: 'succeeded' | 'failed' | 'no_change',
+    upgrade: Pick<AgentLoopUpgradeMetadata, 'latestVersion' | 'latestRevision'>,
+    error?: string,
+  ): void {
+    const completedAt = new Date().toISOString()
+    this.autoUpgradeState = writeAutoUpgradeRuntimeState(
+      this.autoUpgradeStatePath,
+      recordAutoUpgradeAttemptCompleted(this.autoUpgradeState, {
+        outcome,
+        completedAt,
+        targetVersion: upgrade.latestVersion,
+        targetRevision: upgrade.latestRevision,
+        error,
+      }),
+    )
+    this.syncRuntimeMetrics()
   }
 
   private getOldestLeaseHeartbeatAgeSeconds(): number {
@@ -4407,6 +4463,7 @@ export function buildDaemonRuntimeStatus(input: {
   lastRecoveryActionKind: string | null
   recentRecoveryActions: RecoveryActionRuntimeDetail[]
   oldestBlockedIssueResumeEscalationAgeSeconds: number
+  autoUpgrade: AgentLoopAutoUpgradeRuntimeState
 }): DaemonStatus['runtime'] {
   return {
     supervisor: input.supervisor,
@@ -4444,6 +4501,7 @@ export function buildDaemonRuntimeStatus(input: {
     lastRecoveryActionKind: input.lastRecoveryActionKind,
     recentRecoveryActions: input.recentRecoveryActions,
     oldestBlockedIssueResumeEscalationAgeSeconds: input.oldestBlockedIssueResumeEscalationAgeSeconds,
+    autoUpgrade: input.autoUpgrade,
   }
 }
 

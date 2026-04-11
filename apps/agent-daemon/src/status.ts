@@ -74,6 +74,12 @@ export interface DaemonMetricSummary {
   blockedIssueResumeAgeSeconds: number | null
   blockedIssueResumeEscalations: number | null
   blockedIssueResumeEscalationAgeSeconds: number | null
+  autoUpgradeAttempts: number | null
+  autoUpgradeSuccesses: number | null
+  autoUpgradeFailures: number | null
+  autoUpgradeNoChanges: number | null
+  autoUpgradeLastAttemptAgeSeconds: number | null
+  autoUpgradeLastSuccessAgeSeconds: number | null
   leaseConflicts: number
   rateLimitHits: number
 }
@@ -431,6 +437,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
     `connectivity: transient ${transientLoopErrorCount} | startup deferred ${startupRecoveryDeferredCount} | last transient ${formatTransientLoopError(health.runtime.lastTransientLoopErrorKind, health.runtime.lastTransientLoopErrorAgeSeconds)}`,
     `leases: active ${health.runtime.activeLeaseCount} | oldest heartbeat ${formatNullableSeconds(health.runtime.oldestLeaseHeartbeatAgeSeconds)} | stalled ${health.runtime.stalledWorkerCount} | last recovery ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `state: startup pending ${formatBoolean(health.runtime.startupRecoveryPending)} | failed resumes ${health.runtime.failedIssueResumeAttemptsTracked} | cooldowns ${health.runtime.failedIssueResumeCooldownsTracked} | blocked resumes ${blockedIssueResumeCount} | oldest blocked ${formatNullableSeconds(oldestBlockedIssueResumeAgeSeconds)} | escalated ${blockedIssueResumeEscalationCount} | oldest escalation ${formatNullableSeconds(oldestBlockedIssueResumeEscalationAgeSeconds)}`,
+    `auto-upgrade: ${formatAutoUpgradeRuntimeSummary(health.runtime.autoUpgrade ?? null)}`,
     `poll: last ${health.lastPollAt ?? 'never'} | last claim ${health.lastClaimedAt ?? 'never'} | next ${formatNextPollSummary(health.nextPollAt, health.nextPollReason, health.nextPollDelayMs)}`,
   ]
 
@@ -458,6 +465,7 @@ export function formatStatusReport(snapshot: DaemonObservabilitySnapshot): strin
       `outcomes: polls ${formatOrderedMap(snapshot.metrics.polls, POLL_OUTCOME_ORDER)} | wake ${formatOrderedMap(summarizeWakeOutcomes(snapshot.metrics.wakeRequests), WAKE_OUTCOME_ORDER)} | reviews ${formatOrderedMap(reviewTotals, REVIEW_OUTCOME_ORDER)} | auto-fix ${formatOrderedMap(snapshot.metrics.autoFixes, AUTO_FIX_OUTCOME_ORDER)} | merge ${formatOrderedMap(snapshot.metrics.mergeRecovery, MERGE_RECOVERY_OUTCOME_ORDER)}`,
     )
     lines.push(`github api: ${formatGitHubApiRequestSummary(snapshot.metrics.githubApiRequests)}`)
+    lines.push(`auto-upgrade metrics: ${formatAutoUpgradeMetricSummary(snapshot.metrics)}`)
     lines.push(
       `wake: pending ${snapshot.metrics.pendingWakeRequests ?? 0} | ${formatWakeRequestSummary(snapshot.metrics.wakeRequests)}`,
     )
@@ -579,6 +587,12 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
         `blocked-issue-resume-age-seconds: ${snapshot.metrics.blockedIssueResumeAgeSeconds ?? 0}`,
         `blocked-issue-resume-escalations: ${snapshot.metrics.blockedIssueResumeEscalations ?? 0}`,
         `blocked-issue-resume-escalation-age-seconds: ${snapshot.metrics.blockedIssueResumeEscalationAgeSeconds ?? 0}`,
+        `auto-upgrade-attempts: ${snapshot.metrics.autoUpgradeAttempts ?? 0}`,
+        `auto-upgrade-successes: ${snapshot.metrics.autoUpgradeSuccesses ?? 0}`,
+        `auto-upgrade-failures: ${snapshot.metrics.autoUpgradeFailures ?? 0}`,
+        `auto-upgrade-no-changes: ${snapshot.metrics.autoUpgradeNoChanges ?? 0}`,
+        `auto-upgrade-last-attempt-age-seconds: ${snapshot.metrics.autoUpgradeLastAttemptAgeSeconds ?? 0}`,
+        `auto-upgrade-last-success-age-seconds: ${snapshot.metrics.autoUpgradeLastSuccessAgeSeconds ?? 0}`,
         `recovery-actions: ${formatRecoveryActionSummary(snapshot.metrics.recoveryActions)}`,
         `rate-limit-hits: ${snapshot.metrics.rateLimitHits}`,
       ]
@@ -635,6 +649,7 @@ export function formatDoctorReport(snapshot: DaemonObservabilitySnapshot): strin
     `last recovery action: ${formatLastRecovery(health.runtime.lastRecoveryActionKind, health.runtime.lastRecoveryActionAt)}`,
     `failed issue resume attempts tracked: ${health.runtime.failedIssueResumeAttemptsTracked}`,
     `failed issue resume cooldowns tracked: ${health.runtime.failedIssueResumeCooldownsTracked}`,
+    `auto-upgrade runtime: ${formatAutoUpgradeRuntimeSummary(health.runtime.autoUpgrade ?? null)}`,
     '',
     'Outcomes',
     ...outcomeLines,
@@ -808,6 +823,12 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
     blockedIssueResumeAgeSeconds: null,
     blockedIssueResumeEscalations: null,
     blockedIssueResumeEscalationAgeSeconds: null,
+    autoUpgradeAttempts: null,
+    autoUpgradeSuccesses: null,
+    autoUpgradeFailures: null,
+    autoUpgradeNoChanges: null,
+    autoUpgradeLastAttemptAgeSeconds: null,
+    autoUpgradeLastSuccessAgeSeconds: null,
     leaseConflicts: 0,
     rateLimitHits: 0,
   }
@@ -878,6 +899,24 @@ export function summarizeDaemonMetrics(metricsText: string): DaemonMetricSummary
         break
       case 'agent_loop_blocked_issue_resume_escalation_age_seconds':
         summary.blockedIssueResumeEscalationAgeSeconds = sample.value
+        break
+      case 'agent_loop_auto_upgrade_attempts':
+        summary.autoUpgradeAttempts = sample.value
+        break
+      case 'agent_loop_auto_upgrade_successes':
+        summary.autoUpgradeSuccesses = sample.value
+        break
+      case 'agent_loop_auto_upgrade_failures':
+        summary.autoUpgradeFailures = sample.value
+        break
+      case 'agent_loop_auto_upgrade_no_changes':
+        summary.autoUpgradeNoChanges = sample.value
+        break
+      case 'agent_loop_auto_upgrade_last_attempt_age_seconds':
+        summary.autoUpgradeLastAttemptAgeSeconds = sample.value
+        break
+      case 'agent_loop_auto_upgrade_last_success_age_seconds':
+        summary.autoUpgradeLastSuccessAgeSeconds = sample.value
         break
       case 'agent_loop_lease_conflicts_total':
         summary.leaseConflicts += sample.value
@@ -973,6 +1012,11 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   if (snapshot.health.upgrade?.status === 'error' && snapshot.health.upgrade.message) {
     warnings.push(`agent-loop upgrade check failed: ${snapshot.health.upgrade.message}`)
   }
+  if (snapshot.health.runtime.autoUpgrade?.lastOutcome === 'failed') {
+    warnings.push(
+      `last automatic agent-loop upgrade failed${snapshot.health.runtime.autoUpgrade.lastError ? `: ${snapshot.health.runtime.autoUpgrade.lastError}` : ''}`,
+    )
+  }
   if (snapshot.health.runtime.supervisor === 'direct') {
     warnings.push('daemon is running in direct mode; closing the current terminal/session will stop it')
   }
@@ -1050,6 +1094,9 @@ function buildDoctorWarnings(snapshot: DaemonObservabilitySnapshot): string[] {
   }
   if ((snapshot.metrics?.autoFixes.push_failed ?? 0) > 0) {
     warnings.push(`review auto-fix push failures observed: ${snapshot.metrics?.autoFixes.push_failed}`)
+  }
+  if ((snapshot.metrics?.autoUpgradeFailures ?? 0) > 0) {
+    warnings.push(`automatic agent-loop upgrade failures observed: ${snapshot.metrics?.autoUpgradeFailures}`)
   }
   if (((snapshot.metrics?.mergeRecovery.refresh_push_failed ?? 0) + (snapshot.metrics?.mergeRecovery.retry_merge_failed ?? 0)) > 0) {
     warnings.push('merge recovery has recent push/merge retry failures; inspect the latest PR recovery comments')
@@ -1447,6 +1494,39 @@ function formatUpgradeSummary(upgrade: DaemonHealthPayload['upgrade'] | undefine
   }
 
   return `${upgrade.status} | latest v${upgrade.latestVersion ?? 'unknown'}@${formatRevision(upgrade.latestRevision)} | checked ${upgrade.checkedAt ?? 'never'} | safe now ${formatBoolean(upgrade.safeToUpgradeNow)}`
+}
+
+function formatAutoUpgradeRuntimeSummary(autoUpgrade: DaemonHealthPayload['runtime']['autoUpgrade'] | null | undefined): string {
+  if (!autoUpgrade) {
+    return 'unavailable'
+  }
+
+  const target = autoUpgrade.lastTargetVersion || autoUpgrade.lastTargetRevision
+    ? `target v${autoUpgrade.lastTargetVersion ?? 'unknown'}@${formatRevision(autoUpgrade.lastTargetRevision ?? null)}`
+    : 'target unknown'
+  const lastError = autoUpgrade.lastError ? ` | error ${autoUpgrade.lastError}` : ''
+
+  return [
+    `attempts ${autoUpgrade.attemptCount}`,
+    `success ${autoUpgrade.successCount}`,
+    `failed ${autoUpgrade.failureCount}`,
+    `no-change ${autoUpgrade.noChangeCount}`,
+    `last outcome ${autoUpgrade.lastOutcome ?? 'never'}`,
+    `last attempt ${autoUpgrade.lastAttemptAt ?? 'never'}`,
+    `last success ${autoUpgrade.lastSuccessAt ?? 'never'}`,
+    target,
+  ].join(' | ') + lastError
+}
+
+function formatAutoUpgradeMetricSummary(metrics: DaemonMetricSummary): string {
+  return [
+    `attempts ${metrics.autoUpgradeAttempts ?? 0}`,
+    `success ${metrics.autoUpgradeSuccesses ?? 0}`,
+    `failed ${metrics.autoUpgradeFailures ?? 0}`,
+    `no-change ${metrics.autoUpgradeNoChanges ?? 0}`,
+    `last attempt age ${formatNullableSeconds(metrics.autoUpgradeLastAttemptAgeSeconds ?? 0)}`,
+    `last success age ${formatNullableSeconds(metrics.autoUpgradeLastSuccessAgeSeconds ?? 0)}`,
+  ].join(' | ')
 }
 
 function inferIssueStateFromLabels(labels: string[]): string {

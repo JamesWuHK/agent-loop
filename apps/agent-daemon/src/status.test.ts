@@ -188,6 +188,18 @@ const baseHealth: DaemonStatus & {
         reason: 'worker idle timeout',
       },
     ],
+    autoUpgrade: {
+      attemptCount: 2,
+      successCount: 1,
+      failureCount: 0,
+      noChangeCount: 1,
+      lastAttemptAt: '2026-04-05T08:09:55.000Z',
+      lastSuccessAt: '2026-04-05T07:55:00.000Z',
+      lastOutcome: 'no_change',
+      lastTargetVersion: '0.1.1',
+      lastTargetRevision: '2222222222222222222222222222222222222222',
+      lastError: null,
+    },
   },
   activeWorktrees: [
     {
@@ -243,6 +255,12 @@ agent_loop_blocked_issue_resumes 1
 agent_loop_blocked_issue_resume_age_seconds 45
 agent_loop_blocked_issue_resume_escalations 1
 agent_loop_blocked_issue_resume_escalation_age_seconds 15
+agent_loop_auto_upgrade_attempts 3
+agent_loop_auto_upgrade_successes 1
+agent_loop_auto_upgrade_failures 1
+agent_loop_auto_upgrade_no_changes 1
+agent_loop_auto_upgrade_last_attempt_age_seconds 300
+agent_loop_auto_upgrade_last_success_age_seconds 900
 agent_loop_lease_conflicts_total{scope="issue-process"} 1
 agent_loop_rate_limit_hits_total 0
 `
@@ -381,6 +399,12 @@ describe('status helpers', () => {
       blockedIssueResumeAgeSeconds: 45,
       blockedIssueResumeEscalations: 1,
       blockedIssueResumeEscalationAgeSeconds: 15,
+      autoUpgradeAttempts: 3,
+      autoUpgradeSuccesses: 1,
+      autoUpgradeFailures: 1,
+      autoUpgradeNoChanges: 1,
+      autoUpgradeLastAttemptAgeSeconds: 300,
+      autoUpgradeLastSuccessAgeSeconds: 900,
       leaseConflicts: 1,
       rateLimitHits: 0,
     })
@@ -431,6 +455,7 @@ describe('status helpers', () => {
     expect(report).toContain('leases: active 2 | oldest heartbeat 75s | stalled 1 | last recovery issue-process-idle-timeout @ 2026-04-05T08:08:30.000Z')
     expect(report).toContain('lease detail: issue-process#77 implementation hb=75s progress=42s adoptable=yes')
     expect(report).toContain('state: startup pending yes | failed resumes 1 | cooldowns 1 | blocked resumes 1 | oldest blocked 45s | escalated 1 | oldest escalation 15s')
+    expect(report).toContain('auto-upgrade: attempts 2 | success 1 | failed 0 | no-change 1 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | target v0.1.1@2222222')
     expect(report).toContain('poll: last 2026-04-05T08:10:00.000Z | last claim 2026-04-05T08:09:00.000Z | next 5s (deferred-transient) @ 2026-04-05T08:10:05.000Z')
     expect(report).toContain('recent recovery: issue-process-idle-timeout/recoverable issue-process#77')
     expect(report).toContain('blocked resumes: issue#91<-pr#110 45s esc=1/15s')
@@ -438,6 +463,7 @@ describe('status helpers', () => {
     expect(report).toContain('runtime files: record /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.json | log /Users/wujames/.agent-loop/runtime/jameswuhk-digital-employee__codex-dev__9310.log')
     expect(report).toContain('outcomes: polls success=12, skipped_concurrency=3, no_issues=4, error=1 | wake queued=2, started_work=1, no_match=1, allow_fallback=1')
     expect(report).toContain('github api: graphql/direct[success=8, error=0, timeout=0, rate_limited=1], rest/gh_cli[success=5, error=1, timeout=0, rate_limited=0]')
+    expect(report).toContain('auto-upgrade metrics: attempts 3 | success 1 | failed 1 | no-change 1 | last attempt age 300s | last success age 900s')
     expect(report).toContain('wake: pending 2 | now[queued=0, started_work=0, no_match=0, allow_fallback=1], issue[queued=2, started_work=1, no_match=0, allow_fallback=0], pr[queued=0, started_work=0, no_match=1, allow_fallback=0]')
     expect(report).toContain('pr blockers: pr#239<-issue#105 attempt 5 @ 2026-04-06T01:23:45.000Z: The PR breaks the existing approval-bar flow')
     expect(report).toContain('warnings: startup recovery is still pending')
@@ -526,11 +552,54 @@ describe('status helpers', () => {
     expect(report).toContain('worker-idle-timeouts: issue-process=2')
     expect(report).toContain('blocked-issue-resumes: 1')
     expect(report).toContain('blocked-issue-resume-age-seconds: 45')
+    expect(report).toContain('auto-upgrade-attempts: 3')
+    expect(report).toContain('auto-upgrade-successes: 1')
+    expect(report).toContain('auto-upgrade-failures: 1')
+    expect(report).toContain('auto-upgrade-no-changes: 1')
+    expect(report).toContain('auto-upgrade-last-attempt-age-seconds: 300')
+    expect(report).toContain('auto-upgrade-last-success-age-seconds: 900')
     expect(report).toContain('oldest blocked issue resume age: 45s')
+    expect(report).toContain('auto-upgrade runtime: attempts 2 | success 1 | failed 0 | no-change 1 | last outcome no_change | last attempt 2026-04-05T08:09:55.000Z | last success 2026-04-05T07:55:00.000Z | target v0.1.1@2222222')
     expect(report).toContain('- agent-loop upgrade available; defer restart until the daemon is idle to avoid interrupting active work')
     expect(report).toContain('- open PR review blockers: pr#239')
     expect(report).toContain('- github api rate limits observed: graphql/direct[success=0, error=0, timeout=0, rate_limited=1]')
     expect(report).toContain('- review auto-fix push failures observed: 1')
+    expect(report).toContain('- automatic agent-loop upgrade failures observed: 1')
+  })
+
+  test('doctor warnings surface the last failed automatic upgrade runtime error', () => {
+    const report = formatDoctorReport({
+      ok: true,
+      healthUrl: 'http://127.0.0.1:9310/health',
+      metricsUrl: 'http://127.0.0.1:9090/metrics',
+      error: null,
+      diagnosticRepo: baseHealth.repo,
+      localRuntime: baseLocalRuntime,
+      health: {
+        ...baseHealth,
+        runtime: {
+          ...baseHealth.runtime,
+          autoUpgrade: {
+            ...baseHealth.runtime.autoUpgrade!,
+            failureCount: 1,
+            lastOutcome: 'failed',
+            lastError: 'git pull failed',
+          },
+        },
+      },
+      metrics: summarizeDaemonMetrics(metricsText),
+      metricsError: null,
+      githubAudit: {
+        ok: true,
+        error: null,
+        checks: [],
+        prBlockers: [],
+        warnings: [],
+      },
+      warnings: [],
+    })
+
+    expect(report).toContain('- last automatic agent-loop upgrade failed: git pull failed')
   })
 
   test('doctor warnings call out adoptable leases and repeated recoveries for the same target', async () => {

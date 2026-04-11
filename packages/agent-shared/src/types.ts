@@ -173,6 +173,25 @@ export interface AgentLoopUpgradeMetadata {
   message: string | null
 }
 
+export type AgentLoopAutoUpgradeOutcome =
+  | 'attempting'
+  | 'succeeded'
+  | 'failed'
+  | 'no_change'
+
+export interface AgentLoopAutoUpgradeRuntimeState {
+  attemptCount: number
+  successCount: number
+  failureCount: number
+  noChangeCount: number
+  lastAttemptAt: string | null
+  lastSuccessAt: string | null
+  lastOutcome: AgentLoopAutoUpgradeOutcome | null
+  lastTargetVersion: string | null
+  lastTargetRevision: string | null
+  lastError: string | null
+}
+
 export type ManagedLeaseScope = 'issue-process' | 'pr-review' | 'pr-merge'
 export type ManagedLeaseStatus = 'active' | 'completed' | 'recoverable' | 'released'
 export type ManagedLeaseProgressKind = 'stdout' | 'stderr' | 'git-state' | 'phase'
@@ -404,6 +423,7 @@ export interface DaemonStatus {
     lastRecoveryActionKind: string | null
     recentRecoveryActions: RecoveryActionRuntimeDetail[]
     oldestBlockedIssueResumeEscalationAgeSeconds: number
+    autoUpgrade?: AgentLoopAutoUpgradeRuntimeState | null
   }
   activeWorktrees: WorktreeInfo[]
   lastPollAt: string | null
