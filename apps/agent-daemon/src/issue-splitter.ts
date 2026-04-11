@@ -284,6 +284,7 @@ export function formatTrackingIssueSplitResult(input: {
   parentSummary: string
   children: SplitTrackingIssueChildResult[]
 }): string {
+  const sanitizedParentSummary = sanitizeTrackingParentSummary(input.parentSummary)
   const childBlocks = input.children.flatMap((child) => [
     `## Child Issue #${child.number}: ${child.title}`,
     child.body,
@@ -292,7 +293,7 @@ export function formatTrackingIssueSplitResult(input: {
   return [
     '## Parent Summary',
     `Parent issue: ${input.parentTitle}`,
-    input.parentSummary.trim(),
+    sanitizedParentSummary,
     '### Planned Children',
     input.children
       .map((child, index) => `${index + 1}. #${child.number} ${child.title}`)
@@ -305,6 +306,14 @@ function normalizeSplitPlanText(responseText: string): string {
   const trimmed = responseText.trim()
   const fencedMatch = trimmed.match(/^```(?:json|markdown|md)?\s*\n([\s\S]*?)\n```$/i)
   return (fencedMatch?.[1] ?? trimmed).trim()
+}
+
+function sanitizeTrackingParentSummary(summary: string): string {
+  return summary
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/dependsOn/i.test(line))
+    .join('\n')
 }
 
 function tryParseSplitPlanJson(text: string): unknown | null {
@@ -712,7 +721,7 @@ function renderDeterministicChildIssue(input: {
   ]).slice(0, 8)
   const reviewHints = uniqueStrings([
     '优先检查 AllowedFiles 与 OutOfScope 是否仍然足够具体',
-    '优先检查 dependsOn 是否只引用更早 child issues',
+    '优先检查依赖是否只引用更早 child issues',
     ...input.parentContract.reviewHints,
   ]).slice(0, 8)
   const validationCommands = selectValidationCommands(
@@ -763,12 +772,12 @@ function renderDeterministicChildIssue(input: {
     renderNumberedSection('## 实现步骤', [
       `先为 ${input.child.title} 补失败测试或 contract 校验`,
       '再补最小实现，并把变更限制在 AllowedFiles 内',
-      '最后运行 Validation，并确认 dependsOn / OutOfScope 没有回归',
+      '最后运行 Validation，并确认依赖与 OutOfScope 没有回归',
     ]),
     '',
     renderCheckboxSection('## 验收', [
       '只修改 AllowedFiles 内文件',
-      'dependsOn 数组与执行顺序一致',
+      '依赖数组与执行顺序一致',
       'Validation 中命令执行通过',
     ]),
   ].join('\n')

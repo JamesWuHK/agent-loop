@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildTrackingIssueSplitPrompt,
+  formatTrackingIssueSplitResult,
   parseTrackingIssueSplitPlan,
   splitTrackingIssue,
 } from './issue-splitter'
@@ -40,7 +41,7 @@ describe('splitTrackingIssue', () => {
     expect(result.children[2]?.body).toContain('"dependsOn":[17,18]')
     expect(result.children.every((child) => child.body.includes('## RED 测试'))).toBe(true)
     expect(result.markdown).toContain('## Parent Summary')
-    expect(result.markdown.split('## Child Issue #17:')[0]).not.toContain('dependsOn')
+    expectTopLevelDependsOnToRemainMachineReadable(result.markdown)
   })
 
   test('uses explicit dependency ids from strict JSON plans', async () => {
@@ -121,6 +122,35 @@ describe('splitTrackingIssue', () => {
     expect(result.children[1]?.dependsOn).toEqual([41])
     expect(result.children[2]?.dependsOn).toEqual([42])
     expect(result.children[2]?.body).toContain('"dependsOn":[42]')
+    expectTopLevelDependsOnToRemainMachineReadable(result.markdown)
+  })
+
+  test('removes dependsOn prose from the parent summary while preserving child dependency JSON', () => {
+    const markdown = formatTrackingIssueSplitResult({
+      parentTitle: '[AL-EPIC] issue authoring pipeline',
+      parentSummary: [
+        '按 lint -> rewrite -> split 的顺序推进。',
+        '不要在这里输出 dependsOn: [41, 42]。',
+      ].join('\n'),
+      children: [
+        {
+          number: 41,
+          title: '[AL-LINT] 引入 issue lint',
+          body: buildCanonicalRewriteResult('[AL-LINT] 引入 issue lint', 'apps/agent-daemon/src/issue-splitter.ts').markdown,
+          dependsOn: [],
+          validation: {
+            valid: true,
+            score: 100,
+            errors: [],
+            warnings: [],
+          },
+        },
+      ],
+    })
+
+    expect(markdown).toContain('按 lint -> rewrite -> split 的顺序推进。')
+    expect(markdown).not.toContain('不要在这里输出 dependsOn: [41, 42]。')
+    expectTopLevelDependsOnToRemainMachineReadable(markdown)
   })
 
   test('rejects child markdown that still carries issue quality warnings', async () => {
@@ -230,4 +260,12 @@ throw new Error('red')
       warnings: [],
     },
   }
+}
+
+function expectTopLevelDependsOnToRemainMachineReadable(markdown: string) {
+  const dependencyBlocks = markdown.match(/### Dependencies\s*\n```json\s*\n[\s\S]*?"dependsOn":[\s\S]*?\n```/g) ?? []
+  const allDependsOnOccurrences = markdown.match(/dependsOn/g) ?? []
+
+  expect(dependencyBlocks.length).toBeGreaterThan(0)
+  expect(allDependsOnOccurrences).toHaveLength(dependencyBlocks.length)
 }
