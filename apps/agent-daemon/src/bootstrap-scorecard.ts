@@ -15,6 +15,10 @@ import {
   type AuditIssueSummary,
 } from './audit-issue-contracts'
 import {
+  buildLocalImplementationIndex,
+  type LocalImplementationRecord,
+} from './local-implementation'
+import {
   canResumeHumanNeededPrReview,
   extractLatestAutomatedPrReviewBlockerSummary,
 } from './pr-reviewer'
@@ -63,6 +67,7 @@ interface BootstrapScorecardDependencies {
   listOpenAgentPullRequests: typeof listOpenAgentPullRequests
   listIssueComments: typeof listIssueComments
   getAgentIssueByNumber: typeof getAgentIssueByNumber
+  buildLocalImplementationIndex: typeof buildLocalImplementationIndex
 }
 
 const DEFAULT_BOOTSTRAP_SCORECARD_DEPENDENCIES: BootstrapScorecardDependencies = {
@@ -70,6 +75,7 @@ const DEFAULT_BOOTSTRAP_SCORECARD_DEPENDENCIES: BootstrapScorecardDependencies =
   listOpenAgentPullRequests,
   listIssueComments,
   getAgentIssueByNumber,
+  buildLocalImplementationIndex,
 }
 
 const BOOTSTRAP_FAILURE_KIND_ORDER: BootstrapFailureKind[] = [
@@ -207,9 +213,11 @@ export function buildBootstrapScorecard(
 export async function buildBootstrapScorecardForRepo(
   input: {
     config: AgentConfig
+    repoRoot?: string
   },
   deps: BootstrapScorecardDependencies = DEFAULT_BOOTSTRAP_SCORECARD_DEPENDENCIES,
 ): Promise<BootstrapScorecard> {
+  const localImplementationIndex = deps.buildLocalImplementationIndex(input.repoRoot)
   const transportBlockers: BootstrapScorecardSignal[] = []
   const issuesResult = await collectScorecardSource(
     () => deps.listOpenAgentIssues(input.config),
@@ -261,8 +269,8 @@ export async function buildBootstrapScorecardForRepo(
       ? buildAuditIssueSummary(managedIssues.map(buildAuditedIssue))
       : buildEmptyAuditIssueSummary(),
     runtimeBlockers: [],
-    prBlockers,
-    reviewBlockers,
+    prBlockers: filterLocallyImplementedSignals(prBlockers, localImplementationIndex),
+    reviewBlockers: filterLocallyImplementedSignals(reviewBlockers, localImplementationIndex),
     transportBlockers,
     releaseEvidenceMissing: [],
   })
@@ -313,6 +321,17 @@ function normalizeScorecardSignal(signal: BootstrapScorecardSignal): BootstrapSc
     prNumber: signal.prNumber ?? null,
     reason: signal.reason,
   }
+}
+
+function filterLocallyImplementedSignals(
+  signals: BootstrapScorecardSignal[],
+  localImplementationIndex: Map<number, LocalImplementationRecord>,
+): BootstrapScorecardSignal[] {
+  return signals.filter((signal) => (
+    signal.issueNumber === null
+    || signal.issueNumber === undefined
+    || !localImplementationIndex.has(signal.issueNumber)
+  ))
 }
 
 function buildEmptyAuditIssueSummary(): AuditIssueSummary {
@@ -397,7 +416,7 @@ async function collectReviewBlockers(
 }
 
 function parseIssueNumberFromManagedBranch(headRefName: string): number | null {
-  const match = headRefName.match(/^agent\/(\d+)(?:\/|$)/)
+  const match = headRefName.match(/^agent\/(\d+)(?:-rebuild(?:-\d+)?)?(?:\/|$)/)
   if (!match) return null
 
   const parsed = Number.parseInt(match[1] ?? '', 10)

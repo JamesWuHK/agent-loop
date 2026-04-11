@@ -181,6 +181,7 @@ describe('buildBootstrapScorecardForRepo', () => {
         hasExecutableContract: true,
         contractValidationErrors: [],
       }),
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.categoryCounts).toMatchObject({
@@ -238,6 +239,7 @@ describe('buildBootstrapScorecardForRepo', () => {
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
       getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.categoryCounts.release_process_failure).toBe(0)
@@ -285,6 +287,7 @@ describe('buildBootstrapScorecardForRepo', () => {
         }]
       },
       getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(1)
@@ -307,6 +310,7 @@ describe('buildBootstrapScorecardForRepo', () => {
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
       getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.ready).toBe(true)
@@ -369,6 +373,7 @@ describe('buildBootstrapScorecardForRepo', () => {
         return []
       },
       getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.categoryCounts.review_failure).toBe(0)
@@ -427,6 +432,7 @@ describe('buildBootstrapScorecardForRepo', () => {
       getAgentIssueByNumber: async () => {
         throw new Error('The socket connection was closed unexpectedly.')
       },
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.ready).toBe(false)
@@ -465,6 +471,7 @@ describe('buildBootstrapScorecardForRepo', () => {
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
       getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map(),
     })
 
     expect(scorecard.ready).toBe(false)
@@ -474,5 +481,74 @@ describe('buildBootstrapScorecardForRepo', () => {
         category: 'github_transport_failure',
       }),
     ])
+  })
+
+  test('suppresses stale review and lifecycle blockers when the current branch already implements the linked issue', async () => {
+    const scorecard = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, {
+      listOpenAgentIssues: async () => [
+        {
+          number: 70,
+          title: 'bootstrap scorecard follow-up',
+          body: '',
+          state: 'failed',
+          labels: ['agent:failed'],
+          assignee: null,
+          isClaimable: false,
+          updatedAt: '2026-04-11T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: false,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        },
+      ],
+      listOpenAgentPullRequests: async () => [
+        {
+          number: 77,
+          title: 'Fix #70 add bootstrap scorecard taxonomy report',
+          url: 'https://example.test/pr/77',
+          headRefName: 'agent/70-rebuild/codex-dev',
+          headRefOid: 'abc123',
+          isDraft: false,
+          labels: ['agent:human-needed'],
+        },
+      ],
+      listIssueComments: async (number) => {
+        if (number === 77) {
+          return [{
+            commentId: 7701,
+            body: buildStructuredReviewBlockerComment(
+              77,
+              'linked PR #77 is in terminal agent:human-needed; automated review has no remaining structured retry path',
+              {
+                headRefOid: 'abc123',
+              },
+            ),
+            createdAt: '2026-04-11T09:00:00.000Z',
+            updatedAt: '2026-04-11T09:05:00.000Z',
+          }]
+        }
+
+        return []
+      },
+      getAgentIssueByNumber: async () => null,
+      buildLocalImplementationIndex: () => new Map([
+        [70, {
+          issueNumber: 70,
+          latestCommitHeadline: 'Fix #70 add bootstrap scorecard taxonomy report',
+          commitCount: 1,
+        }],
+      ]),
+    })
+
+    expect(scorecard.ready).toBe(true)
+    expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(0)
+    expect(scorecard.categoryCounts.review_failure).toBe(0)
   })
 })
