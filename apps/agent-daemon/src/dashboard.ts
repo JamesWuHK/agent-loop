@@ -40,11 +40,16 @@ type DashboardLeaseSource = 'local' | 'github'
 export interface DashboardSummary {
   machineCount: number
   localRuntimeCount: number
+  managedPresenceCount: number
   activeLeaseCount: number
   readyIssueCount: number
   workingIssueCount: number
   failedIssueCount: number
   openPrCount: number
+  upgradePendingMachineCount: number
+  upgradeReadyMachineCount: number
+  upgradeBlockedMachineCount: number
+  upgradeErrorMachineCount: number
 }
 
 export interface DashboardLeaseView {
@@ -341,6 +346,8 @@ export function buildDashboardMachineCards(
         ? 'local'
         : 'github'
 
+    mergeDashboardWarnings(machine, buildPresenceUpgradeWarnings(machine))
+
     if (machine.localRuntimes.length > 1) {
       mergeDashboardWarnings(machine, [
         `multiple local runtimes detected (${machine.localRuntimes.length})`,
@@ -366,22 +373,47 @@ export function buildDashboardSummary(
 ): DashboardSummary {
   const activeLeaseKeys = new Set<string>()
   let localRuntimeCount = 0
+  let managedPresenceCount = 0
+  let upgradePendingMachineCount = 0
+  let upgradeReadyMachineCount = 0
+  let upgradeBlockedMachineCount = 0
+  let upgradeErrorMachineCount = 0
 
   for (const machine of machines) {
     localRuntimeCount += machine.localRuntimes.length
     for (const lease of machine.activeLeases) {
       activeLeaseKeys.add(buildLeaseKey(lease))
     }
+
+    if (machine.presence) {
+      managedPresenceCount += 1
+      if (machine.presence.upgradeStatus === 'upgrade-available') {
+        upgradePendingMachineCount += 1
+        if (machine.presence.safeToUpgradeNow) {
+          upgradeReadyMachineCount += 1
+        } else {
+          upgradeBlockedMachineCount += 1
+        }
+      }
+      if (machine.presence.upgradeStatus === 'error') {
+        upgradeErrorMachineCount += 1
+      }
+    }
   }
 
   return {
     machineCount: machines.length,
     localRuntimeCount,
+    managedPresenceCount,
     activeLeaseCount: activeLeaseKeys.size,
     readyIssueCount: issues.filter((issue) => issue.state === 'ready').length,
     workingIssueCount: issues.filter((issue) => issue.state === 'working').length,
     failedIssueCount: issues.filter((issue) => issue.state === 'failed').length,
     openPrCount: prs.length,
+    upgradePendingMachineCount,
+    upgradeReadyMachineCount,
+    upgradeBlockedMachineCount,
+    upgradeErrorMachineCount,
   }
 }
 
@@ -829,13 +861,6 @@ function mergeDashboardLease(machine: DashboardMachineCard, lease: DashboardLeas
 function mergeDashboardPresence(machine: DashboardMachineCard, presence: DashboardPresenceView): void {
   if (!machine.presence) {
     machine.presence = presence
-    if (presence.upgradeStatus === 'upgrade-available') {
-      mergeDashboardWarnings(machine, [
-        presence.safeToUpgradeNow
-          ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
-          : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
-      ])
-    }
     return
   }
 
@@ -844,6 +869,33 @@ function mergeDashboardPresence(machine: DashboardMachineCard, presence: Dashboa
   if (candidateHeartbeat <= currentHeartbeat) {
     machine.presence = presence
   }
+}
+
+function buildPresenceUpgradeWarnings(machine: DashboardMachineCard): string[] {
+  if (!machine.presence) {
+    return []
+  }
+
+  const presence = machine.presence
+  if (presence.upgradeStatus === 'upgrade-available') {
+    return [
+      presence.safeToUpgradeNow
+        ? `agent-loop upgrade available on ${presence.machineId}; this machine is idle enough to upgrade now`
+        : `agent-loop upgrade available on ${presence.machineId}; wait for the machine to go idle before restarting`,
+    ]
+  }
+  if (presence.upgradeStatus === 'error') {
+    return [
+      `agent-loop upgrade check is failing on ${presence.machineId}; inspect this daemon before relying on auto-upgrade`,
+    ]
+  }
+  if (presence.upgradeStatus === 'ahead-of-channel') {
+    return [
+      `agent-loop build on ${presence.machineId} is ahead of the tracked channel; verify this machine is pinned intentionally`,
+    ]
+  }
+
+  return []
 }
 
 function preferLocalLease(
@@ -1648,7 +1700,12 @@ function renderSummary(snapshot) {
   const stats = [
     { label: '机器数', value: snapshot.summary.machineCount, tone: 'accent' },
     { label: '本地运行时', value: snapshot.summary.localRuntimeCount, tone: '' },
+    { label: '受管心跳', value: snapshot.summary.managedPresenceCount, tone: snapshot.summary.managedPresenceCount > 0 ? 'accent' : '' },
     { label: '活跃租约', value: snapshot.summary.activeLeaseCount, tone: 'gold' },
+    { label: '待升级机器', value: snapshot.summary.upgradePendingMachineCount, tone: snapshot.summary.upgradePendingMachineCount > 0 ? 'gold' : '' },
+    { label: '可立刻升级', value: snapshot.summary.upgradeReadyMachineCount, tone: snapshot.summary.upgradeReadyMachineCount > 0 ? 'accent' : '' },
+    { label: '升级被阻塞', value: snapshot.summary.upgradeBlockedMachineCount, tone: snapshot.summary.upgradeBlockedMachineCount > 0 ? 'gold' : '' },
+    { label: '升级检查错误', value: snapshot.summary.upgradeErrorMachineCount, tone: snapshot.summary.upgradeErrorMachineCount > 0 ? 'error' : '' },
     { label: '就绪 Issue', value: snapshot.summary.readyIssueCount, tone: '' },
     { label: '处理中 Issue', value: snapshot.summary.workingIssueCount, tone: 'accent' },
     { label: '失败 Issue', value: snapshot.summary.failedIssueCount, tone: snapshot.summary.failedIssueCount > 0 ? 'gold' : '' },

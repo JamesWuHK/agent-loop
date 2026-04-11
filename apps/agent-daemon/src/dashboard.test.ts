@@ -249,11 +249,16 @@ describe('dashboard machine aggregation', () => {
     expect(buildDashboardSummary(machines, issues, prs)).toEqual({
       machineCount: 1,
       localRuntimeCount: 1,
+      managedPresenceCount: 0,
       activeLeaseCount: 2,
       readyIssueCount: 1,
       workingIssueCount: 1,
       failedIssueCount: 1,
       openPrCount: 1,
+      upgradePendingMachineCount: 0,
+      upgradeReadyMachineCount: 0,
+      upgradeBlockedMachineCount: 0,
+      upgradeErrorMachineCount: 0,
     })
   })
 
@@ -274,6 +279,65 @@ describe('dashboard machine aggregation', () => {
     expect(remoteMachine?.presence?.status).toBe('idle')
     expect(remoteMachine?.daemonInstanceIds).toEqual(['daemon-remote-1'])
   })
+
+  test('summarizes upgrade rollout state from managed machine presence', () => {
+    const machines = buildDashboardMachineCards(
+      [buildLocalSnapshot()],
+      [],
+      [
+        buildPresence({
+          machineId: 'machine-ready',
+          daemonInstanceId: 'daemon-ready',
+          upgradeStatus: 'upgrade-available',
+          safeToUpgradeNow: true,
+          latestVersion: '0.1.2',
+        }),
+        buildPresence({
+          machineId: 'machine-busy',
+          daemonInstanceId: 'daemon-busy',
+          status: 'busy',
+          effectiveActiveTasks: 2,
+          activeLeaseCount: 1,
+          activeWorktreeCount: 1,
+          upgradeStatus: 'upgrade-available',
+          safeToUpgradeNow: false,
+          latestVersion: '0.1.2',
+        }),
+        buildPresence({
+          machineId: 'machine-error',
+          daemonInstanceId: 'daemon-error',
+          upgradeStatus: 'error',
+          safeToUpgradeNow: false,
+          latestVersion: null,
+        }),
+      ],
+    )
+
+    expect(buildDashboardSummary(machines, [], [])).toEqual({
+      machineCount: 4,
+      localRuntimeCount: 1,
+      managedPresenceCount: 3,
+      activeLeaseCount: 1,
+      readyIssueCount: 0,
+      workingIssueCount: 0,
+      failedIssueCount: 0,
+      openPrCount: 0,
+      upgradePendingMachineCount: 2,
+      upgradeReadyMachineCount: 1,
+      upgradeBlockedMachineCount: 1,
+      upgradeErrorMachineCount: 1,
+    })
+
+    expect(machines.find((machine) => machine.machineId === 'machine-ready')?.warnings).toContain(
+      'agent-loop upgrade available on machine-ready; this machine is idle enough to upgrade now',
+    )
+    expect(machines.find((machine) => machine.machineId === 'machine-busy')?.warnings).toContain(
+      'agent-loop upgrade available on machine-busy; wait for the machine to go idle before restarting',
+    )
+    expect(machines.find((machine) => machine.machineId === 'machine-error')?.warnings).toContain(
+      'agent-loop upgrade check is failing on machine-error; inspect this daemon before relying on auto-upgrade',
+    )
+  })
 })
 
 describe('dashboard localization', () => {
@@ -291,6 +355,8 @@ describe('dashboard localization', () => {
     expect(script).toContain('仪表盘快照加载失败')
     expect(script).toContain('未发现本仓库的本地受管 daemon 运行时。')
     expect(script).toContain('机器数')
+    expect(script).toContain('待升级机器')
+    expect(script).toContain('可立刻升级')
     expect(script).toContain('本地运行时')
     expect(script).toContain('可认领')
     expect(script).toContain('阻塞原因')
