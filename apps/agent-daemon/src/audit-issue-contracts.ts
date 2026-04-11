@@ -8,6 +8,26 @@ import {
 import { parseIssueContract, summarizeIssueContract } from '../../../packages/agent-shared/src/issue-contract'
 import { buildIssueQualityReport } from '../../../packages/agent-shared/src/issue-quality'
 import { loadConfig, type CliArgs } from './config'
+import {
+  simulateIssueExecutability,
+  type IssueSimulationResult,
+} from './issue-simulate'
+
+const LOW_SCORE_THRESHOLD = 80
+
+type AuditableIssue = Pick<AgentIssue, 'number' | 'title' | 'body' | 'state'> & Partial<Pick<AgentIssue,
+  'labels'
+  | 'isClaimable'
+  | 'hasExecutableContract'
+  | 'claimBlockedBy'
+  | 'contractValidationErrors'
+>>
+
+export interface AuditedIssueContract {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+}
 
 export interface AuditedIssue {
   number: number
@@ -19,15 +39,20 @@ export interface AuditedIssue {
   contractValidationErrors: string[]
   qualityScore: number
   contractWarnings: string[]
+  contract: AuditedIssueContract
+  simulation?: IssueSimulationResult
+}
+
+export interface AuditIssueSummary {
+  auditedIssueCount: number
+  invalidIssueCount: number
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
 }
 
 export interface AuditIssueContractsJsonReport {
-  totals: {
-    managedIssues: number
-    readyIssues: number
-    invalidReadyIssues: number
-    issuesWithWarnings: number
-  }
+  summary: AuditIssueSummary
   issues: Array<AuditedIssue & {
     readyGateBlocked: boolean
   }>
@@ -77,12 +102,20 @@ interface RemoteIssueFetchDependencies {
   ) => Promise<RemoteIssueViewCommandResult>
 }
 
+interface AuditIssuesDependencies {
+  simulateIssueExecutability: typeof simulateIssueExecutability
+}
+
 const DEFAULT_REMOTE_ISSUE_FETCH_DEPENDENCIES: RemoteIssueFetchDependencies = {
   runIssueViewCommand: async () => ({
     stdout: '',
     stderr: '',
     exitCode: 1,
   }),
+}
+
+const DEFAULT_AUDIT_ISSUES_DEPENDENCIES: AuditIssuesDependencies = {
+  simulateIssueExecutability,
 }
 
 export function buildIssueLintReport(
@@ -110,25 +143,83 @@ export function buildIssueLintReport(
 }
 
 export function buildAuditedIssue(
-  issue: Pick<AgentIssue, 'number' | 'title' | 'state' | 'isClaimable' | 'hasExecutableContract' | 'claimBlockedBy' | 'contractValidationErrors' | 'body'>,
+  issue: AuditableIssue,
 ): AuditedIssue {
   const report = buildIssueLintReport(issue.body, {
     kind: 'issue',
     issueNumber: issue.number,
     repo: 'unknown',
   }, issue.title)
+  const contractErrors = [...report.errors]
+  const claimBlockedBy = [...(issue.claimBlockedBy ?? [])]
+  const hasExecutableContract = issue.hasExecutableContract ?? report.valid
 
   return {
     number: issue.number,
     title: issue.title,
     state: issue.state,
-    isClaimable: issue.isClaimable,
-    hasExecutableContract: issue.hasExecutableContract,
-    claimBlockedBy: [...issue.claimBlockedBy],
-    contractValidationErrors: [...issue.contractValidationErrors],
+    isClaimable: issue.isClaimable ?? (
+      issue.state === 'ready'
+      && hasExecutableContract
+      && claimBlockedBy.length === 0
+    ),
+    hasExecutableContract,
+    claimBlockedBy,
+    contractValidationErrors: contractErrors,
     qualityScore: report.score,
-    contractWarnings: report.warnings,
+    contractWarnings: [...report.warnings],
+    contract: {
+      valid: report.valid,
+      errors: contractErrors,
+      warnings: [...report.warnings],
+    },
   }
+}
+
+export function buildAuditIssueSummary(issues: AuditedIssue[]): AuditIssueSummary {
+  return {
+    auditedIssueCount: issues.length,
+    invalidIssueCount: issues.filter((issue) => !issue.contract.valid).length,
+    invalidReadyIssueCount: issues.filter((issue) => issue.state === 'ready' && !issue.contract.valid).length,
+    lowScoreIssueCount: issues.filter((issue) => issue.qualityScore < LOW_SCORE_THRESHOLD).length,
+    warningIssueCount: issues.filter((issue) => issue.contract.warnings.length > 0).length,
+  }
+}
+
+export async function auditIssues(
+  input: {
+    issues: AuditableIssue[]
+    includeSimulation: boolean
+    repoRoot?: string
+    config?: AgentConfig
+  },
+  deps: AuditIssuesDependencies = DEFAULT_AUDIT_ISSUES_DEPENDENCIES,
+): Promise<AuditIssueContractsJsonReport> {
+  if (input.includeSimulation && !input.repoRoot) {
+    throw new Error('repoRoot is required when includeSimulation is enabled')
+  }
+
+  const auditedIssues = await Promise.all(input.issues.map(async (issue) => {
+    const audited = buildAuditedIssue(issue)
+
+    if (!input.includeSimulation) {
+      return audited
+    }
+
+    const simulation = await deps.simulateIssueExecutability({
+      issueTitle: issue.title,
+      issueBody: issue.body,
+      repoRoot: input.repoRoot!,
+      config: input.config,
+    })
+
+    return {
+      ...audited,
+      simulation,
+    }
+  }))
+
+  return buildAuditIssueContractsJsonReport(auditedIssues)
 }
 
 export function formatAuditLine(issue: AuditedIssue): string {
@@ -157,21 +248,58 @@ export function buildAuditIssueContractsJsonReport(
   issues: AuditedIssue[],
 ): AuditIssueContractsJsonReport {
   return {
-    totals: {
-      managedIssues: issues.length,
-      readyIssues: issues.filter((issue) => issue.state === 'ready').length,
-      invalidReadyIssues: issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract).length,
-      issuesWithWarnings: issues.filter((issue) => issue.contractWarnings.length > 0).length,
-    },
+    summary: buildAuditIssueSummary(issues),
     issues: issues.map((issue) => ({
       ...issue,
-      readyGateBlocked: issue.contractValidationErrors.length > 0,
+      readyGateBlocked: !issue.contract.valid,
     })),
   }
 }
 
 export function formatAuditJsonReport(issues: AuditedIssue[]): string {
   return JSON.stringify(buildAuditIssueContractsJsonReport(issues), null, 2)
+}
+
+export function formatAuditOutput(
+  report: AuditIssueContractsJsonReport,
+  asJson = false,
+): string {
+  if (asJson) {
+    return JSON.stringify(report, null, 2)
+  }
+
+  const lines = [
+    `audited issues: ${report.summary.auditedIssueCount}`,
+    `summary: invalid=${report.summary.invalidIssueCount} invalidReady=${report.summary.invalidReadyIssueCount} lowScore=${report.summary.lowScoreIssueCount} warnings=${report.summary.warningIssueCount}`,
+    ...report.issues.map(formatAuditLine),
+  ]
+
+  const invalidReadySection = formatInvalidReadySection(
+    report.issues.filter((issue) => issue.state === 'ready' && !issue.contract.valid),
+  )
+  if (invalidReadySection) {
+    lines.push('', invalidReadySection)
+  }
+
+  const simulatedIssues = report.issues.filter((issue) => issue.simulation)
+  if (simulatedIssues.length > 0) {
+    lines.push('', 'simulation results:')
+    for (const issue of simulatedIssues) {
+      lines.push(
+        `#${issue.number} simulation=${issue.simulation!.valid ? 'pass' : 'fail'} summary=${issue.simulation!.summary}`,
+      )
+      lines.push(...issue.simulation!.failures.map((failure) => `- ${failure}`))
+    }
+  }
+
+  return lines.join('\n')
+}
+
+export function resolveAuditExitCode(
+  report: AuditIssueContractsJsonReport,
+  explicitIssueSet: boolean,
+): number {
+  return explicitIssueSet && report.summary.invalidIssueCount > 0 ? 1 : 0
 }
 
 export function formatIssueLintReportJson(report: IssueLintReport): string {
@@ -268,9 +396,20 @@ export async function buildIssueLintReportFromRemoteIssue(input: {
   }, issue.title)
 }
 
-function parseArgs(argv: string[]): CliArgs & { json?: boolean } {
+function parsePositiveIssueNumber(value: string, flagName: string): number {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flagName} must be a positive integer`)
+  }
+
+  return parsed
+}
+
+function parseArgs(argv: string[]): CliArgs & { json?: boolean; simulate?: boolean; issueNumbers: number[] } {
   let repo: string | undefined
   let json = false
+  let simulate = false
+  const issueNumbers: number[] = []
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -279,35 +418,46 @@ function parseArgs(argv: string[]): CliArgs & { json?: boolean } {
       index += 1
     } else if (arg === '--json') {
       json = true
+    } else if (arg === '--simulate') {
+      simulate = true
+    } else if (arg === '--issue') {
+      const rawIssueNumber = argv[index + 1]
+      if (!rawIssueNumber) {
+        throw new Error('--issue requires a value')
+      }
+
+      issueNumbers.push(parsePositiveIssueNumber(rawIssueNumber, '--issue'))
+      index += 1
     }
   }
 
-  return { repo, json }
+  return { repo, json, simulate, issueNumbers }
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const config = loadConfig(args)
-  const issues = await listOpenAgentIssues(config)
-  const managedIssues = issues
-    .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
-    .map(buildAuditedIssue)
+  const issues = args.issueNumbers.length > 0
+    ? await Promise.all(args.issueNumbers.map(async (issueNumber) => {
+        const issue = await getAgentIssueByNumber(issueNumber, config)
+        if (!issue) {
+          throw new Error(`Issue #${issueNumber} was not found in ${config.repo}`)
+        }
 
-  if (args.json) {
-    console.log(formatAuditJsonReport(managedIssues))
-    return
-  }
+        return issue
+      }))
+    : await listOpenAgentIssues(config)
+  const report = await auditIssues({
+    issues,
+    includeSimulation: args.simulate ?? false,
+    repoRoot: process.cwd(),
+    config,
+  })
 
-  console.log(`managed issues: ${managedIssues.length}`)
-
-  for (const issue of managedIssues) {
-    console.log(formatAuditLine(issue))
-  }
-
-  const invalidReady = managedIssues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract)
-  const invalidReadySection = formatInvalidReadySection(invalidReady)
-  if (invalidReadySection) {
-    console.log(`\n${invalidReadySection}`)
+  console.log(formatAuditOutput(report, args.json))
+  const exitCode = resolveAuditExitCode(report, args.issueNumbers.length > 0)
+  if (exitCode !== 0) {
+    process.exit(exitCode)
   }
 }
 

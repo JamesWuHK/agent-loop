@@ -3,10 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  executeIssueAuditCommand,
   buildWakeRequestFromCli,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  formatIssueAuditOutput,
   executeIssueLintCommand,
   executeIssueRewriteCommand,
   executeIssueSplitCommand,
@@ -16,6 +18,8 @@ import {
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
+  resolveIssueAuditExitCode,
+  resolveIssueAuditTarget,
   resolveIssueLintTarget,
   resolveIssueRewriteTarget,
   resolveIssueSplitTarget,
@@ -66,6 +70,25 @@ describe('index helpers', () => {
       'lint-issue': '36',
       'lint-file': 'docs/issues/ready.md',
     })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
+  })
+
+  test('resolves audit targets and preserves repeated explicit issue selectors', () => {
+    expect(resolveIssueAuditTarget({
+      'audit-issues': true,
+    })).toEqual({
+      issueNumbers: [],
+    })
+
+    expect(resolveIssueAuditTarget({
+      'audit-issues': true,
+      issue: ['50', '51'],
+    })).toEqual({
+      issueNumbers: [50, 51],
+    })
+
+    expect(resolveIssueAuditTarget({
+      issue: ['50'],
+    })).toBeNull()
   })
 
   test('resolves rewrite targets and rejects empty rewrite paths', () => {
@@ -169,6 +192,137 @@ describe('index helpers', () => {
       valid: true,
       readyGateBlocked: false,
     })
+  })
+
+  test('executes issue audit against explicit issue numbers and includes simulation when requested', async () => {
+    const report = await executeIssueAuditCommand({
+      issueNumbers: [50, 52],
+      includeSimulation: true,
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => ({
+        repo: args.repo!,
+        pat: args.pat!,
+        concurrency: 1,
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        machineId: 'codex-dev',
+      } as any),
+      listOpenAgentIssues: async () => {
+        throw new Error('should not list open issues for explicit audit')
+      },
+      getAgentIssueByNumber: async (issueNumber, config) => ({
+        number: issueNumber,
+        title: `[AL-${issueNumber}] audit target`,
+        body: issueNumber === 50
+          ? '## 用户故事\n只有用户故事'
+          : [
+              '## 用户故事',
+              '作为维护者，我希望 issue audit 能输出 repo-level JSON。',
+              '',
+              '## Context',
+              '### Dependencies',
+              '```json',
+              '{ "dependsOn": [] }',
+              '```',
+              '### AllowedFiles',
+              '- apps/agent-daemon/src/audit-issue-contracts.ts',
+              '### ForbiddenFiles',
+              '- apps/agent-daemon/src/dashboard.ts',
+              '### MustPreserve',
+              '- human-readable 审计输出',
+              '### OutOfScope',
+              '- dashboard',
+              '### RequiredSemantics',
+              '- JSON 输出稳定',
+              '### ReviewHints',
+              '- 检查 summary',
+              '### Validation',
+              '- `bun test apps/agent-daemon/src/index.test.ts`',
+              '',
+              '## RED 测试',
+              '```ts',
+              'expect(true).toBe(false)',
+              '```',
+              '',
+              '## 实现步骤',
+              '1. 增加 audit command',
+              '',
+              '## 验收',
+              '- [ ] audit command 可用',
+            ].join('\n'),
+        state: 'ready',
+        labels: ['agent:ready'],
+        assignee: null,
+        isClaimable: issueNumber !== 50,
+        updatedAt: '2026-04-11T09:30:00.000Z',
+        dependencyIssueNumbers: [],
+        hasDependencyMetadata: true,
+        dependencyParseError: false,
+        claimBlockedBy: [],
+        hasExecutableContract: issueNumber !== 50,
+        contractValidationErrors: issueNumber === 50
+          ? ['missing ### Dependencies JSON block']
+          : [],
+      } as any),
+      auditIssues: async ({ issues, includeSimulation, repoRoot }) => {
+        expect(issues.map((issue) => issue.number)).toEqual([50, 52])
+        expect(includeSimulation).toBe(true)
+        expect(repoRoot).toBe('/tmp/repo')
+
+        return {
+          summary: {
+            auditedIssueCount: 2,
+            invalidIssueCount: 1,
+            invalidReadyIssueCount: 1,
+            lowScoreIssueCount: 1,
+            warningIssueCount: 0,
+          },
+          issues: issues.map((issue) => ({
+            number: issue.number,
+            title: issue.title,
+            state: issue.state,
+            isClaimable: issue.isClaimable ?? false,
+            hasExecutableContract: issue.hasExecutableContract ?? false,
+            claimBlockedBy: issue.claimBlockedBy ?? [],
+            contractValidationErrors: issue.contractValidationErrors ?? [],
+            qualityScore: issue.number === 50 ? 0 : 100,
+            contractWarnings: [],
+            contract: {
+              valid: issue.number !== 50,
+              errors: issue.number === 50 ? ['missing ### Dependencies JSON block'] : [],
+              warnings: [],
+            },
+            readyGateBlocked: issue.number === 50,
+            simulation: {
+              valid: true,
+              summary: 'simulation passed',
+              failures: [],
+              findings: [],
+              plannerPrompt: 'prompt',
+              plannerOutput: 'Implement audit command',
+              plannedSubtasks: ['Implement audit command'],
+            },
+          })),
+        }
+      },
+    })
+
+    expect(report.summary.invalidIssueCount).toBe(1)
+    const jsonReport = JSON.parse(formatIssueAuditOutput(report, true))
+    expect(jsonReport.summary).toMatchObject({
+      auditedIssueCount: 2,
+    })
+    expect(jsonReport.issues[0]).toMatchObject({
+      number: 50,
+      simulation: {
+        valid: true,
+      },
+    })
+    expect(resolveIssueAuditExitCode(report, true)).toBe(1)
+    expect(resolveIssueAuditExitCode(report, false)).toBe(0)
   })
 
   test('executes local issue rewrite by reading a draft file and returning markdown only', async () => {
