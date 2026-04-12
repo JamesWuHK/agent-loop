@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import type {
   AgentConfig,
+  CodexReasoningEffort,
   ProjectProfileName,
   ProjectPromptContext,
   ProjectPromptGuidanceOverrides,
@@ -17,6 +18,11 @@ const CONFIG_DIR = resolve(homedir(), '.agent-loop')
 const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
 const REPO_CONFIG_DIR = '.agent-loop'
 const REPO_CONFIG_FILE = 'project.json'
+const SUPPORTED_CODEX_REASONING_EFFORTS: readonly CodexReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+]
 
 export interface RepoLocalConfig {
   project?: {
@@ -27,6 +33,7 @@ export interface RepoLocalConfig {
   agent?: {
     primary?: AgentConfig['agent']['primary']
     fallback?: AgentConfig['agent']['fallback']
+    codexReasoningEffort?: CodexReasoningEffort
   }
   git?: {
     defaultBranch?: string
@@ -212,6 +219,10 @@ export function buildConfig(
       fallback: agentFallback,
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
+      codexReasoningEffort:
+        normalizeCodexReasoningEffort(repoConfig.agent?.codexReasoningEffort)
+        ?? normalizeCodexReasoningEffort(fileConfig.agent?.codexReasoningEffort)
+        ?? 'high',
       codexBaseUrl:
         env.OPENAI_BASE_URL ??
         env.OPENAI_API_BASE ??
@@ -423,6 +434,16 @@ function normalizeNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeCodexReasoningEffort(value: unknown): CodexReasoningEffort | null {
+  if (typeof value !== 'string') return null
+
+  return isCodexReasoningEffort(value) ? value : null
+}
+
+function isCodexReasoningEffort(value: string): value is CodexReasoningEffort {
+  return (SUPPORTED_CODEX_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
 export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }
