@@ -191,6 +191,66 @@ describe('buildRepoAuthoringContext', () => {
     })
   })
 
+  test('ignores root workspace entries that resolve outside the repo root', async () => {
+    const sandboxRoot = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-root-workspaces-'))
+    const root = join(sandboxRoot, 'repo')
+    const outsideRoot = join(sandboxRoot, 'outside')
+
+    mkdirSync(join(root, 'apps/web/src/pages'), { recursive: true })
+    mkdirSync(join(outsideRoot, 'pkg'), { recursive: true })
+
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      name: 'fixture-repo',
+      scripts: {
+        test: 'bun test',
+      },
+      workspaces: ['apps/*', '../outside', '../outside/*'],
+    }))
+    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({
+      name: 'web',
+      scripts: {
+        verify: 'bun test src/pages/LoginPage.test.tsx',
+      },
+    }))
+    writeFileSync(join(outsideRoot, 'package.json'), JSON.stringify({
+      name: 'outside-root',
+      scripts: {
+        lint: 'bun run lint ../secrets.ts',
+      },
+    }))
+    writeFileSync(join(outsideRoot, 'pkg/package.json'), JSON.stringify({
+      name: 'outside-pkg',
+      scripts: {
+        check: 'bun test ../escape.test.ts',
+      },
+    }))
+
+    const context = await buildRepoAuthoringContext({
+      repoRoot: root,
+      issueText: '更新 LoginPage 交互并补测试',
+      repoRelativeFilePaths: [
+        'apps/web/src/pages/LoginPage.tsx',
+        'apps/web/src/pages/LoginPage.test.tsx',
+        'apps/web/src/App.tsx',
+      ],
+      rootPackageJsonPath: 'package.json',
+    })
+
+    expect(context).toEqual({
+      candidateValidationCommands: [
+        'bun test',
+        'bun test apps/web/src/pages/LoginPage.test.tsx',
+      ],
+      candidateAllowedFiles: [
+        'apps/web/src/pages/LoginPage.tsx',
+        'apps/web/src/pages/LoginPage.test.tsx',
+      ],
+      candidateForbiddenFiles: [
+        'apps/web/src/App.tsx',
+      ],
+    })
+  })
+
   test('keeps allowed and forbidden file ordering stable for unsorted repo-relative inputs', async () => {
     const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-stable-files-'))
     mkdirSync(join(root, 'apps/web'), { recursive: true })

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
-import type { BuildRepoAuthoringContextInput, RepoAuthoringContext } from '@agent/shared'
+import type { RepoAuthoringContext } from '@agent/shared'
 
 interface PackageManifestRecord {
   scripts?: Record<string, unknown>
@@ -15,6 +15,16 @@ interface PackageManifest {
 interface ScoredFileCandidate {
   path: string
   score: number
+}
+
+interface RepoAuthoringContextInput {
+  repoRoot: string
+  issueText: string
+  issueTitle?: string
+  issueBody?: string
+  repoRelativeFilePaths?: string[]
+  rootPackageJsonPath?: string
+  workspacePackageJsonPaths?: string[]
 }
 
 const IGNORED_DIRECTORY_NAMES = new Set([
@@ -47,7 +57,7 @@ const MAX_ALLOWED_FILE_CANDIDATES = 8
 const MAX_FORBIDDEN_FILE_CANDIDATES = 8
 
 export async function buildRepoAuthoringContext(
-  input: BuildRepoAuthoringContextInput,
+  input: RepoAuthoringContextInput,
 ): Promise<RepoAuthoringContext> {
   const repoRoot = resolve(input.repoRoot)
   const packageManifests = collectPackageManifests(
@@ -409,7 +419,7 @@ function pushUniquePath(target: string[], seen: Set<string>, path: string): void
   target.push(path)
 }
 
-function resolveIssueText(input: BuildRepoAuthoringContextInput): string {
+function resolveIssueText(input: RepoAuthoringContextInput): string {
   const explicitIssueText = input.issueText.trim()
   if (explicitIssueText) {
     return explicitIssueText
@@ -579,9 +589,13 @@ function expandWorkspacePatterns(repoRoot: string, patterns: string[]): string[]
     }
 
     if (!normalizedPattern.includes('*')) {
-      const literalPath = join(repoRoot, normalizedPattern)
+      const literalPath = resolve(repoRoot, normalizedPattern)
+      if (!isPathInsideRepo(repoRoot, literalPath)) {
+        continue
+      }
+
       if (existsSync(join(literalPath, 'package.json'))) {
-        matches.add(normalizedPattern)
+        matches.add(toRepoRelativePath(repoRoot, literalPath))
       }
       continue
     }
@@ -600,6 +614,10 @@ function visitWorkspacePattern(
   index: number,
   matches: Set<string>,
 ): void {
+  if (!isPathInsideRepo(repoRoot, currentPath)) {
+    return
+  }
+
   if (index >= segments.length) {
     if (existsSync(join(currentPath, 'package.json'))) {
       matches.add(toRepoRelativePath(repoRoot, currentPath))
@@ -628,7 +646,7 @@ function visitWorkspacePattern(
   }
 
   const nextPath = join(currentPath, segment)
-  if (existsSync(nextPath)) {
+  if (isPathInsideRepo(repoRoot, nextPath) && existsSync(nextPath)) {
     visitWorkspacePattern(repoRoot, nextPath, segments, index + 1, matches)
   }
 }
