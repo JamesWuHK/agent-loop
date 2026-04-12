@@ -2042,6 +2042,66 @@ describe('daemon merge recovery helpers', () => {
     })
   })
 
+  test('releases ready issue claim opportunities once a blocked refresh rerun review settles back to human-needed', async () => {
+    const daemon = createTestDaemon({
+      concurrency: 1,
+      requestedConcurrency: 1,
+      concurrencyPolicy: {
+        requested: 1,
+        effective: 1,
+        repoCap: null,
+        profileCap: null,
+        projectCap: null,
+      },
+    })
+    let finishReview!: () => void
+    const reviewFinished = new Promise<void>((resolve) => {
+      finishReview = resolve
+    })
+    let claimAttempts = 0
+
+    ;(daemon as any).running = true
+    ;(daemon as any).refreshObservability = () => undefined
+    ;(daemon as any).processStandalonePrReview = async () => {
+      await reviewFinished
+    }
+    ;(daemon as any).maybeStartResumableIssue = async () => false
+    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
+    ;(daemon as any).maybeRequeueFailedIssue = async () => false
+    ;(daemon as any).maybeStartClaimedIssue = async () => {
+      claimAttempts += 1
+      return false
+    }
+    ;(daemon as any).maybeStartStandalonePrReview = async () => false
+    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
+    ;(daemon as any).scheduleNextPoll = () => undefined
+
+    const started = (daemon as any).startStandalonePrReview({
+      number: 110,
+      title: 'Issue #110: blocked rerun',
+      url: 'https://example.com/pulls/110',
+      headRefName: 'agent/110/codex-dev',
+      headRefOid: 'abc1234',
+      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
+      isDraft: false,
+    })
+
+    expect(started).toBe(true)
+    expect((daemon as any).activePrReviews.has(110)).toBe(true)
+
+    await (daemon as any).pollCycle()
+    expect(claimAttempts).toBe(0)
+
+    finishReview()
+    await Promise.all(Array.from((daemon as any).inFlightPrTasks))
+
+    expect((daemon as any).activePrReviews.has(110)).toBe(false)
+
+    claimAttempts = 0
+    await (daemon as any).pollCycle()
+    expect(claimAttempts).toBe(1)
+  })
+
   test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {
     const refreshFailure = buildPrReviewRefreshFailureComment(
       110,
