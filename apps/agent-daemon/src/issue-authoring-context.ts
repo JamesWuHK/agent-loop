@@ -47,6 +47,7 @@ const BROAD_SCOPE_FILE_PATTERNS = [
 
 const MAX_ALLOWED_FILE_CANDIDATES = 8
 const MAX_FORBIDDEN_FILE_CANDIDATES = 8
+const SHELL_COMMAND_BOUNDARY_TOKENS = new Set(['&&', '||', ';', '|', '&'])
 
 export async function buildRepoAuthoringContext(
   input: BuildRepoAuthoringContextInput,
@@ -87,7 +88,7 @@ function collectCandidateValidationCommands(
         continue
       }
 
-      const normalized = normalizeValidationCommand(repoRoot, manifest.dir, scriptCommand)
+      const normalized = normalizeValidationCommand(repoRoot, manifest.dir, scriptName, scriptCommand)
       if (normalized) {
         commands.add(normalized)
       }
@@ -104,6 +105,7 @@ function looksLikeValidationScript(name: string, command: string): boolean {
 function normalizeValidationCommand(
   repoRoot: string,
   packageDir: string,
+  scriptName: string,
   command: string,
 ): string | null {
   const tokens = tokenizeCommand(command)
@@ -111,12 +113,23 @@ function normalizeValidationCommand(
     return null
   }
 
-  let commandCwd = resolve(repoRoot, packageDir)
+  const packageRoot = resolve(repoRoot, packageDir)
+  let commandCwd = packageRoot
   const normalizedTokens: string[] = []
+  let hasExplicitCwd = false
+  let hasResolvedPathToken = false
+  let segmentChangedShellCwd = false
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = stripWrappingQuotes(tokens[index] ?? '')
     if (!token) {
+      continue
+    }
+
+    if (SHELL_COMMAND_BOUNDARY_TOKENS.has(token)) {
+      normalizedTokens.push(token)
+      commandCwd = segmentChangedShellCwd ? commandCwd : packageRoot
+      segmentChangedShellCwd = false
       continue
     }
 
@@ -127,7 +140,11 @@ function normalizeValidationCommand(
         return null
       }
 
+      hasExplicitCwd = true
       commandCwd = resolvedCwd
+      if (token === 'cd') {
+        segmentChangedShellCwd = true
+      }
       normalizedTokens.push(token)
       normalizedTokens.push(toRepoRelativePath(repoRoot, resolvedCwd) || '.')
       index += 1
@@ -140,11 +157,16 @@ function normalizeValidationCommand(
         return null
       }
 
+      hasResolvedPathToken = true
       normalizedTokens.push(toRepoRelativePath(repoRoot, resolvedPath) || '.')
       continue
     }
 
     normalizedTokens.push(token)
+  }
+
+  if (packageDir !== '.' && !hasExplicitCwd && !hasResolvedPathToken) {
+    return `bun run --cwd ${packageDir} ${scriptName}`
   }
 
   return normalizedTokens.join(' ')

@@ -92,6 +92,51 @@ describe('buildRepoAuthoringContext', () => {
     ])
   })
 
+  test('keeps multi-step root typecheck commands repo-relative and preserves workspace cwd context', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-typecheck-'))
+    mkdirSync(join(root, 'apps/web'), { recursive: true })
+    mkdirSync(join(root, 'packages/shared'), { recursive: true })
+
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      name: 'fixture-repo',
+      scripts: {
+        typecheck: 'bun run --cwd packages/shared typecheck && bun run --cwd apps/web typecheck',
+      },
+    }))
+    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({
+      name: 'web',
+      scripts: {
+        typecheck: 'tsc --noEmit',
+      },
+    }))
+    writeFileSync(join(root, 'packages/shared/package.json'), JSON.stringify({
+      name: 'shared',
+      scripts: {
+        typecheck: 'tsc --noEmit',
+      },
+    }))
+
+    const context = await buildRepoAuthoringContext({
+      repoRoot: root,
+      issueText: '修复 typecheck',
+      rootPackageJsonPath: 'package.json',
+      workspacePackageJsonPaths: [
+        'apps/web/package.json',
+        'packages/shared/package.json',
+      ],
+    })
+
+    expect(context.candidateValidationCommands).toEqual([
+      'bun run --cwd apps/web typecheck',
+      'bun run --cwd packages/shared typecheck',
+      'bun run --cwd packages/shared typecheck && bun run --cwd apps/web typecheck',
+    ])
+    expect(context.candidateValidationCommands.some((value: string) => value.includes('packages/shared/apps/web'))).toBe(
+      false,
+    )
+    expect(context.candidateValidationCommands).not.toContain('tsc --noEmit')
+  })
+
   test('ignores absolute and parent-relative file inputs when ranking candidates', async () => {
     const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-paths-'))
     writeFileSync(join(root, 'package.json'), JSON.stringify({
