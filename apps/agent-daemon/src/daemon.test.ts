@@ -101,6 +101,7 @@ function createTestDaemon(
       fallback: 'claude',
       claudePath: 'claude',
       codexPath: 'codex',
+      codexReasoningEffort: 'high',
       timeoutMs: 60_000,
     },
     git: {
@@ -1151,6 +1152,7 @@ describe('daemon merge recovery helpers', () => {
           fallback: 'claude',
           claudePath: 'claude',
           codexPath: 'codex',
+          codexReasoningEffort: 'high',
           timeoutMs: 60_000,
         },
         git: {
@@ -1613,6 +1615,7 @@ describe('daemon merge recovery helpers', () => {
         fallback: 'claude',
         claudePath: 'claude',
         codexPath: 'codex',
+        codexReasoningEffort: 'high',
         timeoutMs: 60_000,
       },
       git: {
@@ -2483,6 +2486,7 @@ describe('daemon merge recovery helpers', () => {
           fallback: null,
           claudePath: 'claude',
           codexPath: 'codex',
+          codexReasoningEffort: 'high',
           timeoutMs: 60_000,
         },
         git: {
