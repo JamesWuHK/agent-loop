@@ -1322,10 +1322,110 @@ export interface PrCheckResult {
   prState: 'open' | 'merged' | 'closed' | null
 }
 
+export interface PullRequestChecksStatus {
+  state: 'pass' | 'pending' | 'fail' | 'error'
+  summary: string
+}
+
 export interface MergePrResult {
   merged: boolean
   message: string
   sha?: string
+}
+
+const PASSING_PR_CHECK_STATES = new Set(['pass', 'success', 'neutral', 'skipping', 'skipped'])
+const PENDING_PR_CHECK_STATES = new Set(['pending', 'queued', 'waiting', 'in_progress'])
+const FAILING_PR_CHECK_STATES = new Set([
+  'fail',
+  'failure',
+  'failing',
+  'cancel',
+  'cancelled',
+  'timed_out',
+  'startup_failure',
+  'action_required',
+  'error',
+])
+
+function parsePullRequestChecksRows(stdout: string): Array<{ name: string; state: string }> {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split('\t'))
+    .filter((parts) => parts.length >= 2)
+    .map((parts) => ({
+      name: parts[0]?.trim() ?? '',
+      state: parts[1]?.trim().toLowerCase() ?? '',
+    }))
+    .filter((row) => row.name.length > 0 && row.state.length > 0)
+}
+
+function formatPullRequestChecksError(result: Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>): string {
+  const stdout = result.stdout.trim()
+  const stderr = result.stderr.trim()
+
+  if (result.timedOut) {
+    return stderr || stdout || 'gh pr checks timed out'
+  }
+
+  return stderr || stdout || `gh pr checks exited with code ${result.exitCode}`
+}
+
+export function interpretPullRequestChecksResult(
+  result: Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>,
+): PullRequestChecksStatus {
+  const stdout = result.stdout.trim()
+
+  if (/no checks reported/i.test(stdout)) {
+    return {
+      state: 'pass',
+      summary: 'No checks reported',
+    }
+  }
+
+  const rows = parsePullRequestChecksRows(stdout)
+  const firstFailing = rows.find((row) => FAILING_PR_CHECK_STATES.has(row.state))
+  if (firstFailing) {
+    return {
+      state: 'fail',
+      summary: `${firstFailing.name} is ${firstFailing.state}`,
+    }
+  }
+
+  const firstPending = rows.find((row) => PENDING_PR_CHECK_STATES.has(row.state))
+  if (firstPending) {
+    return {
+      state: 'pending',
+      summary: `${firstPending.name} is ${firstPending.state}`,
+    }
+  }
+
+  if (rows.length > 0 && rows.every((row) => PASSING_PR_CHECK_STATES.has(row.state))) {
+    return {
+      state: 'pass',
+      summary: `${rows.length} check(s) passed`,
+    }
+  }
+
+  if (result.exitCode !== 0 || result.timedOut) {
+    return {
+      state: 'error',
+      summary: formatPullRequestChecksError(result),
+    }
+  }
+
+  if (rows.length > 0) {
+    return {
+      state: 'pass',
+      summary: `${rows.length} check(s) passed`,
+    }
+  }
+
+  return {
+    state: 'error',
+    summary: formatPullRequestChecksError(result),
+  }
 }
 
 interface RawPullRequestListItem {
@@ -1854,6 +1954,18 @@ export async function mergePullRequest(
   }
 
   return parseMergePrResponse(stdout)
+}
+
+export async function getPullRequestChecksStatus(
+  prNumber: number,
+  config: Pick<AgentConfig, 'repo' | 'pat'>,
+  runner: (
+    args: string[],
+    config: Pick<AgentConfig, 'repo' | 'pat'>,
+  ) => Promise<Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>> = runBoundedGhCommand,
+): Promise<PullRequestChecksStatus> {
+  const result = await runner(['pr', 'checks', String(prNumber), '-R', config.repo], config)
+  return interpretPullRequestChecksResult(result)
 }
 
 export async function addPrLabels(
