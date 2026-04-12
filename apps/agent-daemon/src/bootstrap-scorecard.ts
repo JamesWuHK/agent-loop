@@ -83,6 +83,16 @@ const BOOTSTRAP_FAILURE_KIND_ORDER: BootstrapFailureKind[] = [
 ]
 
 const DEFAULT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
+const REQUIRED_RELEASE_EVIDENCE_SPECS = [
+  {
+    code: 'self_bootstrap_suite_green',
+    issueNumber: 69,
+  },
+  {
+    code: 'bootstrap_scorecard_green',
+    issueNumber: 70,
+  },
+] as const
 
 export function classifyBootstrapFailureKind(reason: string): BootstrapFailureKind {
   const normalized = reason.toLowerCase()
@@ -260,20 +270,10 @@ export async function buildBootstrapScorecardForRepo(
     managedIssues,
     commentLoader,
   )
-  const releaseEvidenceMissing = await collectScorecardSource(
-    async () => {
-      const report = await buildBootstrapGateReportForRepo({
-        config: input.config,
-      }, {
-        getAgentIssueByNumber: deps.getAgentIssueByNumber,
-      })
-
-      return report.requiredEvidence
-        .filter((evidence) => !evidence.satisfied)
-        .map((evidence) => evidence.code)
-    },
+  const releaseEvidenceMissing = await collectReleaseEvidenceMissing(
+    input.config,
+    deps,
     transportBlockers,
-    'release evidence',
   )
 
   return buildBootstrapScorecard({
@@ -343,6 +343,42 @@ function buildEmptyAuditIssueSummary(): AuditIssueSummary {
     lowScoreIssueCount: 0,
     warningIssueCount: 0,
   }
+}
+
+async function collectReleaseEvidenceMissing(
+  config: AgentConfig,
+  deps: BootstrapScorecardDependencies,
+  transportBlockers: BootstrapScorecardSignal[],
+): Promise<string[]> {
+  try {
+    const report = await buildBootstrapGateReportForRepo({
+      config,
+    }, {
+      getAgentIssueByNumber: deps.getAgentIssueByNumber,
+    })
+
+    return report.requiredEvidence
+      .filter((evidence) => !evidence.satisfied)
+      .map((evidence) => evidence.code)
+  } catch (error) {
+    transportBlockers.push({
+      reason: `release evidence: ${formatBootstrapScorecardError(error)}`,
+    })
+  }
+
+  const missingEvidence: string[] = []
+  for (const evidence of REQUIRED_RELEASE_EVIDENCE_SPECS) {
+    const issue = await collectScorecardSource(
+      () => deps.getAgentIssueByNumber(evidence.issueNumber, config),
+      transportBlockers,
+      `issue#${evidence.issueNumber} lookup`,
+    )
+    if (issue?.state !== 'done') {
+      missingEvidence.push(evidence.code)
+    }
+  }
+
+  return missingEvidence
 }
 
 async function collectScorecardSource<T>(

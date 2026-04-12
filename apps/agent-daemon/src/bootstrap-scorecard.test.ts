@@ -560,10 +560,10 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts).toMatchObject({
       contract_failure: 1,
       review_failure: 1,
-      github_transport_failure: 2,
+      github_transport_failure: 4,
       runtime_failure: 0,
       pr_lifecycle_failure: 0,
-      release_process_failure: 0,
+      release_process_failure: 2,
     })
     expect(scorecard.topBlockers).toEqual([
       expect.objectContaining({
@@ -575,6 +575,10 @@ describe('buildBootstrapScorecardForRepo', () => {
       }),
       expect.objectContaining({
         category: 'github_transport_failure',
+      }),
+      expect.objectContaining({
+        category: 'release_process_failure',
+        reason: 'missing required evidence: self_bootstrap_suite_green',
       }),
     ])
   })
@@ -599,6 +603,61 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.topBlockers).toEqual([
       expect.objectContaining({
         category: 'github_transport_failure',
+      }),
+      expect.objectContaining({
+        category: 'release_process_failure',
+        reason: 'missing required evidence: self_bootstrap_suite_green',
+      }),
+    ])
+  })
+
+  test('keeps readable release evidence when an unrelated bootstrap issue lookup fails', async () => {
+    const scorecard = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, {
+      listOpenAgentIssues: async () => [],
+      listOpenAgentPullRequests: async () => [],
+      listIssueComments: async () => [],
+      getAgentIssueByNumber: async (issueNumber) => {
+        if (issueNumber === 37) {
+          throw new Error('The socket connection was closed unexpectedly.')
+        }
+
+        return {
+          number: issueNumber,
+          title: `Issue ${issueNumber}`,
+          body: '',
+          state: 'working',
+          labels: ['agent:working'],
+          assignee: null,
+          isClaimable: false,
+          updatedAt: '2026-04-11T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: false,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        }
+      },
+    })
+
+    expect(scorecard.ready).toBe(false)
+    expect(scorecard.categoryCounts).toMatchObject({
+      contract_failure: 0,
+      runtime_failure: 0,
+      pr_lifecycle_failure: 0,
+      review_failure: 0,
+      github_transport_failure: 1,
+      release_process_failure: 2,
+    })
+    expect(scorecard.topBlockers).toEqual([
+      expect.objectContaining({
+        category: 'github_transport_failure',
+        reason: 'release evidence: The socket connection was closed unexpectedly.',
       }),
       expect.objectContaining({
         category: 'release_process_failure',
