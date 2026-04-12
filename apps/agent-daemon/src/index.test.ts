@@ -4,20 +4,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildWakeRequestFromCli,
-  executeBootstrapGateCommand,
-  executeBootstrapScenarioCommand,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
   executeIssueLintCommand,
+  executeIssueRewriteCommand,
+  executeIssueSplitCommand,
   executeWakeCommand,
   executeWakeRequest,
-  formatBootstrapGateOutput,
-  formatBootstrapScenarioOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
   resolveIssueLintTarget,
+  resolveIssueRewriteTarget,
+  resolveIssueSplitTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -66,6 +66,43 @@ describe('index helpers', () => {
     })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
   })
 
+  test('resolves rewrite targets and rejects empty rewrite paths', () => {
+    expect(resolveIssueRewriteTarget({
+      'rewrite-file': 'docs/issues/ready-draft.md',
+    })).toEqual({
+      path: 'docs/issues/ready-draft.md',
+    })
+
+    expect(() => resolveIssueRewriteTarget({
+      'rewrite-file': '   ',
+    })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
+  test('resolves split targets, start numbers, and rejects detached split numbering', () => {
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+      'split-start-number': '41',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 41,
+    })
+
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 1,
+    })
+
+    expect(() => resolveIssueSplitTarget({
+      'split-file': '   ',
+    })).toThrow('--split-file must be a non-empty path')
+
+    expect(() => resolveIssueSplitTarget({
+      'split-start-number': '41',
+    })).toThrow('--split-start-number can only be used with --split-file')
+  })
+
   test('executes local issue lint without loading remote config', async () => {
     const report = await executeIssueLintCommand({
       target: {
@@ -105,6 +142,183 @@ describe('index helpers', () => {
       valid: true,
       readyGateBlocked: false,
     })
+  })
+
+  test('executes local issue rewrite by reading a draft file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-rewrite-test-'))
+    const draftPath = join(draftDir, 'draft.md')
+    writeFileSync(draftPath, '修复 ready gate 对 Validation 缺失路径的提示，并补测试\n')
+
+    const result = await executeIssueRewriteCommand({
+      target: {
+        path: draftPath,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      rewriteIssueDraft: async ({ issueText, repoRoot, config }) => {
+        expect(issueText).toContain('修复 ready gate')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          markdown: '## 用户故事\n\n作为维护者，我希望 rewrite CLI 输出 canonical contract。',
+          validation: {
+            valid: true,
+            score: 100,
+            errors: [],
+            warnings: [],
+          },
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## 用户故事')).toBe(true)
+    expect(result.validation.valid).toBe(true)
+  })
+
+  test('executes local issue split by reading a parent file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-split-test-'))
+    const draftPath = join(draftDir, 'parent.md')
+    writeFileSync(draftPath, '# [AL-EPIC] issue authoring pipeline\n\n父 issue 负责串起 lint、rewrite、split 三条子线。\n')
+
+    const result = await executeIssueSplitCommand({
+      target: {
+        path: draftPath,
+        startNumber: 41,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      splitTrackingIssue: async ({ issueText, title, body, repoRoot, config, issueNumberAllocator }) => {
+        expect(issueText).toContain('父 issue 负责串起')
+        expect(title).toBe('[AL-EPIC] issue authoring pipeline')
+        expect(body).toBe('父 issue 负责串起 lint、rewrite、split 三条子线。')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+        expect(issueNumberAllocator!()).toBe(41)
+
+        return {
+          parentSummary: '按 lint -> rewrite -> split 的顺序推进 child issues。',
+          children: [],
+          markdown: '## Parent Summary\n\nParent issue: [AL-EPIC] issue authoring pipeline\n\n按 lint -> rewrite -> split 的顺序推进 child issues。',
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## Parent Summary')).toBe(true)
+    expect(result.markdown).toContain('Parent issue: [AL-EPIC] issue authoring pipeline')
+    expect(result.markdown).not.toContain('(untitled tracking issue)')
   })
 
   test('executes remote issue lint with repo-aware config and supports json output', async () => {
@@ -157,7 +371,6 @@ describe('index helpers', () => {
             fallback: 'claude',
             claudePath: 'claude',
             codexPath: 'codex',
-            codexReasoningEffort: 'high',
             timeoutMs: 300_000,
           },
           git: {
@@ -341,169 +554,6 @@ describe('index helpers', () => {
     })
     expect(report.readyGateBlocked).toBe(true)
     expect(report.errors).toEqual(['missing ## RED 测试 / RED Tests'])
-  })
-
-  test('executes bootstrap gate with repo-aware config and supports json output', async () => {
-    const report = await executeBootstrapGateCommand({
-      repo: 'JamesWuHK/agent-loop',
-    }, {
-      readConfigFile: () => ({
-        pat: 'ghp_from_config',
-      } as any),
-      loadRepoLocalConfig: () => ({
-        project: {
-          profile: 'generic',
-        },
-      }),
-      buildConfig: (args = {}, options = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: undefined,
-          machineId: 'bootstrap-gate-readonly',
-        })
-        expect(options.fileConfig).toMatchObject({
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            codexReasoningEffort: 'high',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        } as any
-      },
-      buildBootstrapGateReportForRepo: async ({ config }) => {
-        expect(config.repo).toBe('JamesWuHK/agent-loop')
-        expect(config.pat).toBe('ghp_from_config')
-        expect(config.machineId).toBe('bootstrap-gate-readonly')
-
-        return {
-          version: 'v0.2',
-          ready: false,
-          blockers: [
-            {
-              issueNumber: 37,
-              state: 'working',
-              labels: ['agent:working'],
-              title: '[AL-7] repo grounded context',
-            },
-          ],
-          requiredEvidence: [
-            {
-              code: 'self_bootstrap_suite_green',
-              satisfied: false,
-              sourceIssueNumber: 69,
-              summary: 'awaiting the deterministic self-bootstrap scenario suite tracked by #69',
-            },
-          ],
-          blockingReasons: [
-            'issue #37 is not done (state=working, labels=agent:working)',
-            'missing required evidence: self_bootstrap_suite_green',
-          ],
-        }
-      },
-    })
-
-    expect(report.ready).toBe(false)
-    expect(JSON.parse(formatBootstrapGateOutput(report, true))).toMatchObject({
-      version: 'v0.2',
-      ready: false,
-      blockers: [
-        {
-          issueNumber: 37,
-          state: 'working',
-        },
-      ],
-      requiredEvidence: [
-        {
-          code: 'self_bootstrap_suite_green',
-          satisfied: false,
-        },
-      ],
-    })
-    expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
-  })
-
-  test('executes bootstrap scenarios with the replay fixture suite and supports json output', async () => {
-    const report = await executeBootstrapScenarioCommand({}, {
-      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
-        expect(fixturesDir.endsWith(join('fixtures', 'replay'))).toBe(true)
-
-        return {
-          suite: 'self-bootstrap-v0.2',
-          ok: true,
-          failedCases: [],
-          cases: [
-            {
-              name: 'self-bootstrap-happy-path',
-              ok: true,
-              present: true,
-              mismatches: [],
-              actual: { claimable: 1, blocked: 0, invalid: 0 },
-              expected: { claimable: 1, blocked: 0, invalid: 0 },
-            },
-          ],
-          summary: {
-            requiredCases: 4,
-            presentCases: 4,
-            passedCases: 4,
-            failedCases: 0,
-          },
-        }
-      },
-    })
-
-    expect(report.ok).toBe(true)
-    expect(JSON.parse(formatBootstrapScenarioOutput(report, true))).toMatchObject({
-      suite: 'self-bootstrap-v0.2',
-      ok: true,
-    })
-    expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
-  })
-
-  test('requires an explicit repo for the bootstrap gate command', async () => {
-    await expect(executeBootstrapGateCommand({})).rejects.toThrow(
-      '--bootstrap-gate requires --repo owner/repo',
-    )
   })
 
   test('builds stable wake requests from CLI commands', () => {

@@ -11,17 +11,8 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import type { AgentConfig } from '@agent/shared'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
-import {
-  buildConfig,
-  loadConfig,
-  loadRepoLocalConfig,
-  readConfigFile,
-  resolveLocalDaemonIdentity,
-  type CliArgs,
-} from './config'
+import { loadConfig, resolveLocalDaemonIdentity, type CliArgs } from './config'
 import { collectDaemonObservability, formatDoctorReport, formatStatusReport } from './status'
 import { appendWakeRequest, buildWakeQueuePath, type WakeRequest } from './wake-queue'
 import { readWakeRequestFromGitHubEventContext } from './github-event-wake'
@@ -64,19 +55,14 @@ import {
   type IssueLintReport,
 } from './audit-issue-contracts'
 import {
-  buildBootstrapGateReportForRepo,
-  formatBootstrapGateReport,
-  formatBootstrapGateReportJson,
-  resolveBootstrapGateExitCode,
-  type BootstrapGateReport,
-} from './bootstrap-gate'
+  rewriteIssueDraft,
+  type RewriteIssueDraftResult,
+} from './issue-authoring'
 import {
-  evaluateBootstrapScenarioFixtureDirectory,
-  formatBootstrapScenarioSuiteReport,
-  formatBootstrapScenarioSuiteReportJson,
-  resolveBootstrapScenarioSuiteExitCode,
-  type BootstrapScenarioSuiteReport,
-} from './replay-eval'
+  createSequentialIssueNumberAllocator,
+  splitTrackingIssue,
+  type SplitTrackingIssueResult,
+} from './issue-splitter'
 
 type PartialHealthServerConfig = Partial<HealthServerConfig>
 type LocalDaemonIdentityResolver = typeof resolveLocalDaemonIdentity
@@ -92,6 +78,15 @@ export interface IssueLintTarget {
   kind: 'file' | 'issue'
   path?: string
   issueNumber?: number
+}
+
+export interface IssueRewriteTarget {
+  path: string
+}
+
+export interface IssueSplitTarget {
+  path: string
+  startNumber: number
 }
 
 export interface ExecuteWakeCommandInput {
@@ -120,13 +115,18 @@ export interface ExecuteIssueLintInput {
   pat?: string
 }
 
-export interface ExecuteBootstrapGateInput {
+export interface ExecuteIssueRewriteInput {
+  target: IssueRewriteTarget
   repo?: string
   pat?: string
+  repoRoot: string
 }
 
-export interface ExecuteBootstrapScenarioInput {
-  fixturesDir?: string
+export interface ExecuteIssueSplitInput {
+  target: IssueSplitTarget
+  repo?: string
+  pat?: string
+  repoRoot: string
 }
 
 export interface RestartManagedRuntimeInput {
@@ -206,15 +206,16 @@ interface IssueLintCommandDependencies {
   buildIssueLintReportFromRemoteIssue: typeof buildIssueLintReportFromRemoteIssue
 }
 
-interface BootstrapGateCommandDependencies {
-  buildConfig: typeof buildConfig
-  loadRepoLocalConfig: typeof loadRepoLocalConfig
-  readConfigFile: typeof readConfigFile
-  buildBootstrapGateReportForRepo: typeof buildBootstrapGateReportForRepo
+interface IssueRewriteCommandDependencies {
+  loadConfig: typeof loadConfig
+  readTextFile: (path: string) => string
+  rewriteIssueDraft: typeof rewriteIssueDraft
 }
 
-interface BootstrapScenarioCommandDependencies {
-  evaluateBootstrapScenarioFixtureDirectory: typeof evaluateBootstrapScenarioFixtureDirectory
+interface IssueSplitCommandDependencies {
+  loadConfig: typeof loadConfig
+  readTextFile: (path: string) => string
+  splitTrackingIssue: typeof splitTrackingIssue
 }
 
 const DEFAULT_RESTART_DEPENDENCIES: RestartManagedRuntimeDependencies = {
@@ -243,17 +244,17 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
   buildIssueLintReportFromRemoteIssue,
 }
 
-const DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES: BootstrapGateCommandDependencies = {
-  buildConfig,
-  loadRepoLocalConfig,
-  readConfigFile,
-  buildBootstrapGateReportForRepo,
+const DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES: IssueRewriteCommandDependencies = {
+  loadConfig,
+  readTextFile: (path) => readFileSync(path, 'utf-8'),
+  rewriteIssueDraft,
 }
 
-const DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES: BootstrapScenarioCommandDependencies = {
-  evaluateBootstrapScenarioFixtureDirectory,
+const DEFAULT_ISSUE_SPLIT_COMMAND_DEPENDENCIES: IssueSplitCommandDependencies = {
+  loadConfig,
+  readTextFile: (path) => readFileSync(path, 'utf-8'),
+  splitTrackingIssue,
 }
-const DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR = join(import.meta.dir, 'fixtures', 'replay')
 
 async function main() {
   const { values: args } = parseArgs({
@@ -294,8 +295,9 @@ async function main() {
       'github-event-path': { type: 'string' },
       'lint-issue': { type: 'string' },
       'lint-file': { type: 'string' },
-      'bootstrap-scenarios': { type: 'boolean' },
-      'bootstrap-gate': { type: 'boolean' },
+      'rewrite-file': { type: 'string' },
+      'split-file': { type: 'string' },
+      'split-start-number': { type: 'string' },
       json: { type: 'boolean' },
       help: { type: 'boolean' },
     },
@@ -322,6 +324,13 @@ async function main() {
     'lint-issue': args['lint-issue'] as string | undefined,
     'lint-file': args['lint-file'] as string | undefined,
   })
+  const issueRewriteTarget = resolveIssueRewriteTarget({
+    'rewrite-file': args['rewrite-file'] as string | undefined,
+  })
+  const issueSplitTarget = resolveIssueSplitTarget({
+    'split-file': args['split-file'] as string | undefined,
+    'split-start-number': args['split-start-number'] as string | undefined,
+  })
 
   if (wakeCommand) {
     assertWakeCommandCompatible(args)
@@ -331,12 +340,12 @@ async function main() {
     assertIssueLintCompatible(args)
   }
 
-  if (args['bootstrap-scenarios']) {
-    assertBootstrapScenarioCompatible(args)
+  if (issueRewriteTarget) {
+    assertIssueRewriteCompatible(args)
   }
 
-  if (args['bootstrap-gate']) {
-    assertBootstrapGateCompatible(args)
+  if (issueSplitTarget) {
+    assertIssueSplitCompatible(args)
   }
 
   if (args['wake-from-github-event']) {
@@ -346,11 +355,11 @@ async function main() {
     if (issueLintTarget) {
       throw new Error('--wake-from-github-event cannot be combined with --lint-issue or --lint-file')
     }
-    if (args['bootstrap-scenarios']) {
-      throw new Error('--wake-from-github-event cannot be combined with --bootstrap-scenarios')
+    if (issueRewriteTarget) {
+      throw new Error('--wake-from-github-event cannot be combined with --rewrite-file')
     }
-    if (args['bootstrap-gate']) {
-      throw new Error('--wake-from-github-event cannot be combined with --bootstrap-gate')
+    if (issueSplitTarget) {
+      throw new Error('--wake-from-github-event cannot be combined with --split-file')
     }
     assertWakeCommandCompatible(args)
   }
@@ -359,24 +368,24 @@ async function main() {
     throw new Error('--lint-issue/--lint-file cannot be combined with wake commands')
   }
 
-  if (args['bootstrap-scenarios'] && wakeCommand) {
-    throw new Error('--bootstrap-scenarios cannot be combined with wake commands')
+  if (wakeCommand && issueRewriteTarget) {
+    throw new Error('--rewrite-file cannot be combined with wake commands')
   }
 
-  if (args['bootstrap-scenarios'] && issueLintTarget) {
-    throw new Error('--bootstrap-scenarios cannot be combined with --lint-issue or --lint-file')
+  if (issueLintTarget && issueRewriteTarget) {
+    throw new Error('--rewrite-file cannot be combined with --lint-issue or --lint-file')
   }
 
-  if (args['bootstrap-scenarios'] && args['bootstrap-gate']) {
-    throw new Error('--bootstrap-scenarios cannot be combined with --bootstrap-gate')
+  if (wakeCommand && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with wake commands')
   }
 
-  if (args['bootstrap-gate'] && wakeCommand) {
-    throw new Error('--bootstrap-gate cannot be combined with wake commands')
+  if (issueLintTarget && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with --lint-issue or --lint-file')
   }
 
-  if (args['bootstrap-gate'] && issueLintTarget) {
-    throw new Error('--bootstrap-gate cannot be combined with --lint-issue or --lint-file')
+  if (issueRewriteTarget && issueSplitTarget) {
+    throw new Error('--split-file cannot be combined with --rewrite-file')
   }
 
   if (args['repo-cap'] && !args['join-project']) {
@@ -445,19 +454,26 @@ async function main() {
     process.exit(report.readyGateBlocked ? 1 : 0)
   }
 
-  if (args['bootstrap-scenarios']) {
-    const report = await executeBootstrapScenarioCommand()
-    console.log(formatBootstrapScenarioOutput(report, args.json as boolean | undefined))
-    process.exit(resolveBootstrapScenarioSuiteExitCode(report))
-  }
-
-  if (args['bootstrap-gate']) {
-    const report = await executeBootstrapGateCommand({
+  if (issueRewriteTarget) {
+    const result = await executeIssueRewriteCommand({
+      target: issueRewriteTarget,
       repo: args.repo as string | undefined,
       pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
     })
-    console.log(formatBootstrapGateOutput(report, args.json as boolean | undefined))
-    process.exit(resolveBootstrapGateExitCode(report))
+    console.log(result.markdown)
+    process.exit(0)
+  }
+
+  if (issueSplitTarget) {
+    const result = await executeIssueSplitCommand({
+      target: issueSplitTarget,
+      repo: args.repo as string | undefined,
+      pat: args.pat as string | undefined,
+      repoRoot: process.cwd(),
+    })
+    console.log(result.markdown)
+    process.exit(0)
   }
 
   if (args['join-project']) {
@@ -817,8 +833,8 @@ Usage:
   agent-loop --wake-from-github-event [--repo owner/repo --health-port 9310]
   agent-loop --lint-file <path> [--json]
   agent-loop --lint-issue <number> [--repo owner/repo --json]
-  agent-loop --bootstrap-scenarios [--json]
-  agent-loop --bootstrap-gate [--repo owner/repo --json]
+  agent-loop --rewrite-file <path> [--repo owner/repo]
+  agent-loop --split-file <path> [--split-start-number <number> --repo owner/repo]
   agent-loop --reconcile [--health-port 9310]
   agent-loop --start [--health-port 9310]
   agent-loop --dashboard [--dashboard-port 9388]
@@ -853,9 +869,10 @@ Options:
       --github-event-path     Override the GitHub event payload path used by --wake-from-github-event
       --lint-file <path>      Lint a local issue markdown file
       --lint-issue <number>   Lint a remote GitHub issue body
-      --bootstrap-scenarios   Evaluate the fixed self-bootstrap replay suite
-      --bootstrap-gate        Evaluate the deterministic self-bootstrap release gate
-      --json                  Print machine-readable JSON for lint, bootstrap scenario, and bootstrap gate commands
+      --rewrite-file <path>   Rewrite a local issue draft into canonical executable contract markdown
+      --split-file <path>     Split a tracking parent issue into ordered child issue contracts
+      --split-start-number    First child issue number to allocate when building dependsOn arrays (default: 1)
+      --json                  Print machine-readable JSON for lint commands
       --dashboard             Start the local monitoring page for the current repo
       --dashboard-host <host> Dashboard server host (default: 127.0.0.1)
       --dashboard-port <port> Dashboard server port (default: 9388)
@@ -899,8 +916,8 @@ Examples:
   agent-loop --wake-pr 381 --health-port 9311
   agent-loop --lint-file docs/issues/ready-gate.md --json
   agent-loop --lint-issue 374 --repo owner/repo --json
-  agent-loop --bootstrap-scenarios --json
-  agent-loop --bootstrap-gate --repo JamesWuHK/agent-loop --json
+  agent-loop --rewrite-file docs/issues/ready-gate-draft.md --repo owner/repo
+  agent-loop --split-file docs/issues/quality-parent.md --split-start-number 41 --repo owner/repo
   agent-loop --dashboard
   agent-loop --dashboard --dashboard-port 9390
   agent-loop --join-project --machine-id macbook-pro-b --health-port 9312 --metrics-port 9092 --repo-cap 2
@@ -1026,6 +1043,46 @@ export function resolveIssueLintTarget(args: {
   return targets[0] ?? null
 }
 
+export function resolveIssueRewriteTarget(args: {
+  'rewrite-file'?: string
+}): IssueRewriteTarget | null {
+  if (typeof args['rewrite-file'] !== 'string') {
+    return null
+  }
+
+  const path = args['rewrite-file'].trim()
+  if (!path) {
+    throw new Error('--rewrite-file must be a non-empty path')
+  }
+
+  return { path }
+}
+
+export function resolveIssueSplitTarget(args: {
+  'split-file'?: string
+  'split-start-number'?: string
+}): IssueSplitTarget | null {
+  if (typeof args['split-file'] !== 'string') {
+    if (typeof args['split-start-number'] === 'string') {
+      throw new Error('--split-start-number can only be used with --split-file')
+    }
+
+    return null
+  }
+
+  const path = args['split-file'].trim()
+  if (!path) {
+    throw new Error('--split-file must be a non-empty path')
+  }
+
+  return {
+    path,
+    startNumber: typeof args['split-start-number'] === 'string'
+      ? parseWakeTargetNumber(args['split-start-number'], '--split-start-number')
+      : 1,
+  }
+}
+
 export async function executeIssueLintCommand(
   input: ExecuteIssueLintInput,
   deps: IssueLintCommandDependencies = DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES,
@@ -1045,71 +1102,67 @@ export async function executeIssueLintCommand(
   })
 }
 
+export async function executeIssueRewriteCommand(
+  input: ExecuteIssueRewriteInput,
+  deps: IssueRewriteCommandDependencies = DEFAULT_ISSUE_REWRITE_COMMAND_DEPENDENCIES,
+): Promise<RewriteIssueDraftResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+
+  return deps.rewriteIssueDraft({
+    issueText: deps.readTextFile(input.target.path),
+    repoRoot: input.repoRoot,
+    config,
+  })
+}
+
+export async function executeIssueSplitCommand(
+  input: ExecuteIssueSplitInput,
+  deps: IssueSplitCommandDependencies = DEFAULT_ISSUE_SPLIT_COMMAND_DEPENDENCIES,
+): Promise<SplitTrackingIssueResult> {
+  const config = deps.loadConfig({
+    repo: input.repo,
+    pat: input.pat,
+  })
+  const issueText = deps.readTextFile(input.target.path)
+  const issueSource = parseMarkdownIssueSource(issueText)
+
+  return deps.splitTrackingIssue({
+    issueText,
+    title: issueSource.title,
+    body: issueSource.body,
+    repoRoot: input.repoRoot,
+    config,
+    issueNumberAllocator: createSequentialIssueNumberAllocator(input.target.startNumber),
+  })
+}
+
+function parseMarkdownIssueSource(markdown: string): {
+  title?: string
+  body: string
+} {
+  const trimmed = markdown.trim()
+  const headingMatch = trimmed.match(/^#\s+(.+?)\s*(?:\n+|$)([\s\S]*)$/)
+
+  if (!headingMatch) {
+    return {
+      body: trimmed,
+    }
+  }
+
+  return {
+    title: headingMatch[1]?.trim(),
+    body: headingMatch[2]?.trim() || trimmed,
+  }
+}
+
 export function formatIssueLintOutput(
   report: IssueLintReport,
   asJson = false,
 ): string {
   return asJson ? formatIssueLintReportJson(report) : formatIssueLintReport(report)
-}
-
-export async function executeBootstrapScenarioCommand(
-  input: ExecuteBootstrapScenarioInput = {},
-  deps: BootstrapScenarioCommandDependencies = DEFAULT_BOOTSTRAP_SCENARIO_COMMAND_DEPENDENCIES,
-): Promise<BootstrapScenarioSuiteReport> {
-  return deps.evaluateBootstrapScenarioFixtureDirectory(
-    input.fixturesDir ?? DEFAULT_BOOTSTRAP_SCENARIO_FIXTURES_DIR,
-  )
-}
-
-export function formatBootstrapScenarioOutput(
-  report: BootstrapScenarioSuiteReport,
-  asJson = false,
-): string {
-  return asJson ? formatBootstrapScenarioSuiteReportJson(report) : formatBootstrapScenarioSuiteReport(report)
-}
-
-export async function executeBootstrapGateCommand(
-  input: ExecuteBootstrapGateInput,
-  deps: BootstrapGateCommandDependencies = DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES,
-): Promise<BootstrapGateReport> {
-  return deps.buildBootstrapGateReportForRepo({
-    config: buildBootstrapGateReadOnlyConfig(input, deps),
-  })
-}
-
-export function formatBootstrapGateOutput(
-  report: BootstrapGateReport,
-  asJson = false,
-): string {
-  return asJson ? formatBootstrapGateReportJson(report) : formatBootstrapGateReport(report)
-}
-
-function buildBootstrapGateReadOnlyConfig(
-  input: ExecuteBootstrapGateInput,
-  deps: Pick<BootstrapGateCommandDependencies, 'buildConfig' | 'loadRepoLocalConfig' | 'readConfigFile'>,
-): AgentConfig {
-  const repo = input.repo?.trim()
-  if (!repo) {
-    throw new Error('--bootstrap-gate requires --repo owner/repo')
-  }
-
-  const readOnlyMachineId = 'bootstrap-gate-readonly'
-  const fileConfig = deps.readConfigFile()
-
-  return deps.buildConfig(
-    {
-      repo,
-      pat: input.pat,
-      machineId: readOnlyMachineId,
-    },
-    {
-      fileConfig: {
-        ...fileConfig,
-        machineId: fileConfig.machineId ?? readOnlyMachineId,
-      },
-      repoConfig: deps.loadRepoLocalConfig(),
-    },
-  )
 }
 
 export function buildWakeRequestFromCli(
@@ -1437,12 +1490,14 @@ function assertIssueLintCompatible(args: {
   }
 }
 
-function assertBootstrapGateCompatible(args: {
-  'bootstrap-scenarios'?: boolean
+function assertIssueRewriteCompatible(args: {
   'wake-now'?: boolean
   'wake-issue'?: string
   'wake-pr'?: string
   'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  json?: boolean
   concurrency?: string
   'poll-interval'?: string
   'idle-poll-interval'?: string
@@ -1471,11 +1526,13 @@ function assertBootstrapGateCompatible(args: {
   'health-port'?: string
 }): void {
   const incompatibleFlags = [
-    args['bootstrap-scenarios'] ? '--bootstrap-scenarios' : null,
     args['wake-now'] ? '--wake-now' : null,
     typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
     typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
     args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    args.json ? '--json' : null,
     typeof args.concurrency === 'string' ? '--concurrency' : null,
     typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
     typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
@@ -1505,16 +1562,19 @@ function assertBootstrapGateCompatible(args: {
   ].filter((flag): flag is string => flag !== null)
 
   if (incompatibleFlags.length > 0) {
-    throw new Error(`Bootstrap gate cannot be combined with ${incompatibleFlags.join(', ')}`)
+    throw new Error(`Issue rewrite cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 
-function assertBootstrapScenarioCompatible(args: {
-  'bootstrap-gate'?: boolean
+function assertIssueSplitCompatible(args: {
   'wake-now'?: boolean
   'wake-issue'?: string
   'wake-pr'?: string
   'wake-from-github-event'?: boolean
+  'lint-issue'?: string
+  'lint-file'?: string
+  'rewrite-file'?: string
+  json?: boolean
   concurrency?: string
   'poll-interval'?: string
   'idle-poll-interval'?: string
@@ -1543,11 +1603,14 @@ function assertBootstrapScenarioCompatible(args: {
   'health-port'?: string
 }): void {
   const incompatibleFlags = [
-    args['bootstrap-gate'] ? '--bootstrap-gate' : null,
     args['wake-now'] ? '--wake-now' : null,
     typeof args['wake-issue'] === 'string' ? '--wake-issue' : null,
     typeof args['wake-pr'] === 'string' ? '--wake-pr' : null,
     args['wake-from-github-event'] ? '--wake-from-github-event' : null,
+    typeof args['lint-issue'] === 'string' ? '--lint-issue' : null,
+    typeof args['lint-file'] === 'string' ? '--lint-file' : null,
+    typeof args['rewrite-file'] === 'string' ? '--rewrite-file' : null,
+    args.json ? '--json' : null,
     typeof args.concurrency === 'string' ? '--concurrency' : null,
     typeof args['poll-interval'] === 'string' ? '--poll-interval' : null,
     typeof args['idle-poll-interval'] === 'string' ? '--idle-poll-interval' : null,
@@ -1577,7 +1640,7 @@ function assertBootstrapScenarioCompatible(args: {
   ].filter((flag): flag is string => flag !== null)
 
   if (incompatibleFlags.length > 0) {
-    throw new Error(`Bootstrap scenarios cannot be combined with ${incompatibleFlags.join(', ')}`)
+    throw new Error(`Issue split cannot be combined with ${incompatibleFlags.join(', ')}`)
   }
 }
 
