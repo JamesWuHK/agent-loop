@@ -31,10 +31,6 @@ import {
   shouldDeferResumableIssueForActiveLinkedPrTask,
   shouldDeferResumableIssueForActiveLinkedPrLease,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
-  shouldRegisterFailedIssueResumeAfterFinalize,
-  classifyApprovedPrMergeChecksGate,
-  classifyStandalonePrReviewFollowup,
-  classifyLinkedIssueApprovedMergeOutcome,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
   shouldResumeFailedIssueWithLinkedPr,
@@ -50,6 +46,7 @@ import {
   shouldResetLinkedPrToRetryOnIssueResume,
   shouldCompleteIssueRecoveryOnRemoteClose,
   shouldRequeueFailedIssue,
+  runRemoteUpgradeAnnouncementSafely,
   shouldResumeManagedIssue,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
@@ -103,7 +100,6 @@ function createTestDaemon(
       fallback: 'claude',
       claudePath: 'claude',
       codexPath: 'codex',
-      codexReasoningEffort: 'high',
       timeoutMs: 60_000,
     },
     git: {
@@ -510,6 +506,44 @@ describe('agent-loop upgrade coordination', () => {
     expect(immediateReason as string | null).toBe('agent-loop-upgrade')
   })
 
+  test('downgrades startup remote upgrade announcement failures into warnings', async () => {
+    const warnings: string[] = []
+
+    await runRemoteUpgradeAnnouncementSafely(
+      async () => {
+        throw new Error('The socket connection was closed unexpectedly.')
+      },
+      {
+        warn(message: string) {
+          warnings.push(message)
+        },
+      },
+    )
+
+    expect(warnings).toEqual([
+      expect.stringContaining('failed to process remote upgrade announcement'),
+    ])
+  })
+
+  test('keeps successful remote upgrade announcement checks silent', async () => {
+    let called = false
+    const warnings: string[] = []
+
+    await runRemoteUpgradeAnnouncementSafely(
+      async () => {
+        called = true
+      },
+      {
+        warn(message: string) {
+          warnings.push(message)
+        },
+      },
+    )
+
+    expect(called).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
   test('preserves active issue state markers across intentional upgrade restarts', async () => {
     const daemon = createTestDaemon()
 
@@ -581,60 +615,6 @@ describe('agent-loop upgrade coordination', () => {
 
       expect(autoUpgradeAttempts).toBe(1)
       expect(scheduledPolls).toBe(0)
-    })
-  })
-
-  test('attempts automatic self-upgrade before claiming new work when idle', async () => {
-    await withRuntimeSupervisor('detached', async () => {
-      const daemon = createTestDaemon({
-        upgrade: {
-          enabled: true,
-          repo: 'JamesWuHK/agent-loop',
-          channel: 'master',
-          checkIntervalMs: 60_000,
-          reminderIntervalMs: 3_600_000,
-          autoApply: true,
-        },
-      }) as any
-
-      let autoUpgradeAttempts = 0
-      let claimAttempts = 0
-
-      daemon.running = true
-      daemon.startupRecoveryPending = false
-      daemon.maybeStartResumableIssue = async () => false
-      daemon.maybeStartStandaloneApprovedPrMerge = async () => false
-      daemon.maybeRequeueFailedIssue = async () => false
-      daemon.maybeStartClaimedIssue = async () => {
-        claimAttempts += 1
-        return true
-      }
-      daemon.maybeStartStandalonePrReview = async () => false
-      daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
-      daemon.performAutomaticAgentLoopUpgrade = async () => {
-        autoUpgradeAttempts += 1
-        return true
-      }
-      daemon.scheduleNextPoll = () => {
-        throw new Error('pollCycle should not schedule another poll after auto-upgrade starts')
-      }
-      daemon.agentLoopUpgrade = {
-        enabled: true,
-        repo: 'JamesWuHK/agent-loop',
-        channel: 'master',
-        checkedAt: '2026-04-11T11:00:00.000Z',
-        status: 'upgrade-available',
-        latestVersion: '0.1.2',
-        latestRevision: '2222222222222222222222222222222222222222',
-        latestCommitAt: '2026-04-11T10:59:30.000Z',
-        safeToUpgradeNow: true,
-        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
-      }
-
-      await daemon.pollCycle()
-
-      expect(autoUpgradeAttempts).toBe(1)
-      expect(claimAttempts).toBe(0)
     })
   })
 
@@ -1208,7 +1188,6 @@ describe('daemon merge recovery helpers', () => {
           fallback: 'claude',
           claudePath: 'claude',
           codexPath: 'codex',
-          codexReasoningEffort: 'high',
           timeoutMs: 60_000,
         },
         git: {
@@ -1671,7 +1650,6 @@ describe('daemon merge recovery helpers', () => {
         fallback: 'claude',
         claudePath: 'claude',
         codexPath: 'codex',
-        codexReasoningEffort: 'high',
         timeoutMs: 60_000,
       },
       git: {
@@ -1854,16 +1832,10 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(false)
   })
 
-  test('preserves resumable failure cooldown tracking after finalize failures', () => {
-    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(false)
+  test('clears resumable failure cooldown tracking only for terminal finalize failures', () => {
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(true)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
-  })
-
-  test('registers failed issue resume attempts after finalize failures only', () => {
-    expect(shouldRegisterFailedIssueResumeAfterFinalize('failed')).toBe(true)
-    expect(shouldRegisterFailedIssueResumeAfterFinalize('completed')).toBe(false)
-    expect(shouldRegisterFailedIssueResumeAfterFinalize('recoverable')).toBe(false)
   })
 
   test('resets linked PR labels back to retry when issue recovery resumes', () => {
@@ -2067,105 +2039,6 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(false)
   })
 
-  test('keeps blocked refresh rerun rejections in human-needed follow-up', () => {
-    expect(classifyStandalonePrReviewFollowup({
-      approved: false,
-      canMerge: false,
-    }, {
-      blockedRefreshRerun: true,
-    })).toEqual({
-      nextReviewLabel: 'human-needed',
-      shouldRunAutoFix: false,
-      shouldMarkIssueFailed: true,
-    })
-  })
-
-  test('still allows one retry auto-fix follow-up for ordinary standalone rejections', () => {
-    expect(classifyStandalonePrReviewFollowup({
-      approved: false,
-      canMerge: false,
-    }, {
-      blockedRefreshRerun: false,
-    })).toEqual({
-      nextReviewLabel: 'retry',
-      shouldRunAutoFix: true,
-      shouldMarkIssueFailed: false,
-    })
-  })
-
-  test('keeps blocked refresh rerun approvals on the approved follow-up path', () => {
-    expect(classifyStandalonePrReviewFollowup({
-      approved: true,
-      canMerge: true,
-    }, {
-      blockedRefreshRerun: true,
-    })).toEqual({
-      nextReviewLabel: 'approved',
-      shouldRunAutoFix: false,
-      shouldMarkIssueFailed: false,
-    })
-  })
-
-  test('releases ready issue claim opportunities once a blocked refresh rerun review settles back to human-needed', async () => {
-    const daemon = createTestDaemon({
-      concurrency: 1,
-      requestedConcurrency: 1,
-      concurrencyPolicy: {
-        requested: 1,
-        effective: 1,
-        repoCap: null,
-        profileCap: null,
-        projectCap: null,
-      },
-    })
-    let finishReview!: () => void
-    const reviewFinished = new Promise<void>((resolve) => {
-      finishReview = resolve
-    })
-    let claimAttempts = 0
-
-    ;(daemon as any).running = true
-    ;(daemon as any).refreshObservability = () => undefined
-    ;(daemon as any).processStandalonePrReview = async () => {
-      await reviewFinished
-    }
-    ;(daemon as any).maybeStartResumableIssue = async () => false
-    ;(daemon as any).maybeStartStandaloneApprovedPrMerge = async () => false
-    ;(daemon as any).maybeRequeueFailedIssue = async () => false
-    ;(daemon as any).maybeStartClaimedIssue = async () => {
-      claimAttempts += 1
-      return false
-    }
-    ;(daemon as any).maybeStartStandalonePrReview = async () => false
-    ;(daemon as any).maybeAutoApplyAgentLoopUpgrade = async () => false
-    ;(daemon as any).scheduleNextPoll = () => undefined
-
-    const started = (daemon as any).startStandalonePrReview({
-      number: 110,
-      title: 'Issue #110: blocked rerun',
-      url: 'https://example.com/pulls/110',
-      headRefName: 'agent/110/codex-dev',
-      headRefOid: 'abc1234',
-      labels: [PR_REVIEW_LABELS.HUMAN_NEEDED, PR_REVIEW_LABELS.FAILED],
-      isDraft: false,
-    })
-
-    expect(started).toBe(true)
-    expect((daemon as any).activePrReviews.has(110)).toBe(true)
-
-    await (daemon as any).pollCycle()
-    expect(claimAttempts).toBe(0)
-
-    finishReview()
-    await Promise.all(Array.from((daemon as any).inFlightPrTasks))
-
-    expect((daemon as any).activePrReviews.has(110)).toBe(false)
-
-    claimAttempts = 0
-    await (daemon as any).pollCycle()
-    expect(claimAttempts).toBe(1)
-  })
-
   test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {
     const refreshFailure = buildPrReviewRefreshFailureComment(
       110,
@@ -2275,147 +2148,6 @@ describe('daemon merge recovery helpers', () => {
     expect(isMergeabilityFailure('Pull Request is not mergeable')).toBe(true)
     expect(isMergeabilityFailure('Merge conflict between base and head')).toBe(true)
     expect(isMergeabilityFailure('Required status check "test" is failing')).toBe(false)
-  })
-
-  describe('approved PR merge checks gate', () => {
-    test('defers pending checks without forcing the linked issue into failed', () => {
-      expect(classifyApprovedPrMergeChecksGate({
-        state: 'pending',
-        summary: 'build-and-test is pending',
-      })).toEqual({
-        outcome: 'defer',
-        recoverable: true,
-        reason: 'PR checks not ready for merge: build-and-test is pending',
-      })
-    })
-
-    test('keeps pending checks on the recoverable linked-issue path', () => {
-      expect(classifyLinkedIssueApprovedMergeOutcome({
-        merged: false,
-        message: 'PR checks not ready for merge: build-and-test is pending',
-        recoverable: true,
-      })).toEqual({
-        status: 'recoverable',
-        reason: 'PR checks not ready for merge: build-and-test is pending',
-      })
-    })
-
-    test('routes failing checks to human-needed', () => {
-      expect(classifyApprovedPrMergeChecksGate({
-        state: 'fail',
-        summary: 'build-and-test is fail',
-      })).toEqual({
-        outcome: 'human-needed',
-        recoverable: false,
-        reason: 'PR checks failed: build-and-test is fail',
-      })
-    })
-
-    test('skips merge calls when checks fail and keeps the linked issue on the terminal path', async () => {
-      const daemon = createTestDaemon()
-      const comments: string[] = []
-      const reviewStates: string[] = []
-      let mergeCalls = 0
-
-      ;(daemon as any).getPullRequestChecksStatus = async () => ({
-        state: 'fail',
-        summary: 'build-and-test is fail',
-      })
-      ;(daemon as any).commentOnManagedPr = async (_prNumber: number, body: string) => {
-        comments.push(body)
-      }
-      ;(daemon as any).setManagedPrReviewState = async (_prNumber: number, state: string) => {
-        reviewStates.push(state)
-      }
-      ;(daemon as any).mergeManagedPullRequest = async () => {
-        mergeCalls += 1
-        return { merged: true, message: 'unexpected merge' }
-      }
-
-      const mergeResult = await (daemon as any).attemptApprovedPrMergeWithRecovery(
-        110,
-        'https://github.com/JamesWuHK/agent-loop/pull/110',
-        'agent/61/codex-dev',
-        '/tmp/worktrees/issue-61-codex-dev',
-      )
-
-      expect(mergeCalls).toBe(0)
-      expect(reviewStates).toEqual(['human-needed'])
-      expect(comments).toHaveLength(1)
-      expect(comments[0]).toContain('PR checks failed: build-and-test is fail')
-      expect(mergeResult).toMatchObject({
-        merged: false,
-        message: 'PR checks failed: build-and-test is fail',
-        checksBlocked: true,
-      })
-      expect(classifyLinkedIssueApprovedMergeOutcome(mergeResult)).toEqual({
-        status: 'failed',
-        reason: 'PR checks failed: build-and-test is fail',
-      })
-    })
-
-    test('treats check lookup errors as recoverable deferrals', () => {
-      expect(classifyApprovedPrMergeChecksGate({
-        state: 'error',
-        summary: 'gh pr checks exited with code 4',
-      })).toEqual({
-        outcome: 'defer',
-        recoverable: true,
-        reason: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
-      })
-    })
-
-    test('keeps checks lookup errors on the recoverable linked-issue path', () => {
-      expect(classifyLinkedIssueApprovedMergeOutcome({
-        merged: false,
-        message: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
-        recoverable: true,
-      })).toEqual({
-        status: 'recoverable',
-        reason: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
-      })
-    })
-
-    test('treats thrown check lookups as recoverable deferrals without calling merge', async () => {
-      const daemon = createTestDaemon()
-      let mergeCalls = 0
-
-      ;(daemon as any).getPullRequestChecksStatus = async () => {
-        throw new Error('gh pr checks timed out')
-      }
-      ;(daemon as any).mergeManagedPullRequest = async () => {
-        mergeCalls += 1
-        return { merged: true, message: 'unexpected merge' }
-      }
-
-      const mergeResult = await (daemon as any).attemptApprovedPrMergeWithRecovery(
-        110,
-        'https://github.com/JamesWuHK/agent-loop/pull/110',
-        'agent/61/codex-dev',
-        '/tmp/worktrees/issue-61-codex-dev',
-      )
-
-      expect(mergeCalls).toBe(0)
-      expect(mergeResult).toMatchObject({
-        merged: false,
-        message: 'Merge gate could not confirm PR checks: gh pr checks timed out',
-        recoverable: true,
-      })
-      expect(classifyLinkedIssueApprovedMergeOutcome(mergeResult)).toEqual({
-        status: 'recoverable',
-        reason: 'Merge gate could not confirm PR checks: gh pr checks timed out',
-      })
-    })
-
-    test('keeps true merge failures on the failed linked-issue path', () => {
-      expect(classifyLinkedIssueApprovedMergeOutcome({
-        merged: false,
-        message: 'Pull Request is not mergeable',
-      })).toEqual({
-        status: 'failed',
-        reason: 'Pull Request is not mergeable',
-      })
-    })
   })
 
   test('builds a merge retry comment with recovery details', () => {
@@ -2647,7 +2379,6 @@ describe('daemon merge recovery helpers', () => {
           fallback: null,
           claudePath: 'claude',
           codexPath: 'codex',
-          codexReasoningEffort: 'high',
           timeoutMs: 60_000,
         },
         git: {

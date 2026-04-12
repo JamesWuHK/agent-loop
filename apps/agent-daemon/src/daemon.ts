@@ -18,12 +18,11 @@ import type {
   ManagedLeaseScope,
   ManagedPullRequest,
   PrCheckResult,
-  PullRequestChecksStatus,
   RecoveryActionRuntimeDetail,
   StalledWorkerRuntimeDetail,
   WorktreeInfo,
 } from '@agent/shared'
-import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber, setGitHubApiRequestObserver, getPullRequestChecksStatus } from '@agent/shared'
+import { ISSUE_LABELS, PR_REVIEW_LABELS, canDaemonAdoptManagedLease, getActiveManagedLease, getLatestManagedLease, listOpenAgentIssues, listOpenAgentPullRequests, transitionIssueState, commentOnIssue, commentOnPr, setManagedPrReviewLabels, mergePullRequest, checkPrExists, listIssueComments, resolveActiveClaimMachine, getAgentIssueByNumber, getManagedPullRequestByNumber, setGitHubApiRequestObserver } from '@agent/shared'
 import { claimSpecificIssue, pollAndClaim } from './claimer'
 import { createWorktree, removeWorktree, cleanupOrphanedWorktrees, hasWorktreeForIssue } from './worktree-manager'
 import { runIssueBranchPreflight, runSubtaskExecutor, runReviewAutoFix, runIssueRecovery } from './subtask-executor'
@@ -251,10 +250,15 @@ export interface IssueResumeResolutionRecord extends IssueComment {
   resolutionComment: IssueResumeResolutionComment
 }
 
-export interface ApprovedPrMergeChecksGateResult {
-  outcome: 'allow' | 'defer' | 'human-needed'
-  recoverable: boolean
-  reason: string | null
+export async function runRemoteUpgradeAnnouncementSafely(
+  runRemoteUpgradeAnnouncement: () => Promise<void>,
+  logger: Pick<Console, 'warn'>,
+): Promise<void> {
+  try {
+    await runRemoteUpgradeAnnouncement()
+  } catch (error) {
+    logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
+  }
 }
 
 interface ApprovedPrMergeAttemptResult {
@@ -265,7 +269,6 @@ interface ApprovedPrMergeAttemptResult {
   recoverable?: boolean
   checksBlocked?: boolean
 }
-
 export class AgentDaemon {
   private static readonly MAX_AUTOMATED_PR_REVIEW_ATTEMPTS = 3
   private running = false
@@ -791,9 +794,7 @@ export class AgentDaemon {
         return
       }
 
-      void this.maybeProcessRemoteUpgradeAnnouncement().catch((error) => {
-        this.logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
-      })
+      void this.runRemoteUpgradeAnnouncementSafely()
     }, intervalMs)
   }
 
@@ -884,7 +885,7 @@ export class AgentDaemon {
     })
 
     void this.maybeRefreshAgentLoopUpgradeStatus(true)
-    void this.maybeProcessRemoteUpgradeAnnouncement()
+    void this.runRemoteUpgradeAnnouncementSafely()
 
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
@@ -1274,12 +1275,6 @@ export class AgentDaemon {
         }
         recordPollDuration(Date.now() - pollStartTime)
         this.scheduleNextPoll()
-        return
-      }
-
-      if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
-        recordPoll('no_issues')
-        recordPollDuration(Date.now() - pollStartTime)
         return
       }
 
@@ -2155,18 +2150,19 @@ export class AgentDaemon {
         detached.worktreePath,
         this.config.git.defaultBranch,
       )
-      const blockedRefreshRerun = shouldRefreshBlockedHumanNeededPr(
-        pr,
-        linkedIssue,
-        resumableHumanNeededReview,
-        worktreeBaseSyncState.behindDefault,
-        canRetryPrReviewRefresh(
-          priorComments,
-          worktreeBaseSyncState.headRefOid,
-          worktreeBaseSyncState.baseRefOid,
-        ),
-      )
-      if (blockedRefreshRerun) {
+      if (
+        shouldRefreshBlockedHumanNeededPr(
+          pr,
+          linkedIssue,
+          resumableHumanNeededReview,
+          worktreeBaseSyncState.behindDefault,
+          canRetryPrReviewRefresh(
+            priorComments,
+            worktreeBaseSyncState.headRefOid,
+            worktreeBaseSyncState.baseRefOid,
+          ),
+        )
+      ) {
         this.logger.log(
           `[pr-review-subagent] refreshing blocked PR #${pr.number} onto origin/${this.config.git.defaultBranch} before rerunning automated review`,
         )
@@ -2299,9 +2295,7 @@ export class AgentDaemon {
           return
         }
 
-        const followup = classifyStandalonePrReviewFollowup(firstReview, { blockedRefreshRerun })
-
-        if (followup.nextReviewLabel === 'approved') {
+        if (firstReview.approved && firstReview.canMerge) {
           await commentOnPr(
             pr.number,
             buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid, linkedIssue?.body ?? null),
@@ -2334,28 +2328,6 @@ export class AgentDaemon {
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
           this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
-          return
-        }
-
-        if (!followup.shouldRunAutoFix) {
-          const finalReviewLabel: 'human-needed' = 'human-needed'
-          await commentOnPr(
-            pr.number,
-            buildPrReviewComment(
-              pr.number,
-              firstReview,
-              nextAttempt,
-              finalReviewLabel,
-              currentHeadRefOid,
-              linkedIssue?.body ?? null,
-            ),
-            this.config,
-          )
-          await setManagedPrReviewLabels(pr.number, finalReviewLabel, this.config)
-          if (followup.shouldMarkIssueFailed && issueNumber !== null) {
-            await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
-          }
-          this.logger.log(`[pr-review-subagent] PR #${pr.number} remains human-needed after blocked refresh rerun`)
           return
         }
 
@@ -2820,9 +2792,6 @@ export class AgentDaemon {
         this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       } else {
-        if (shouldRegisterFailedIssueResumeAfterFinalize(finalized.status)) {
-          this.registerFailedIssueResume(issueNumber)
-        }
         if (shouldClearFailedIssueResumeTrackingAfterFinalize(finalized.status)) {
           this.failedIssueResumeAttempts.delete(issueNumber)
           this.failedIssueResumeCooldownUntil.delete(issueNumber)
@@ -2868,24 +2837,8 @@ export class AgentDaemon {
     branch: string,
     worktreePath: string,
     monitor?: TaskExecutionMonitor,
-  ): Promise<ApprovedPrMergeAttemptResult> {
-    const initialChecksGate = await this.runApprovedPrMergeChecksGate(prNumber)
-    if (initialChecksGate.outcome === 'defer') {
-      return {
-        merged: false,
-        message: initialChecksGate.reason ?? 'PR checks not ready for merge',
-        recoverable: true,
-      }
-    }
-    if (initialChecksGate.outcome === 'human-needed') {
-      return {
-        merged: false,
-        message: initialChecksGate.reason ?? 'PR checks failed',
-        checksBlocked: true,
-      }
-    }
-
-    const mergeResult = await this.mergeManagedPullRequest(prNumber)
+  ): Promise<{ merged: boolean; message: string; sha?: string; review?: PrReviewResult; recoverable?: boolean }> {
+    const mergeResult = await mergePullRequest(prNumber, this.config)
     if (mergeResult.merged) {
       recordPrMergeRecoveryOutcome('merged_initial')
       return mergeResult
@@ -2893,14 +2846,15 @@ export class AgentDaemon {
 
     if (!isMergeabilityFailure(mergeResult.message)) {
       recordPrMergeRecoveryOutcome('blocked_non_mergeable')
-      await this.commentOnManagedPr(prNumber, buildPrMergeBlockedComment(prNumber, mergeResult.message))
-      await this.setManagedPrReviewState(prNumber, 'human-needed')
+      await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, mergeResult.message), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return mergeResult
     }
 
-    await this.commentOnManagedPr(
+    await commentOnPr(
       prNumber,
       buildPrMergeRetryComment(prNumber, branch, this.config.git.defaultBranch, mergeResult.message),
+      this.config,
     )
 
     const refreshResult = await rebaseManagedBranchOntoDefault(
@@ -2915,8 +2869,8 @@ export class AgentDaemon {
         merged: false,
         message: `Branch refresh failed: ${refreshResult.message}`,
       }
-      await this.commentOnManagedPr(prNumber, buildPrMergeBlockedComment(prNumber, blockedResult.message))
-      await this.setManagedPrReviewState(prNumber, 'human-needed')
+      await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, blockedResult.message), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return blockedResult
     }
 
@@ -2928,8 +2882,8 @@ export class AgentDaemon {
         merged: false,
         message: `Branch refresh push failed: ${formatDaemonError(err)}`,
       }
-      await this.commentOnManagedPr(prNumber, buildPrMergeBlockedComment(prNumber, blockedResult.message))
-      await this.setManagedPrReviewState(prNumber, 'human-needed')
+      await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, blockedResult.message), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return blockedResult
     }
 
@@ -2947,8 +2901,8 @@ export class AgentDaemon {
 
     if (!(review.approved && review.canMerge)) {
       recordPrMergeRecoveryOutcome('refresh_review_blocked')
-      await this.commentOnManagedPr(prNumber, buildPrReviewComment(prNumber, review, 2, 'human-needed'))
-      await this.setManagedPrReviewState(prNumber, 'human-needed')
+      await commentOnPr(prNumber, buildPrReviewComment(prNumber, review, 2, 'human-needed'), this.config)
+      await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
       return {
         merged: false,
         message: review.reason,
@@ -2956,28 +2910,10 @@ export class AgentDaemon {
       }
     }
 
-    await this.commentOnManagedPr(prNumber, buildPrReviewComment(prNumber, review, 2, 'approved'))
-    await this.setManagedPrReviewState(prNumber, 'approved')
+    await commentOnPr(prNumber, buildPrReviewComment(prNumber, review, 2, 'approved'), this.config)
+    await setManagedPrReviewLabels(prNumber, 'approved', this.config)
 
-    const retriedChecksGate = await this.runApprovedPrMergeChecksGate(prNumber)
-    if (retriedChecksGate.outcome === 'defer') {
-      return {
-        merged: false,
-        message: retriedChecksGate.reason ?? 'PR checks not ready for merge',
-        review,
-        recoverable: true,
-      }
-    }
-    if (retriedChecksGate.outcome === 'human-needed') {
-      return {
-        merged: false,
-        message: retriedChecksGate.reason ?? 'PR checks failed',
-        review,
-        checksBlocked: true,
-      }
-    }
-
-    const retriedMergeResult = await this.mergeManagedPullRequest(prNumber)
+    const retriedMergeResult = await mergePullRequest(prNumber, this.config)
     if (retriedMergeResult.merged) {
       recordPrMergeRecoveryOutcome('merged_after_refresh')
       return {
@@ -2987,53 +2923,12 @@ export class AgentDaemon {
     }
 
     recordPrMergeRecoveryOutcome('retry_merge_failed')
-    await this.commentOnManagedPr(prNumber, buildPrMergeBlockedComment(prNumber, retriedMergeResult.message))
-    await this.setManagedPrReviewState(prNumber, 'human-needed')
+    await commentOnPr(prNumber, buildPrMergeBlockedComment(prNumber, retriedMergeResult.message), this.config)
+    await setManagedPrReviewLabels(prNumber, 'human-needed', this.config)
     return {
       ...retriedMergeResult,
       review,
     }
-  }
-
-  private async runApprovedPrMergeChecksGate(
-    prNumber: number,
-  ): Promise<ApprovedPrMergeChecksGateResult> {
-    let checksStatus: PullRequestChecksStatus
-    try {
-      checksStatus = await this.getPullRequestChecksStatus(prNumber)
-    } catch (error) {
-      checksStatus = {
-        state: 'error',
-        summary: formatDaemonError(error),
-      }
-    }
-    const gate = classifyApprovedPrMergeChecksGate(checksStatus)
-
-    if (gate.outcome === 'human-needed' && gate.reason) {
-      await this.commentOnManagedPr(prNumber, buildPrMergeBlockedComment(prNumber, gate.reason))
-      await this.setManagedPrReviewState(prNumber, 'human-needed')
-    }
-
-    return gate
-  }
-
-  private async getPullRequestChecksStatus(prNumber: number): Promise<PullRequestChecksStatus> {
-    return getPullRequestChecksStatus(prNumber, this.config)
-  }
-
-  private async mergeManagedPullRequest(prNumber: number) {
-    return mergePullRequest(prNumber, this.config)
-  }
-
-  private async commentOnManagedPr(prNumber: number, body: string): Promise<void> {
-    await commentOnPr(prNumber, body, this.config)
-  }
-
-  private async setManagedPrReviewState(
-    prNumber: number,
-    state: 'approved' | 'failed' | 'retry' | 'human-needed',
-  ): Promise<void> {
-    await setManagedPrReviewLabels(prNumber, state, this.config)
   }
 
   private registerFailedIssueResume(issueNumber: number): void {
@@ -3338,14 +3233,6 @@ export class AgentDaemon {
       await this.completeManagedLease('pr-merge', pr.prNumber, mergeLease.handle, 'completed')
 
       if (!mergeResult.merged) {
-        const linkedIssueOutcome = classifyLinkedIssueApprovedMergeOutcome(mergeResult)
-        if (linkedIssueOutcome.status === 'recoverable') {
-          this.logger.warn(`[daemon] issue #${issue.number} approved PR #${pr.prNumber} is blocked pending human follow-up: ${mergeResult.message}`)
-          this.activeWorktrees.delete(issue.number)
-          this.syncRuntimeMetrics()
-          return linkedIssueOutcome
-        }
-
         await transitionIssueState(
           issue.number,
           ISSUE_LABELS.FAILED,
@@ -3750,6 +3637,13 @@ export class AgentDaemon {
     })
 
     return this.upgradeAnnouncementCheckPromise
+  }
+
+  private async runRemoteUpgradeAnnouncementSafely(): Promise<void> {
+    await runRemoteUpgradeAnnouncementSafely(
+      () => this.maybeProcessRemoteUpgradeAnnouncement(),
+      this.logger,
+    )
   }
 
   private async maybeBroadcastAgentLoopUpgradeAnnouncement(
@@ -4543,12 +4437,6 @@ export function getFailedIssueResumeBlock(
 export function shouldClearFailedIssueResumeTrackingAfterFinalize(
   status: 'completed' | 'failed' | 'recoverable',
 ): boolean {
-  return false
-}
-
-export function shouldRegisterFailedIssueResumeAfterFinalize(
-  status: 'completed' | 'failed' | 'recoverable',
-): boolean {
   return status === 'failed'
 }
 
@@ -5143,64 +5031,6 @@ export function isMergeabilityFailure(message: string): boolean {
   return normalized.includes('not mergeable') || normalized.includes('merge conflict')
 }
 
-export function classifyApprovedPrMergeChecksGate(
-  status: PullRequestChecksStatus,
-): ApprovedPrMergeChecksGateResult {
-  switch (status.state) {
-    case 'pass':
-      return {
-        outcome: 'allow',
-        recoverable: false,
-        reason: null,
-      }
-    case 'pending':
-      return {
-        outcome: 'defer',
-        recoverable: true,
-        reason: `PR checks not ready for merge: ${status.summary}`,
-      }
-    case 'fail':
-      return {
-        outcome: 'human-needed',
-        recoverable: false,
-        reason: `PR checks failed: ${status.summary}`,
-      }
-    case 'error':
-      return {
-        outcome: 'defer',
-        recoverable: true,
-        reason: `Merge gate could not confirm PR checks: ${status.summary}`,
-      }
-    default: {
-      const exhaustiveStatus: never = status.state
-      throw new Error(`Unhandled PR checks gate state: ${exhaustiveStatus}`)
-    }
-  }
-}
-
-export function classifyLinkedIssueApprovedMergeOutcome(
-  mergeResult: ApprovedPrMergeAttemptResult,
-): { status: 'failed' | 'recoverable'; reason: string } {
-  if (mergeResult.recoverable) {
-    return {
-      status: 'recoverable',
-      reason: mergeResult.message,
-    }
-  }
-
-  if (mergeResult.checksBlocked) {
-    return {
-      status: 'failed',
-      reason: mergeResult.message,
-    }
-  }
-
-  return {
-    status: 'failed',
-    reason: mergeResult.message,
-  }
-}
-
 export function isMissingRemoteBranchGitOutput(
   output: string,
   branch?: string,
@@ -5370,39 +5200,6 @@ export function shouldRefreshBlockedHumanNeededPr(
 
   const labels = new Set(pr.labels)
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && !canResumeHumanNeededReview
-}
-
-export function classifyStandalonePrReviewFollowup(
-  review: Pick<PrReviewResult, 'approved' | 'canMerge'>,
-  options: {
-    blockedRefreshRerun: boolean
-  },
-): {
-  nextReviewLabel: 'approved' | 'retry' | 'human-needed'
-  shouldRunAutoFix: boolean
-  shouldMarkIssueFailed: boolean
-} {
-  if (review.approved && review.canMerge) {
-    return {
-      nextReviewLabel: 'approved',
-      shouldRunAutoFix: false,
-      shouldMarkIssueFailed: false,
-    }
-  }
-
-  if (options.blockedRefreshRerun) {
-    return {
-      nextReviewLabel: 'human-needed',
-      shouldRunAutoFix: false,
-      shouldMarkIssueFailed: true,
-    }
-  }
-
-  return {
-    nextReviewLabel: 'retry',
-    shouldRunAutoFix: true,
-    shouldMarkIssueFailed: false,
-  }
 }
 
 function extractIssuePreflightFailureComment(body: string): IssuePreflightFailureCommentPayload | null {
