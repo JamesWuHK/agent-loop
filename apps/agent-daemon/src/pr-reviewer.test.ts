@@ -376,6 +376,38 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
     })
   })
 
+  test('infers retrying action from legacy automated review wording without explicit action metadata', () => {
+    expect(extractLatestAutomatedPrReviewState([
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":1,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"First blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
+Automated review found blocking issues
+
+- Attempt: 1
+- Merge ready: no
+- Reason: First blocker
+
+Next step: daemon will attempt one automatic fix on the same branch.`,
+      },
+    ])?.action).toBe('retrying')
+  })
+
+  test('infers human-needed action from legacy automated review wording without explicit action metadata', () => {
+    expect(extractLatestAutomatedPrReviewState([
+      {
+        body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
+<!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Second blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
+Automated review still failing - human intervention required
+
+- Attempt: 2
+- Merge ready: no
+- Reason: Second blocker
+
+Next step: stopping automation and leaving the worktree/branch for a human.`,
+      },
+    ])?.action).toBe('human-needed')
+  })
+
   test('extracts the latest automated PR review blocker summary', () => {
     expect(extractLatestAutomatedPrReviewBlockerSummary([
       {
@@ -555,7 +587,7 @@ Next step: stopping automation and leaving the worktree/branch for a human.`,
       {
         body: `<!-- agent-loop:pr-review {"pr":84,"attempt":2,"approved":false,"canMerge":false,"headRefOid":"abc123"} -->
 <!-- agent-loop:review-feedback {"approved":false,"canMerge":false,"reason":"Second blocker","findings":[{"severity":"high","file":"apps/desktop/src/pages/MainPage.tsx","summary":"retry success regressed","mustFix":["restore success-list semantics"],"mustNotDo":["do not add selection state"],"validation":["bun --cwd apps/desktop test src/pages/MainPage.test.tsx"],"scopeRationale":"issue #76 requires preserving success semantics"}]} -->
-## Automated review still failing — human intervention required
+Automated review still failing - human intervention required
 
 - Attempt: 2
 - Merge ready: no

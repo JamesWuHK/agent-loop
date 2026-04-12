@@ -112,6 +112,11 @@ const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
 const MAX_REVIEW_OUTPUT_ATTEMPTS = 2
 const DETACHED_REVIEW_EXCLUDE_MARKER = '# agent-loop detached review dependency symlinks'
+const AUTOMATED_PR_REVIEW_RETRYING_TITLE = 'automated review found blocking issues'
+const AUTOMATED_PR_REVIEW_RETRYING_TITLE_WITH_RETRY = 'automated review found blocking issues - starting one auto-fix retry'
+const AUTOMATED_PR_REVIEW_HUMAN_NEEDED_TITLE = 'automated review still failing - human intervention required'
+const AUTOMATED_PR_REVIEW_RETRYING_NEXT_STEP = 'next step: daemon will attempt one automatic fix on the same branch.'
+const AUTOMATED_PR_REVIEW_HUMAN_NEEDED_NEXT_STEP = 'next step: stopping automation and leaving the worktree/branch for a human.'
 
 /**
  * Review a PR using the configured CLI agent to determine if it can be merged.
@@ -873,20 +878,29 @@ function extractAutomatedPrReviewAction(
 ): 'approved' | 'retrying' | 'human-needed' | null {
   if (metadata.action) return metadata.action
   if (metadata.approved || metadata.canMerge) return 'approved'
-  if (body.includes('## Automated review found blocking issues — starting one auto-fix retry')) {
-    return 'retrying'
-  }
-  if (body.includes('## Automated review still failing — human intervention required')) {
+  const normalizedBody = normalizeAutomatedPrReviewCommentBody(body)
+  if (
+    normalizedBody.includes(AUTOMATED_PR_REVIEW_HUMAN_NEEDED_TITLE)
+    || normalizedBody.includes(AUTOMATED_PR_REVIEW_HUMAN_NEEDED_NEXT_STEP)
+  ) {
     return 'human-needed'
   }
-  if (body.includes('Next step: daemon will attempt one automatic fix on the same branch.')) {
+  if (
+    normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_TITLE_WITH_RETRY)
+    || normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_TITLE)
+    || normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_NEXT_STEP)
+  ) {
     return 'retrying'
-  }
-  if (body.includes('Next step: stopping automation and leaving the worktree/branch for a human.')) {
-    return 'human-needed'
   }
 
   return null
+}
+
+function normalizeAutomatedPrReviewCommentBody(body: string): string {
+  return body
+    .replace(/[—–]/g, '-')
+    .replace(/\r\n/g, '\n')
+    .toLowerCase()
 }
 
 function buildIssueContractFingerprint(body: string | null | undefined): string | null {
