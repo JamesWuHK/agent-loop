@@ -117,6 +117,32 @@ describe('cli-agent', () => {
     ])
   })
 
+  test('keeps the same explicit reasoning effort across write-enabled, read-only, and isolated Codex config', () => {
+    const reasoningEffort = 'low'
+    const writeEnabledCommand = buildAgentCommand(
+      'codex',
+      'codex',
+      '/tmp/write-last-message.txt',
+      true,
+      reasoningEffort,
+    )
+    const readOnlyCommand = buildAgentCommand(
+      'codex',
+      'codex',
+      '/tmp/review-last-message.txt',
+      false,
+      reasoningEffort,
+    )
+    const isolatedConfig = buildIsolatedCodexConfig('http://127.0.0.1:18777/v1', reasoningEffort)
+
+    expect(writeEnabledCommand).toContain('model_reasoning_effort="low"')
+    expect(writeEnabledCommand).toContain('--dangerously-bypass-approvals-and-sandbox')
+    expect(readOnlyCommand).toContain('model_reasoning_effort="low"')
+    expect(readOnlyCommand).toContain('--sandbox')
+    expect(readOnlyCommand).toContain('read-only')
+    expect(isolatedConfig).toContain('model_reasoning_effort = "low"')
+  })
+
   test('prefers environment auth for isolated Codex runtime', () => {
     expect(resolveCodexAuthJson(
       { OPENAI_API_KEY: 'sk-proxy' },
