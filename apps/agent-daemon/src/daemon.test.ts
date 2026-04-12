@@ -2125,6 +2125,17 @@ describe('daemon merge recovery helpers', () => {
       })
     })
 
+    test('keeps pending checks on the recoverable linked-issue path', () => {
+      expect(classifyLinkedIssueApprovedMergeOutcome({
+        merged: false,
+        message: 'PR checks not ready for merge: build-and-test is pending',
+        recoverable: true,
+      })).toEqual({
+        status: 'recoverable',
+        reason: 'PR checks not ready for merge: build-and-test is pending',
+      })
+    })
+
     test('routes failing checks to human-needed', () => {
       expect(classifyApprovedPrMergeChecksGate({
         state: 'fail',
@@ -2186,6 +2197,17 @@ describe('daemon merge recovery helpers', () => {
       })).toEqual({
         outcome: 'defer',
         recoverable: true,
+        reason: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
+      })
+    })
+
+    test('keeps checks lookup errors on the recoverable linked-issue path', () => {
+      expect(classifyLinkedIssueApprovedMergeOutcome({
+        merged: false,
+        message: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
+        recoverable: true,
+      })).toEqual({
+        status: 'recoverable',
         reason: 'Merge gate could not confirm PR checks: gh pr checks exited with code 4',
       })
     })

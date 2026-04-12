@@ -5135,6 +5135,13 @@ export function classifyApprovedPrMergeChecksGate(
 export function classifyLinkedIssueApprovedMergeOutcome(
   mergeResult: ApprovedPrMergeAttemptResult,
 ): { status: 'failed' | 'recoverable'; reason: string } {
+  if (mergeResult.recoverable) {
+    return {
+      status: 'recoverable',
+      reason: mergeResult.message,
+    }
+  }
+
   if (mergeResult.checksBlocked) {
     return {
       status: 'failed',
