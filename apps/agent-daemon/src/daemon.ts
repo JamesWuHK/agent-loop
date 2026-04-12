@@ -3388,6 +3388,20 @@ export class AgentDaemon {
         this.config,
       )
 
+      if (mergeResult.sha) {
+        const defaultSync = await waitForDefaultBranchToContainCommit(
+          worktreePath,
+          this.config.git.defaultBranch,
+          mergeResult.sha,
+          this.logger,
+        )
+        if (!defaultSync.success) {
+          this.logger.warn(
+            `[daemon] merged PR #${pr.prNumber} but origin/${this.config.git.defaultBranch} did not converge locally before continuing: ${defaultSync.message}`,
+          )
+        }
+      }
+
       this.logger.log(`[daemon] issue #${issue.number} done! PR: #${pr.prNumber}`)
       recordIssueProcessed('done')
       recordPrCreated()
@@ -5541,6 +5555,69 @@ async function restoreManagedWorktreeState(
     if (!benign) {
       logger.warn(`[worktree] could not abort ${command.label} in ${worktreePath}: ${(stderr || stdout).trim()}`)
     }
+  }
+}
+
+const DEFAULT_BRANCH_MERGE_SYNC_RETRY_ATTEMPTS = 10
+const DEFAULT_BRANCH_MERGE_SYNC_RETRY_DELAY_MS = 2_000
+
+export async function waitForDefaultBranchToContainCommit(
+  worktreePath: string,
+  defaultBranch: string,
+  requiredCommitSha: string,
+  logger = console,
+  options: {
+    maxAttempts?: number
+    delayMs?: number
+  } = {},
+): Promise<
+  | { success: true; observedSha: string }
+  | { success: false; message: string }
+> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_BRANCH_MERGE_SYNC_RETRY_ATTEMPTS)
+  const delayMs = Math.max(0, options.delayMs ?? DEFAULT_BRANCH_MERGE_SYNC_RETRY_DELAY_MS)
+  let lastObservedSha = ''
+  let lastError = ''
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const fetchResult = await runGitInWorktree(worktreePath, ['fetch', 'origin', defaultBranch])
+    if (fetchResult.exitCode !== 0) {
+      lastError = fetchResult.stderr || fetchResult.stdout || `git fetch origin ${defaultBranch} failed`
+    } else {
+      const baseResult = await runGitInWorktree(worktreePath, ['rev-parse', `origin/${defaultBranch}`])
+      if (baseResult.exitCode === 0) {
+        lastObservedSha = baseResult.stdout.trim()
+        const containsRequiredCommit =
+          lastObservedSha === requiredCommitSha
+          || (await runGitInWorktree(
+            worktreePath,
+            ['merge-base', '--is-ancestor', requiredCommitSha, `origin/${defaultBranch}`],
+          )).exitCode === 0
+        if (containsRequiredCommit) {
+          if (attempt > 1) {
+            logger.log(
+              `[worktree] observed origin/${defaultBranch} catch up to ${lastObservedSha.slice(0, 7)} after merge ${requiredCommitSha.slice(0, 7)} in ${worktreePath} on attempt ${attempt}`,
+            )
+          }
+          return {
+            success: true,
+            observedSha: lastObservedSha,
+          }
+        }
+      } else {
+        lastError = baseResult.stderr || baseResult.stdout || `git rev-parse origin/${defaultBranch} failed`
+      }
+    }
+
+    if (attempt < maxAttempts) {
+      await Bun.sleep(delayMs)
+    }
+  }
+
+  return {
+    success: false,
+    message: lastError
+      || `origin/${defaultBranch} did not reach merged commit ${requiredCommitSha.slice(0, 7)} after ${maxAttempts} attempts (last observed ${lastObservedSha.slice(0, 7) || 'unknown'})`,
   }
 }
 

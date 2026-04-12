@@ -51,6 +51,7 @@ import {
   shouldCompleteIssueRecoveryOnRemoteClose,
   shouldRequeueFailedIssue,
   shouldResumeManagedIssue,
+  waitForDefaultBranchToContainCommit,
 } from './daemon'
 import { ISSUE_LABELS, PR_REVIEW_LABELS } from '@agent/shared'
 import {
@@ -2586,6 +2587,64 @@ describe('daemon merge recovery helpers', () => {
       expect(
         Number.parseInt((await Bun.$`git -C ${repoDir} rev-list --count HEAD..origin/main`.quiet().text()).trim(), 10),
       ).toBe(0)
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  test('waits for the default branch to catch up to a freshly merged commit before continuing', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'daemon-default-branch-catchup-'))
+    const remoteDir = join(tempDir, 'remote.git')
+    const repoDir = join(tempDir, 'repo')
+    const peerDir = join(tempDir, 'peer')
+
+    try {
+      mkdirSync(remoteDir, { recursive: true })
+      mkdirSync(repoDir, { recursive: true })
+
+      await Bun.$`git -C ${remoteDir} init --bare`.quiet()
+      await Bun.$`git -C ${repoDir} init -b main`.quiet()
+      await Bun.$`git -C ${repoDir} config user.name test`.quiet()
+      await Bun.$`git -C ${repoDir} config user.email test@example.com`.quiet()
+      await Bun.$`git -C ${repoDir} remote add origin ${remoteDir}`.quiet()
+
+      writeFileSync(join(repoDir, 'base.txt'), 'base\n', 'utf-8')
+      await Bun.$`git -C ${repoDir} add base.txt`.quiet()
+      await Bun.$`git -C ${repoDir} commit -m "base"`.quiet()
+      await Bun.$`git -C ${repoDir} push -u origin main`.quiet()
+
+      await Bun.$`git clone ${remoteDir} ${peerDir}`.quiet()
+      await Bun.$`git -C ${peerDir} config user.name test`.quiet()
+      await Bun.$`git -C ${peerDir} config user.email test@example.com`.quiet()
+      await Bun.$`git -C ${peerDir} checkout main`.quiet()
+
+      writeFileSync(join(peerDir, 'base.txt'), 'base\nmerged-update\n', 'utf-8')
+      await Bun.$`git -C ${peerDir} add base.txt`.quiet()
+      await Bun.$`git -C ${peerDir} commit -m "merged update"`.quiet()
+      const mergedSha = (await Bun.$`git -C ${peerDir} rev-parse HEAD`.quiet().text()).trim()
+
+      const delayedPush = (async () => {
+        await Bun.sleep(150)
+        await Bun.$`git -C ${peerDir} push origin main`.quiet()
+      })()
+
+      const result = await waitForDefaultBranchToContainCommit(
+        repoDir,
+        'main',
+        mergedSha,
+        console,
+        {
+          maxAttempts: 20,
+          delayMs: 50,
+        },
+      )
+      await delayedPush
+
+      expect(result).toEqual({
+        success: true,
+        observedSha: mergedSha,
+      })
+      expect((await Bun.$`git -C ${repoDir} rev-parse origin/main`.quiet().text()).trim()).toBe(mergedSha)
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
