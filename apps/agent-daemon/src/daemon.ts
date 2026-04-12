@@ -2149,19 +2149,18 @@ export class AgentDaemon {
         detached.worktreePath,
         this.config.git.defaultBranch,
       )
-      if (
-        shouldRefreshBlockedHumanNeededPr(
-          pr,
-          linkedIssue,
-          resumableHumanNeededReview,
-          worktreeBaseSyncState.behindDefault,
-          canRetryPrReviewRefresh(
-            priorComments,
-            worktreeBaseSyncState.headRefOid,
-            worktreeBaseSyncState.baseRefOid,
-          ),
-        )
-      ) {
+      const blockedRefreshRerun = shouldRefreshBlockedHumanNeededPr(
+        pr,
+        linkedIssue,
+        resumableHumanNeededReview,
+        worktreeBaseSyncState.behindDefault,
+        canRetryPrReviewRefresh(
+          priorComments,
+          worktreeBaseSyncState.headRefOid,
+          worktreeBaseSyncState.baseRefOid,
+        ),
+      )
+      if (blockedRefreshRerun) {
         this.logger.log(
           `[pr-review-subagent] refreshing blocked PR #${pr.number} onto origin/${this.config.git.defaultBranch} before rerunning automated review`,
         )
@@ -2294,7 +2293,9 @@ export class AgentDaemon {
           return
         }
 
-        if (firstReview.approved && firstReview.canMerge) {
+        const followup = classifyStandalonePrReviewFollowup(firstReview, { blockedRefreshRerun })
+
+        if (followup.nextReviewLabel === 'approved') {
           await commentOnPr(
             pr.number,
             buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid, linkedIssue?.body ?? null),
@@ -2327,6 +2328,28 @@ export class AgentDaemon {
           )
           await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
           this.logger.warn(`[pr-review-subagent] PR #${pr.number} rejected without auto-fix: could not infer issue number`)
+          return
+        }
+
+        if (!followup.shouldRunAutoFix) {
+          const finalReviewLabel: 'human-needed' = 'human-needed'
+          await commentOnPr(
+            pr.number,
+            buildPrReviewComment(
+              pr.number,
+              firstReview,
+              nextAttempt,
+              finalReviewLabel,
+              currentHeadRefOid,
+              linkedIssue?.body ?? null,
+            ),
+            this.config,
+          )
+          await setManagedPrReviewLabels(pr.number, finalReviewLabel, this.config)
+          if (followup.shouldMarkIssueFailed && issueNumber !== null) {
+            await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
+          }
+          this.logger.log(`[pr-review-subagent] PR #${pr.number} remains human-needed after blocked refresh rerun`)
           return
         }
 
@@ -5332,6 +5355,39 @@ export function shouldRefreshBlockedHumanNeededPr(
 
   const labels = new Set(pr.labels)
   return labels.has(PR_REVIEW_LABELS.HUMAN_NEEDED) && !canResumeHumanNeededReview
+}
+
+export function classifyStandalonePrReviewFollowup(
+  review: Pick<PrReviewResult, 'approved' | 'canMerge'>,
+  options: {
+    blockedRefreshRerun: boolean
+  },
+): {
+  nextReviewLabel: 'approved' | 'retry' | 'human-needed'
+  shouldRunAutoFix: boolean
+  shouldMarkIssueFailed: boolean
+} {
+  if (review.approved && review.canMerge) {
+    return {
+      nextReviewLabel: 'approved',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    }
+  }
+
+  if (options.blockedRefreshRerun) {
+    return {
+      nextReviewLabel: 'human-needed',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: true,
+    }
+  }
+
+  return {
+    nextReviewLabel: 'retry',
+    shouldRunAutoFix: true,
+    shouldMarkIssueFailed: false,
+  }
 }
 
 function extractIssuePreflightFailureComment(body: string): IssuePreflightFailureCommentPayload | null {
