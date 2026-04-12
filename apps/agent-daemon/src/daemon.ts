@@ -121,6 +121,17 @@ export interface StopDaemonOptions {
   reason?: string
 }
 
+export async function runRemoteUpgradeAnnouncementSafely(
+  check: () => Promise<void>,
+  logger: { warn(message: string): void },
+): Promise<void> {
+  try {
+    await check()
+  } catch (error) {
+    logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
+  }
+}
+
 export const HEALTH_PATH = '/health'
 export const WAKE_PATH = '/wake'
 export const DEFAULT_HEALTH_SERVER_PORT = 9310
@@ -775,9 +786,10 @@ export class AgentDaemon {
         return
       }
 
-      void this.maybeProcessRemoteUpgradeAnnouncement().catch((error) => {
-        this.logger.warn(`[daemon] failed to process remote upgrade announcement: ${formatDaemonError(error)}`)
-      })
+      void runRemoteUpgradeAnnouncementSafely(
+        () => this.maybeProcessRemoteUpgradeAnnouncement(),
+        this.logger,
+      )
     }, intervalMs)
   }
 
@@ -868,7 +880,10 @@ export class AgentDaemon {
     })
 
     void this.maybeRefreshAgentLoopUpgradeStatus(true)
-    void this.maybeProcessRemoteUpgradeAnnouncement()
+    void runRemoteUpgradeAnnouncementSafely(
+      () => this.maybeProcessRemoteUpgradeAnnouncement(),
+      this.logger,
+    )
 
     // Run first recovery + poll immediately; subsequent polls are self-scheduled
     await this.runPollCycleSafely()
