@@ -2212,6 +2212,37 @@ describe('daemon merge recovery helpers', () => {
       })
     })
 
+    test('treats thrown check lookups as recoverable deferrals without calling merge', async () => {
+      const daemon = createTestDaemon()
+      let mergeCalls = 0
+
+      ;(daemon as any).getPullRequestChecksStatus = async () => {
+        throw new Error('gh pr checks timed out')
+      }
+      ;(daemon as any).mergeManagedPullRequest = async () => {
+        mergeCalls += 1
+        return { merged: true, message: 'unexpected merge' }
+      }
+
+      const mergeResult = await (daemon as any).attemptApprovedPrMergeWithRecovery(
+        110,
+        'https://github.com/JamesWuHK/agent-loop/pull/110',
+        'agent/61/codex-dev',
+        '/tmp/worktrees/issue-61-codex-dev',
+      )
+
+      expect(mergeCalls).toBe(0)
+      expect(mergeResult).toMatchObject({
+        merged: false,
+        message: 'Merge gate could not confirm PR checks: gh pr checks timed out',
+        recoverable: true,
+      })
+      expect(classifyLinkedIssueApprovedMergeOutcome(mergeResult)).toEqual({
+        status: 'recoverable',
+        reason: 'Merge gate could not confirm PR checks: gh pr checks timed out',
+      })
+    })
+
     test('keeps true merge failures on the failed linked-issue path', () => {
       expect(classifyLinkedIssueApprovedMergeOutcome({
         merged: false,

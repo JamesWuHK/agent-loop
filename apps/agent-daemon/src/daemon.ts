@@ -2966,7 +2966,15 @@ export class AgentDaemon {
   private async runApprovedPrMergeChecksGate(
     prNumber: number,
   ): Promise<ApprovedPrMergeChecksGateResult> {
-    const checksStatus = await this.getPullRequestChecksStatus(prNumber)
+    let checksStatus: PullRequestChecksStatus
+    try {
+      checksStatus = await this.getPullRequestChecksStatus(prNumber)
+    } catch (error) {
+      checksStatus = {
+        state: 'error',
+        summary: formatDaemonError(error),
+      }
+    }
     const gate = classifyApprovedPrMergeChecksGate(checksStatus)
 
     if (gate.outcome === 'human-needed' && gate.reason) {
