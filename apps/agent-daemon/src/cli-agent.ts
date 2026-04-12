@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import type { AgentConfig, AgentExitCode, CodexReasoningEffort } from '@agent/shared'
+import type { AgentConfig, AgentExitCode } from '@agent/shared'
 
 export type AgentKind = AgentConfig['agent']['primary']
 
@@ -73,7 +73,6 @@ export function buildAgentCommand(
   binaryPath: string,
   responseFilePath: string,
   allowWrites: boolean,
-  codexReasoningEffort: CodexReasoningEffort = 'high',
 ): string[] {
   if (agent === 'claude') {
     return [binaryPath, '--print', '--permission-mode', 'bypassPermissions']
@@ -87,16 +86,13 @@ export function buildAgentCommand(
     '--output-last-message',
     responseFilePath,
     '-c',
-    `model_reasoning_effort="${codexReasoningEffort}"`,
+    'model_reasoning_effort="medium"',
     ...(allowWrites ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--sandbox', 'read-only']),
     '-',
   ]
 }
 
-export function buildIsolatedCodexConfig(
-  baseUrl?: string | null,
-  codexReasoningEffort: CodexReasoningEffort = 'high',
-): string {
+export function buildIsolatedCodexConfig(baseUrl?: string | null): string {
   const providerLines = [
     '[model_providers.custom]',
     'name = "custom"',
@@ -107,7 +103,7 @@ export function buildIsolatedCodexConfig(
 
   return `model_provider = "custom"
 model = "gpt-5.4"
-model_reasoning_effort = "${codexReasoningEffort}"
+model_reasoning_effort = "medium"
 network_access = "enabled"
 disable_response_storage = true
 
@@ -130,7 +126,6 @@ export function resolveCodexAuthJson(
 export function createIsolatedCodexHome(
   tempDir: string,
   env: Record<string, string>,
-  codexReasoningEffort: CodexReasoningEffort = 'high',
   fallbackAuthJson: string | null = readLocalCodexAuthJson(),
 ): { homeDir: string; codexHomeDir: string } {
   const homeDir = join(tempDir, 'home')
@@ -139,7 +134,7 @@ export function createIsolatedCodexHome(
   mkdirSync(codexHomeDir, { recursive: true })
   writeFileSync(
     join(codexHomeDir, 'config.toml'),
-    buildIsolatedCodexConfig(env.OPENAI_BASE_URL ?? null, codexReasoningEffort),
+    buildIsolatedCodexConfig(env.OPENAI_BASE_URL ?? null),
     'utf-8',
   )
 
@@ -205,7 +200,6 @@ async function runSingleAgent(
     binaryPath,
     responseFilePath,
     options.allowWrites ?? true,
-    options.config.agent.codexReasoningEffort ?? 'high',
   )
 
   let proc: ReturnType<typeof Bun.spawn> | null = null
@@ -631,11 +625,7 @@ function buildRuntimeEnv(
     return cleanEnv
   }
 
-  const { homeDir, codexHomeDir } = createIsolatedCodexHome(
-    tempDir,
-    cleanEnv,
-    config.agent.codexReasoningEffort ?? 'high',
-  )
+  const { homeDir, codexHomeDir } = createIsolatedCodexHome(tempDir, cleanEnv)
 
   delete cleanEnv.OPENAI_BASE_URL
   delete cleanEnv.OPENAI_API_BASE

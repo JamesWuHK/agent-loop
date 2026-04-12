@@ -780,12 +780,6 @@ export function buildIssueRecoveryPrompt(
   defaultBranch = 'main',
 ): string {
   const projectGuidance = getProjectPromptGuidance(project, 'recovery')
-  const remoteSyncGuidance = existingPr
-    ? `2. Sync your local branch with the remote PR branch before doing anything else. Prefer:
-   - \`git fetch origin ${existingPr.branch}\`
-   - \`git rebase origin/${existingPr.branch}\`
-   Resolve any rebase conflicts instead of ignoring them.`
-    : `2. There is no existing PR branch to sync from. Do not run \`git rebase origin/<current-branch>\`, \`git pull --rebase\`, or similar self-sync commands against this managed branch unless you have first verified they are required for the issue itself. Start from the branch snapshot the daemon already prepared for you.`
   const blockingReasonsSection = recentBlockingReasons.length > 0
     ? `Latest automated blockers to fix first:
 ${recentBlockingReasons.map((reason, index) => `${index + 1}. ${reason}`).join('\n')}
@@ -804,7 +798,10 @@ ${issueBody || '(no description)'}
 
 Your job:
 1. Inspect the current branch state and existing partial implementation.
-${remoteSyncGuidance}
+2. If there is an existing PR branch, sync your local branch with the remote PR branch before doing anything else. Prefer:
+   - \`git fetch origin ${existingPr?.branch ?? 'your-branch'}\`
+   - \`git rebase origin/${existingPr?.branch ?? 'your-branch'}\`
+   Resolve any rebase conflicts instead of ignoring them.
 3. Treat the latest blocking review feedback as input, but verify it against the issue scope before changing code.
 4. If a blocker conflicts with the issue's explicit constraints or asks for later-scope work, do not expand scope just to satisfy that blocker.
 5. Preserve the issue's explicit acceptance semantics. Do not "fix" review feedback by changing required behavior from the issue body or RED tests.

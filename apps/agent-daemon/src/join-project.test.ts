@@ -42,7 +42,6 @@ const baseResolvedConfig: AgentConfig = {
     fallback: 'claude',
     claudePath: 'claude',
     codexPath: 'codex',
-    codexReasoningEffort: 'high',
     timeoutMs: 1_800_000,
   },
   git: {
@@ -72,7 +71,6 @@ describe('join-project helpers', () => {
           fallback: 'claude',
           claudePath: 'claude',
           codexPath: 'codex',
-          codexReasoningEffort: 'high',
           timeoutMs: 90_000,
         },
       },

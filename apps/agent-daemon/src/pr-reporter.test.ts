@@ -58,7 +58,6 @@ const TEST_CONFIG: AgentConfig = {
     fallback: 'claude',
     claudePath: 'claude',
     codexPath: 'codex',
-    codexReasoningEffort: 'high',
     timeoutMs: 60_000,
   },
   git: {

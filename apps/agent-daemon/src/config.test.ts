@@ -41,7 +41,6 @@ const baseFileConfig: Partial<AgentConfig> = {
     fallback: 'codex',
     claudePath: 'claude-home',
     codexPath: 'codex-home',
-    codexReasoningEffort: 'high',
     timeoutMs: 90_000,
   },
   git: {
@@ -129,7 +128,6 @@ describe('buildConfig', () => {
     ])
     expect(config.project.maxConcurrency).toBeUndefined()
     expect(config.agent.primary).toBe('claude')
-    expect(config.agent.codexReasoningEffort).toBe('high')
     expect(config.git.defaultBranch).toBe('master')
     expect(config.requestedConcurrency).toBe(1)
     expect(config.concurrency).toBe(1)
@@ -188,71 +186,6 @@ describe('buildConfig', () => {
 
     expect(config.agent.primary).toBe('codex')
     expect(config.agent.fallback).toBeNull()
-  })
-
-  test('defaults Codex reasoning effort to high when neither home nor repo-local config sets it', () => {
-    const fileConfig = structuredClone(baseFileConfig) as Partial<AgentConfig>
-    delete (fileConfig.agent as Partial<AgentConfig['agent']>).codexReasoningEffort
-
-    const config = buildConfig(
-      {},
-      {
-        fileConfig,
-        repoConfig: {},
-        env: {},
-        homeDir: '/tmp/agent-loop-home',
-      },
-    )
-
-    expect(config.agent.codexReasoningEffort).toBe('high')
-  })
-
-  test('lets repo-local Codex reasoning effort override the home config value', () => {
-    const config = buildConfig(
-      {},
-      {
-        fileConfig: baseFileConfig,
-        repoConfig: {
-          agent: {
-            codexReasoningEffort: 'high',
-          },
-        },
-        env: {},
-        homeDir: '/tmp/agent-loop-home',
-      },
-    )
-
-    expect(config.agent.codexReasoningEffort).toBe('high')
-    expect(config.agent.primary).toBe('claude')
-    expect(config.agent.fallback).toBe('codex')
-  })
-
-  test('ignores unsupported Codex reasoning effort values from config sources', () => {
-    const config = buildConfig(
-      {},
-      {
-        fileConfig: {
-          ...baseFileConfig,
-          agent: {
-            primary: 'claude',
-            fallback: 'codex',
-            claudePath: 'claude-home',
-            codexPath: 'codex-home',
-            codexReasoningEffort: 'unsupported' as unknown as AgentConfig['agent']['codexReasoningEffort'],
-            timeoutMs: 90_000,
-          },
-        },
-        repoConfig: {
-          agent: {
-            codexReasoningEffort: 'also-unsupported' as never,
-          },
-        },
-        env: {},
-        homeDir: '/tmp/agent-loop-home',
-      },
-    )
-
-    expect(config.agent.codexReasoningEffort).toBe('high')
   })
 
   test('lets CLI override the idle backstop poll interval but never below the active poll interval', () => {

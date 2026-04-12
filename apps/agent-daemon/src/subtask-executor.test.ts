@@ -48,7 +48,6 @@ const TEST_CONFIG: AgentConfig = {
     fallback: null,
     claudePath: 'claude',
     codexPath: 'codex',
-    codexReasoningEffort: 'high',
     timeoutMs: 60_000,
   },
   git: {
@@ -223,9 +222,6 @@ describe('buildIssueRecoveryPrompt', () => {
     expect(prompt).toContain('prefer restoring it toward `origin/master`')
     expect(prompt).toContain('Run `git log origin/master..HEAD --oneline`')
     expect(prompt).toContain('Run `git diff --stat origin/master...HEAD`')
-    expect(prompt).toContain('There is no existing PR branch to sync from.')
-    expect(prompt).toContain('Do not run `git rebase origin/<current-branch>`')
-    expect(prompt).not.toContain('your-branch')
     expect(prompt).not.toContain('origin/main')
   })
 })

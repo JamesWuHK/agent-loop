@@ -59,7 +59,6 @@ interface AutomatedPrReviewMetadata {
   attempt: number
   approved: boolean
   canMerge: boolean
-  action?: 'approved' | 'retrying' | 'human-needed'
   headRefOid?: string
   issueContractFingerprint?: string
 }
@@ -73,7 +72,6 @@ export interface AutomatedPrReviewCommentLike {
 export interface LatestAutomatedPrReviewState {
   metadata: AutomatedPrReviewMetadata
   feedback: StructuredReviewFeedbackPayload | null
-  action: 'approved' | 'retrying' | 'human-needed' | null
   commentCreatedAt: string | null
   commentUpdatedAt: string | null
 }
@@ -112,11 +110,6 @@ const REVIEW_DEPENDENCY_DIRNAME = 'node_modules'
 const REVIEW_DEPENDENCY_SCAN_DEPTH = 3
 const MAX_REVIEW_OUTPUT_ATTEMPTS = 2
 const DETACHED_REVIEW_EXCLUDE_MARKER = '# agent-loop detached review dependency symlinks'
-const AUTOMATED_PR_REVIEW_RETRYING_TITLE = 'automated review found blocking issues'
-const AUTOMATED_PR_REVIEW_RETRYING_TITLE_WITH_RETRY = 'automated review found blocking issues - starting one auto-fix retry'
-const AUTOMATED_PR_REVIEW_HUMAN_NEEDED_TITLE = 'automated review still failing - human intervention required'
-const AUTOMATED_PR_REVIEW_RETRYING_NEXT_STEP = 'next step: daemon will attempt one automatic fix on the same branch.'
-const AUTOMATED_PR_REVIEW_HUMAN_NEEDED_NEXT_STEP = 'next step: stopping automation and leaving the worktree/branch for a human.'
 
 /**
  * Review a PR using the configured CLI agent to determine if it can be merged.
@@ -444,7 +437,6 @@ export function buildPrReviewComment(
     attempt,
     approved: review.approved,
     canMerge: review.canMerge,
-    action,
     ...(headRefOid ? { headRefOid } : {}),
     ...(issueContractFingerprint ? { issueContractFingerprint } : {}),
   }
@@ -512,14 +504,12 @@ export function extractLatestAutomatedPrReviewState(
   comments: AutomatedPrReviewCommentLike[],
 ): LatestAutomatedPrReviewState | null {
   for (let index = comments.length - 1; index >= 0; index--) {
-    const body = comments[index]?.body ?? ''
-    const metadata = extractAutomatedPrReviewMetadata(body)
+    const metadata = extractAutomatedPrReviewMetadata(comments[index]?.body ?? '')
     if (!metadata) continue
 
     return {
       metadata,
-      feedback: extractStructuredReviewFeedback(body),
-      action: extractAutomatedPrReviewAction(body, metadata),
+      feedback: extractStructuredReviewFeedback(comments[index]?.body ?? ''),
       commentCreatedAt: comments[index]?.createdAt ?? null,
       commentUpdatedAt: comments[index]?.updatedAt ?? comments[index]?.createdAt ?? null,
     }
@@ -569,8 +559,6 @@ export function canResumeAutomatedPrReview(
   if (!latest) return false
 
   return (
-    latest.action === 'retrying'
-    &&
     latest.metadata.approved === false
     && latest.metadata.canMerge === false
     && latest.feedback !== null
@@ -615,21 +603,11 @@ export function canResumeHumanNeededPrReview(
   currentHeadRefOid: string | null | undefined,
   issueBody: string | null | undefined,
 ): boolean {
-  const latest = extractLatestAutomatedPrReviewState(comments)
-  if (!latest) return false
-
-  const canResumeFromTerminalState = (
+  return (
     didLatestAutomatedPrReviewExecutionFail(comments)
+    || canResumeAutomatedPrReview(comments, maxAttempt)
     || shouldRestartAutomatedPrReviewOnNewHead(comments, currentHeadRefOid)
     || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueBody)
-  )
-  if (latest.action === 'human-needed') {
-    return canResumeFromTerminalState
-  }
-
-  return (
-    canResumeFromTerminalState
-    || canResumeAutomatedPrReview(comments, maxAttempt)
   )
 }
 
@@ -658,7 +636,6 @@ export function getReusableAutomatedPrReviewFeedback(
   const latest = extractLatestAutomatedPrReviewState(comments)
   if (!latest) return null
   if (latest.feedback === null) return null
-  if (latest.action !== 'retrying') return null
   if (latest.metadata.approved || latest.metadata.canMerge) return null
   if (latest.metadata.attempt >= maxAttempt) return null
   if (!latest.metadata.headRefOid || latest.metadata.headRefOid !== currentHeadRefOid) return null
@@ -847,60 +824,22 @@ function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetada
       return null
     }
 
-    const action = parsed.action === 'approved' || parsed.action === 'retrying' || parsed.action === 'human-needed'
-      ? parsed.action
-      : undefined
-    const headRefOid = typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
-      ? parsed.headRefOid.trim()
-      : undefined
-    const issueContractFingerprint = typeof parsed.issueContractFingerprint === 'string'
-      && parsed.issueContractFingerprint.trim().length > 0
-      ? parsed.issueContractFingerprint.trim()
-      : undefined
-
     return {
       pr,
       attempt,
       approved: parsed.approved === true,
       canMerge: parsed.canMerge === true,
-      ...(action ? { action } : {}),
-      ...(headRefOid ? { headRefOid } : {}),
-      ...(issueContractFingerprint ? { issueContractFingerprint } : {}),
+      headRefOid: typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
+        ? parsed.headRefOid.trim()
+        : undefined,
+      issueContractFingerprint: typeof parsed.issueContractFingerprint === 'string'
+        && parsed.issueContractFingerprint.trim().length > 0
+        ? parsed.issueContractFingerprint.trim()
+        : undefined,
     }
   } catch {
     return null
   }
-}
-
-function extractAutomatedPrReviewAction(
-  body: string,
-  metadata: AutomatedPrReviewMetadata,
-): 'approved' | 'retrying' | 'human-needed' | null {
-  if (metadata.action) return metadata.action
-  if (metadata.approved || metadata.canMerge) return 'approved'
-  const normalizedBody = normalizeAutomatedPrReviewCommentBody(body)
-  if (
-    normalizedBody.includes(AUTOMATED_PR_REVIEW_HUMAN_NEEDED_TITLE)
-    || normalizedBody.includes(AUTOMATED_PR_REVIEW_HUMAN_NEEDED_NEXT_STEP)
-  ) {
-    return 'human-needed'
-  }
-  if (
-    normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_TITLE_WITH_RETRY)
-    || normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_TITLE)
-    || normalizedBody.includes(AUTOMATED_PR_REVIEW_RETRYING_NEXT_STEP)
-  ) {
-    return 'retrying'
-  }
-
-  return null
-}
-
-function normalizeAutomatedPrReviewCommentBody(body: string): string {
-  return body
-    .replace(/[—–]/g, '-')
-    .replace(/\r\n/g, '\n')
-    .toLowerCase()
 }
 
 function buildIssueContractFingerprint(body: string | null | undefined): string | null {

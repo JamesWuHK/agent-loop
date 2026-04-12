@@ -193,7 +193,6 @@ describe('audit-issue-contracts', () => {
           fallback: 'claude',
           claudePath: 'claude',
           codexPath: 'codex',
-          codexReasoningEffort: 'high',
           timeoutMs: 300_000,
         },
         git: {
