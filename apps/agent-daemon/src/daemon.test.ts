@@ -1799,8 +1799,8 @@ describe('daemon merge recovery helpers', () => {
     )).toBe(false)
   })
 
-  test('clears resumable failure cooldown tracking only for terminal finalize failures', () => {
-    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(true)
+  test('preserves resumable failure cooldown tracking after finalize failures', () => {
+    expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
   })
