@@ -152,7 +152,13 @@ export interface AgentLoopBuildMetadata {
   revision: string | null
 }
 
-export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+export const CODEX_REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+] as const
+
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number]
 
 export type AgentLoopUpgradeStatusKind =
   | 'disabled'
@@ -313,7 +319,7 @@ export interface AgentConfig {
     claudePath: string
     codexPath: string
     codexBaseUrl?: string
-    codexReasoningEffort?: CodexReasoningEffort
+    codexReasoningEffort: CodexReasoningEffort
     // Agent 执行超时（毫秒）
     timeoutMs: number
   }

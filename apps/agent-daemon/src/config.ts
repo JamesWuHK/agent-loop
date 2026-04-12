@@ -18,6 +18,11 @@ const CONFIG_DIR = resolve(homedir(), '.agent-loop')
 const CONFIG_PATH = resolve(CONFIG_DIR, 'config.json')
 const REPO_CONFIG_DIR = '.agent-loop'
 const REPO_CONFIG_FILE = 'project.json'
+const SUPPORTED_CODEX_REASONING_EFFORTS: readonly CodexReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+]
 
 export interface RepoLocalConfig {
   project?: {
@@ -215,8 +220,8 @@ export function buildConfig(
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
       codexReasoningEffort:
-        repoConfig.agent?.codexReasoningEffort
-        ?? fileConfig.agent?.codexReasoningEffort
+        normalizeCodexReasoningEffort(repoConfig.agent?.codexReasoningEffort)
+        ?? normalizeCodexReasoningEffort(fileConfig.agent?.codexReasoningEffort)
         ?? 'high',
       codexBaseUrl:
         env.OPENAI_BASE_URL ??
@@ -429,6 +434,16 @@ function normalizeNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+function normalizeCodexReasoningEffort(value: unknown): CodexReasoningEffort | null {
+  if (typeof value !== 'string') return null
+
+  return isCodexReasoningEffort(value) ? value : null
+}
+
+function isCodexReasoningEffort(value: string): value is CodexReasoningEffort {
+  return (SUPPORTED_CODEX_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
 export { CONFIG_DIR, CONFIG_PATH, REPO_CONFIG_DIR, REPO_CONFIG_FILE }
