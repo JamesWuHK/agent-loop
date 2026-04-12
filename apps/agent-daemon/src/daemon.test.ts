@@ -31,6 +31,7 @@ import {
   shouldDeferResumableIssueForActiveLinkedPrTask,
   shouldDeferResumableIssueForActiveLinkedPrLease,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
+  shouldRegisterFailedIssueResumeAfterFinalize,
   classifyApprovedPrMergeChecksGate,
   classifyStandalonePrReviewFollowup,
   classifyLinkedIssueApprovedMergeOutcome,
@@ -1803,6 +1804,12 @@ describe('daemon merge recovery helpers', () => {
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('failed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('completed')).toBe(false)
     expect(shouldClearFailedIssueResumeTrackingAfterFinalize('recoverable')).toBe(false)
+  })
+
+  test('registers failed issue resume attempts after finalize failures only', () => {
+    expect(shouldRegisterFailedIssueResumeAfterFinalize('failed')).toBe(true)
+    expect(shouldRegisterFailedIssueResumeAfterFinalize('completed')).toBe(false)
+    expect(shouldRegisterFailedIssueResumeAfterFinalize('recoverable')).toBe(false)
   })
 
   test('resets linked PR labels back to retry when issue recovery resumes', () => {
