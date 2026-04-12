@@ -84,12 +84,43 @@ describe('buildRepoAuthoringContext', () => {
     })
 
     expect(context.candidateValidationCommands).toEqual([
-      'bun run --cwd apps/web/src/pages test apps/web/src/pages/LoginPage.test.tsx',
+      'bun run --cwd apps/web/src/pages test LoginPage.test.tsx',
       'bun run lint',
       'bun run typecheck',
       'bun test',
       'bun test packages/shared/src/index.test.ts',
     ])
+  })
+
+  test('preserves executable relative test paths after normalizing explicit cwd', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-loop-authoring-cwd-'))
+    mkdirSync(join(root, 'apps/web/src/pages'), { recursive: true })
+
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      name: 'fixture-repo',
+      workspaces: ['apps/*'],
+    }))
+    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({
+      name: 'web',
+      scripts: {
+        test: 'bun run --cwd src/pages test LoginPage.test.tsx',
+      },
+    }))
+    writeFileSync(join(root, 'apps/web/src/pages/LoginPage.test.tsx'), 'export {}\n')
+
+    const context = await buildRepoAuthoringContext({
+      repoRoot: root,
+      issueText: '修复 LoginPage 测试',
+      rootPackageJsonPath: 'package.json',
+      workspacePackageJsonPaths: ['apps/web/package.json'],
+    })
+
+    expect(context.candidateValidationCommands).toContain(
+      'bun run --cwd apps/web/src/pages test LoginPage.test.tsx',
+    )
+    expect(context.candidateValidationCommands).not.toContain(
+      'bun run --cwd apps/web/src/pages test apps/web/src/pages/LoginPage.test.tsx',
+    )
   })
 
   test('keeps multi-step root typecheck commands repo-relative and preserves workspace cwd context', async () => {

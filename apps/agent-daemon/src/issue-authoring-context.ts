@@ -119,6 +119,7 @@ function normalizeValidationCommand(
   let hasExplicitCwd = false
   let hasResolvedPathToken = false
   let segmentChangedShellCwd = false
+  let preserveRelativePathsFromCommandCwd = false
 
   for (let index = 0; index < tokens.length; index += 1) {
     const token = stripWrappingQuotes(tokens[index] ?? '')
@@ -129,6 +130,7 @@ function normalizeValidationCommand(
     if (SHELL_COMMAND_BOUNDARY_TOKENS.has(token)) {
       normalizedTokens.push(token)
       commandCwd = segmentChangedShellCwd ? commandCwd : packageRoot
+      preserveRelativePathsFromCommandCwd = segmentChangedShellCwd
       segmentChangedShellCwd = false
       continue
     }
@@ -142,6 +144,7 @@ function normalizeValidationCommand(
 
       hasExplicitCwd = true
       commandCwd = resolvedCwd
+      preserveRelativePathsFromCommandCwd = true
       if (token === 'cd') {
         segmentChangedShellCwd = true
       }
@@ -158,7 +161,13 @@ function normalizeValidationCommand(
       }
 
       hasResolvedPathToken = true
-      normalizedTokens.push(toRepoRelativePath(repoRoot, resolvedPath) || '.')
+      const normalizedPath = preserveRelativePathsFromCommandCwd
+        ? toCommandRelativePath(commandCwd, resolvedPath)
+        : toRepoRelativePath(repoRoot, resolvedPath) || '.'
+      if (!normalizedPath) {
+        return null
+      }
+      normalizedTokens.push(normalizedPath)
       continue
     }
 
@@ -218,6 +227,19 @@ function resolveCommandPath(
   }
 
   return absolutePath
+}
+
+function toCommandRelativePath(commandCwd: string, absolutePath: string): string | null {
+  const relativePath = relative(commandCwd, absolutePath).split(sep).join('/')
+  if (relativePath === '') {
+    return '.'
+  }
+
+  if (relativePath === '..' || relativePath.startsWith('../')) {
+    return null
+  }
+
+  return relativePath
 }
 
 function collectCandidateAllowedFiles(
