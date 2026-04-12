@@ -2009,7 +2009,11 @@ describe('daemon merge recovery helpers', () => {
       canMerge: false,
     }, {
       blockedRefreshRerun: true,
-    })).toBe('human-needed')
+    })).toEqual({
+      nextReviewLabel: 'human-needed',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    })
   })
 
   test('still allows one retry auto-fix follow-up for ordinary standalone rejections', () => {
@@ -2018,7 +2022,11 @@ describe('daemon merge recovery helpers', () => {
       canMerge: false,
     }, {
       blockedRefreshRerun: false,
-    })).toBe('retry')
+    })).toEqual({
+      nextReviewLabel: 'retry',
+      shouldRunAutoFix: true,
+      shouldMarkIssueFailed: false,
+    })
   })
 
   test('keeps blocked refresh rerun approvals on the approved follow-up path', () => {
@@ -2027,7 +2035,11 @@ describe('daemon merge recovery helpers', () => {
       canMerge: true,
     }, {
       blockedRefreshRerun: true,
-    })).toBe('approved')
+    })).toEqual({
+      nextReviewLabel: 'approved',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    })
   })
 
   test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {

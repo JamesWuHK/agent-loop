@@ -2295,7 +2295,7 @@ export class AgentDaemon {
 
         const followup = classifyStandalonePrReviewFollowup(firstReview, { blockedRefreshRerun })
 
-        if (followup === 'approved') {
+        if (followup.nextReviewLabel === 'approved') {
           await commentOnPr(
             pr.number,
             buildPrReviewComment(pr.number, firstReview, nextAttempt, 'approved', currentHeadRefOid, linkedIssue?.body ?? null),
@@ -2331,13 +2331,24 @@ export class AgentDaemon {
           return
         }
 
-        if (followup === 'human-needed') {
+        if (!followup.shouldRunAutoFix) {
+          const finalReviewLabel: 'human-needed' = 'human-needed'
           await commentOnPr(
             pr.number,
-            buildPrReviewComment(pr.number, firstReview, nextAttempt, 'human-needed', currentHeadRefOid, linkedIssue?.body ?? null),
+            buildPrReviewComment(
+              pr.number,
+              firstReview,
+              nextAttempt,
+              finalReviewLabel,
+              currentHeadRefOid,
+              linkedIssue?.body ?? null,
+            ),
             this.config,
           )
-          await setManagedPrReviewLabels(pr.number, 'human-needed', this.config)
+          await setManagedPrReviewLabels(pr.number, finalReviewLabel, this.config)
+          if (followup.shouldMarkIssueFailed && issueNumber !== null) {
+            await this.transitionStandaloneIssue(issueNumber, ISSUE_LABELS.FAILED, firstReview.reason)
+          }
           this.logger.log(`[pr-review-subagent] PR #${pr.number} remains human-needed after blocked refresh rerun`)
           return
         }
@@ -5351,10 +5362,32 @@ export function classifyStandalonePrReviewFollowup(
   options: {
     blockedRefreshRerun: boolean
   },
-): 'approved' | 'retry' | 'human-needed' {
-  if (review.approved && review.canMerge) return 'approved'
-  if (options.blockedRefreshRerun) return 'human-needed'
-  return 'retry'
+): {
+  nextReviewLabel: 'approved' | 'retry' | 'human-needed'
+  shouldRunAutoFix: boolean
+  shouldMarkIssueFailed: boolean
+} {
+  if (review.approved && review.canMerge) {
+    return {
+      nextReviewLabel: 'approved',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    }
+  }
+
+  if (options.blockedRefreshRerun) {
+    return {
+      nextReviewLabel: 'human-needed',
+      shouldRunAutoFix: false,
+      shouldMarkIssueFailed: false,
+    }
+  }
+
+  return {
+    nextReviewLabel: 'retry',
+    shouldRunAutoFix: true,
+    shouldMarkIssueFailed: false,
+  }
 }
 
 function extractIssuePreflightFailureComment(body: string): IssuePreflightFailureCommentPayload | null {
