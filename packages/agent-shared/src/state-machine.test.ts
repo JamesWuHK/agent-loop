@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   buildEventComment,
   canTransition,
+  inspectClaimSettlementSnapshot,
   parseClaimEventComment,
   parseIssueDependencyMetadata,
   resolveActiveClaimMachine,
@@ -208,5 +209,54 @@ describe('resolveActiveClaimMachine', () => {
     ]
 
     expect(resolveActiveClaimMachine(comments)).toBe('codex-b')
+  })
+})
+
+describe('inspectClaimSettlementSnapshot', () => {
+  it('keeps a visible conflicting active owner blocked when our expected claim event never appears', () => {
+    const expectedClaimEvent = {
+      event: 'claimed' as const,
+      machine: 'codex-dev',
+      ts: '2026-04-04T08:31:00.000Z',
+      worktreeId: 'issue-171-codex-dev',
+    }
+    const staleHistoricalOwnerComments = [
+      {
+        body: buildEventComment({
+          event: 'claimed',
+          machine: 'codex-old',
+          ts: '2026-04-04T08:00:03.369Z',
+          worktreeId: 'issue-171-codex-old',
+        }),
+        createdAt: '2026-04-04T08:00:04Z',
+      },
+    ]
+
+    const snapshots = Array.from({ length: 4 }, () => (
+      inspectClaimSettlementSnapshot(staleHistoricalOwnerComments, expectedClaimEvent)
+    ))
+
+    expect(snapshots).toEqual([
+      {
+        activeMachine: 'codex-old',
+        expectedClaimObserved: false,
+        hasConflictingActiveOwner: true,
+      },
+      {
+        activeMachine: 'codex-old',
+        expectedClaimObserved: false,
+        hasConflictingActiveOwner: true,
+      },
+      {
+        activeMachine: 'codex-old',
+        expectedClaimObserved: false,
+        hasConflictingActiveOwner: true,
+      },
+      {
+        activeMachine: 'codex-old',
+        expectedClaimObserved: false,
+        hasConflictingActiveOwner: true,
+      },
+    ])
   })
 })

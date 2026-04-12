@@ -16,9 +16,9 @@ import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, PR_REVIEW_LABELS } from './types'
 import {
   inferState,
   buildEventComment,
-  parseClaimEventComment,
+  inspectClaimSettlementSnapshot,
   parseIssueDependencyMetadata,
-  resolveActiveClaimMachine,
+  parseClaimEventComment,
 } from './state-machine'
 import { parseIssueContract } from './issue-contract'
 import { validateIssueContract } from './issue-contract-validator'
@@ -1990,14 +1990,24 @@ async function settleActiveClaimMachine(
   config: AgentConfig,
   expectedClaimEvent?: ClaimEvent,
 ): Promise<string | null> {
+  let lastConflictingMachine: string | null = null
+
   for (let attempt = 1; attempt <= CLAIM_OWNERSHIP_SETTLE_ATTEMPTS; attempt++) {
     const comments = await listIssueComments(issueNumber, config)
-    const activeMachine = resolveActiveClaimMachine(comments)
-    if (
-      activeMachine !== null
-      && (!expectedClaimEvent || hasObservedClaimEvent(comments, expectedClaimEvent))
-    ) {
-      return activeMachine
+    const snapshot = inspectClaimSettlementSnapshot(comments, expectedClaimEvent)
+
+    if (snapshot.activeMachine !== null) {
+      if (
+        snapshot.expectedClaimObserved
+        || !expectedClaimEvent
+        || snapshot.activeMachine === expectedClaimEvent.machine
+      ) {
+        return snapshot.activeMachine
+      }
+    }
+
+    if (snapshot.hasConflictingActiveOwner) {
+      lastConflictingMachine = snapshot.activeMachine
     }
 
     if (attempt < CLAIM_OWNERSHIP_SETTLE_ATTEMPTS) {
@@ -2005,20 +2015,7 @@ async function settleActiveClaimMachine(
     }
   }
 
-  return null
-}
-
-function hasObservedClaimEvent(
-  comments: Array<{ body: string }>,
-  expectedClaimEvent: ClaimEvent,
-): boolean {
-  return comments.some((comment) => {
-    const event = parseClaimEventComment(comment.body)
-    return event?.event === expectedClaimEvent.event
-      && event.machine === expectedClaimEvent.machine
-      && event.ts === expectedClaimEvent.ts
-      && event.worktreeId === expectedClaimEvent.worktreeId
-  })
+  return lastConflictingMachine
 }
 
 function sleep(ms: number): Promise<void> {
