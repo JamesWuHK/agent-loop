@@ -16,6 +16,7 @@ import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, PR_REVIEW_LABELS } from './types'
 import {
   inferState,
   buildEventComment,
+  parseClaimEventComment,
   parseIssueDependencyMetadata,
   resolveActiveClaimMachine,
 } from './state-machine'
@@ -1249,7 +1250,7 @@ export async function claimIssue(
       config,
     )
 
-    const activeClaimMachine = await settleActiveClaimMachine(issueNumber, config)
+    const activeClaimMachine = await settleActiveClaimMachine(issueNumber, config, event)
     if (activeClaimMachine && activeClaimMachine !== machineId) {
       return { success: false, issueNumber, reason: 'already-claimed' }
     }
@@ -1987,11 +1988,15 @@ async function setManagedIssueStateLabels(
 async function settleActiveClaimMachine(
   issueNumber: number,
   config: AgentConfig,
+  expectedClaimEvent?: ClaimEvent,
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= CLAIM_OWNERSHIP_SETTLE_ATTEMPTS; attempt++) {
     const comments = await listIssueComments(issueNumber, config)
     const activeMachine = resolveActiveClaimMachine(comments)
-    if (activeMachine !== null) {
+    if (
+      activeMachine !== null
+      && (!expectedClaimEvent || hasObservedClaimEvent(comments, expectedClaimEvent))
+    ) {
       return activeMachine
     }
 
@@ -2001,6 +2006,19 @@ async function settleActiveClaimMachine(
   }
 
   return null
+}
+
+function hasObservedClaimEvent(
+  comments: Array<{ body: string }>,
+  expectedClaimEvent: ClaimEvent,
+): boolean {
+  return comments.some((comment) => {
+    const event = parseClaimEventComment(comment.body)
+    return event?.event === expectedClaimEvent.event
+      && event.machine === expectedClaimEvent.machine
+      && event.ts === expectedClaimEvent.ts
+      && event.worktreeId === expectedClaimEvent.worktreeId
+  })
 }
 
 function sleep(ms: number): Promise<void> {
