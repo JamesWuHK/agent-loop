@@ -14,7 +14,10 @@ import {
   buildAuditIssueSummary,
   type AuditIssueSummary,
 } from './audit-issue-contracts'
-import { buildBootstrapGateReportForRepo } from './bootstrap-gate'
+import {
+  DEFAULT_BOOTSTRAP_BLOCKER_ISSUE_NUMBERS,
+  buildBootstrapGateReportForRepo,
+} from './bootstrap-gate'
 import {
   canResumeHumanNeededPrReview,
   extractLatestAutomatedPrReviewBlockerSummary,
@@ -93,6 +96,10 @@ const REQUIRED_RELEASE_EVIDENCE_SPECS = [
     issueNumber: 70,
   },
 ] as const
+const BOOTSTRAP_SCOPE_ISSUE_NUMBERS = new Set<number>([
+  ...DEFAULT_BOOTSTRAP_BLOCKER_ISSUE_NUMBERS,
+  ...REQUIRED_RELEASE_EVIDENCE_SPECS.map((spec) => spec.issueNumber),
+])
 
 export function classifyBootstrapFailureKind(reason: string): BootstrapFailureKind {
   const normalized = reason.toLowerCase()
@@ -244,7 +251,11 @@ export async function buildBootstrapScorecardForRepo(
 
   const managedIssues = (issuesResult ?? [])
     .filter((issue) => issue.labels.some((label) => label.startsWith('agent:')))
-  const pullRequests = pullRequestsResult ?? []
+    .filter((issue) => BOOTSTRAP_SCOPE_ISSUE_NUMBERS.has(issue.number))
+  const pullRequests = (pullRequestsResult ?? []).filter((pullRequest) => {
+    const issueNumber = parseIssueNumberFromManagedBranch(pullRequest.headRefName)
+    return issueNumber !== null && BOOTSTRAP_SCOPE_ISSUE_NUMBERS.has(issueNumber)
+  })
   const issueBodiesByNumber = new Map(managedIssues.map((issue) => [issue.number, issue.body]))
   const issueCommentsByNumber = new Map<number, IssueComment[] | null>()
   const prCommentsByNumber = new Map<number, IssueComment[] | null>()

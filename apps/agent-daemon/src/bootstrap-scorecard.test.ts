@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { AgentIssue } from '@agent/shared'
 import {
   buildBootstrapScorecard,
   buildBootstrapScorecardForRepo,
@@ -61,6 +62,28 @@ function buildBlockedResumeEscalationComment(
 ## agent-loop blocked resume escalation`
 }
 
+function buildScorecardAgentIssue(
+  input: Partial<AgentIssue> & Pick<AgentIssue, 'number'>,
+): AgentIssue & { runtimeRequirements: never[] } {
+  return {
+    title: `Issue ${input.number}`,
+    body: '',
+    state: 'working',
+    labels: ['agent:working'],
+    assignee: null,
+    isClaimable: false,
+    updatedAt: '2026-04-11T10:00:00.000Z',
+    dependencyIssueNumbers: [],
+    hasDependencyMetadata: false,
+    dependencyParseError: false,
+    claimBlockedBy: [],
+    hasExecutableContract: true,
+    contractValidationErrors: [],
+    runtimeRequirements: [] as never[],
+    ...input,
+  }
+}
+
 describe('buildBootstrapScorecard', () => {
   test('groups blockers into stable failure taxonomy buckets', () => {
     expect(classifyBootstrapFailureKind('closed PR blocked fresh PR creation')).toBe('pr_lifecycle_failure')
@@ -93,54 +116,29 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 50,
           title: '[AL-11] issue audit',
           body: '## 用户故事\n\n作为维护者，我希望 scorecard 统计 invalid ready issue。\n\n## Context\n\n### Dependencies\n```json\n{"dependsOn":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/bootstrap-scorecard.ts\n\n### Validation\n- `bun test apps/agent-daemon/src/bootstrap-scorecard.test.ts`\n\n## RED 测试\n```ts\nthrow new Error("red")\n```\n\n## 实现步骤\n1. add scorecard\n\n## 验收\n- [ ] valid',
           state: 'ready',
           labels: ['agent:ready'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
           hasExecutableContract: false,
           contractValidationErrors: ['missing ### RequiredSemantics section'],
-        },
-        {
+        }),
+        buildScorecardAgentIssue({
           number: 61,
           title: 'issue recovery remains blocked',
           body: '',
           state: 'failed',
           labels: ['agent:failed'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
-        {
+        }),
+        buildScorecardAgentIssue({
           number: 69,
           title: 'self_bootstrap_suite_green release evidence still missing',
           body: '',
           state: 'working',
           labels: ['agent:working'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [
         {
@@ -167,21 +165,8 @@ describe('buildBootstrapScorecardForRepo', () => {
         }
         return []
       },
-      getAgentIssueByNumber: async (issueNumber) => ({
+      getAgentIssueByNumber: async (issueNumber) => buildScorecardAgentIssue({
         number: issueNumber,
-        title: `Issue ${issueNumber}`,
-        body: '',
-        state: 'working',
-        labels: ['agent:working'],
-        assignee: null,
-        isClaimable: false,
-        updatedAt: '2026-04-11T10:00:00.000Z',
-        dependencyIssueNumbers: [],
-        hasDependencyMetadata: false,
-        dependencyParseError: false,
-        claimBlockedBy: [],
-        hasExecutableContract: true,
-        contractValidationErrors: [],
       }),
     })
 
@@ -217,6 +202,116 @@ describe('buildBootstrapScorecardForRepo', () => {
     ])
   })
 
+  test('ignores unrelated managed issues and prs outside the bootstrap blocker scope', async () => {
+    const baseDeps = {
+      listOpenAgentIssues: async () => [
+        buildScorecardAgentIssue({
+          number: 50,
+          title: '[AL-11] issue audit',
+          body: '## 用户故事\n\n作为维护者，我希望 scorecard 统计 invalid ready issue。\n\n## Context\n\n### Dependencies\n```json\n{"dependsOn":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/bootstrap-scorecard.ts\n\n### Validation\n- `bun test apps/agent-daemon/src/bootstrap-scorecard.test.ts`\n\n## RED 测试\n```ts\nthrow new Error("red")\n```\n\n## 实现步骤\n1. add scorecard\n\n## 验收\n- [ ] valid',
+          state: 'ready',
+          labels: ['agent:ready'],
+          hasExecutableContract: false,
+          contractValidationErrors: ['missing ### RequiredSemantics section'],
+        }),
+        buildScorecardAgentIssue({
+          number: 61,
+          state: 'working',
+        }),
+        buildScorecardAgentIssue({
+          number: 69,
+          title: 'self_bootstrap_suite_green release evidence still missing',
+          state: 'working',
+        }),
+      ],
+      listOpenAgentPullRequests: async () => [
+        {
+          number: 91,
+          title: 'Fix lifecycle blocker',
+          url: 'https://example.test/pr/91',
+          headRefName: 'agent/61/codex-dev',
+          headRefOid: 'abc123',
+          isDraft: false,
+          labels: ['agent:human-needed'],
+        },
+      ],
+      listIssueComments: async (number: number) => {
+        if (number === 91) {
+          return [{
+            commentId: 9101,
+            body: buildStructuredReviewBlockerComment(91, 'Approval bar flow regressed', {
+              headRefOid: 'abc123',
+            }),
+            createdAt: '2026-04-11T09:00:00.000Z',
+            updatedAt: '2026-04-11T09:05:00.000Z',
+          }]
+        }
+
+        return []
+      },
+      getAgentIssueByNumber: async (issueNumber: number) => buildScorecardAgentIssue({
+        number: issueNumber,
+      }),
+    }
+    const baseline = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, baseDeps)
+    const withUnrelatedManagedWork = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, {
+      ...baseDeps,
+      listOpenAgentIssues: async () => [
+        ...(await baseDeps.listOpenAgentIssues()),
+        buildScorecardAgentIssue({
+          number: 999,
+          title: 'unrelated invalid ready issue',
+          state: 'ready',
+          labels: ['agent:ready'],
+          hasExecutableContract: false,
+          contractValidationErrors: ['missing ### Validation section'],
+        }),
+      ],
+      listOpenAgentPullRequests: async () => [
+        ...(await baseDeps.listOpenAgentPullRequests()),
+        {
+          number: 777,
+          title: 'Unrelated review blocker',
+          url: 'https://example.test/pr/777',
+          headRefName: 'agent/999/codex-dev',
+          headRefOid: 'def456',
+          isDraft: false,
+          labels: ['agent:human-needed'],
+        },
+      ],
+      listIssueComments: async (number: number) => {
+        if (number === 777) {
+          return [{
+            commentId: 77701,
+            body: buildStructuredReviewBlockerComment(777, 'Unrelated review failed', {
+              headRefOid: 'def456',
+            }),
+            createdAt: '2026-04-11T09:00:00.000Z',
+            updatedAt: '2026-04-11T09:05:00.000Z',
+          }]
+        }
+
+        return baseDeps.listIssueComments(number)
+      },
+    })
+
+    expect(withUnrelatedManagedWork.categoryCounts).toEqual(baseline.categoryCounts)
+    expect(withUnrelatedManagedWork.topBlockers).toEqual(baseline.topBlockers)
+    expect(resolveBootstrapScorecardExitCode(withUnrelatedManagedWork)).toBe(
+      resolveBootstrapScorecardExitCode(baseline),
+    )
+  })
+
   test('sources release blockers from bootstrap gate required evidence instead of open-issue body scans', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
@@ -225,40 +320,19 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 69,
           title: 'self_bootstrap_suite_green release evidence tracking',
-          body: '',
           state: 'working',
           labels: ['agent:working'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
-      getAgentIssueByNumber: async (issueNumber) => ({
+      getAgentIssueByNumber: async (issueNumber) => buildScorecardAgentIssue({
         number: issueNumber,
-        title: `Issue ${issueNumber}`,
-        body: '',
         state: issueNumber === 69 ? 'done' : 'working',
         labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
-        assignee: null,
-        isClaimable: false,
-        updatedAt: '2026-04-11T10:00:00.000Z',
-        dependencyIssueNumbers: [],
-        hasDependencyMetadata: false,
-        dependencyParseError: false,
-        claimBlockedBy: [],
-        hasExecutableContract: true,
-        contractValidationErrors: [],
       }),
     })
 
@@ -278,32 +352,22 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
-          number: 63,
+        buildScorecardAgentIssue({
+          number: 60,
           title: 'issue recovery is blocked by daemon runtime failure',
-          body: '',
           state: 'failed',
           labels: ['agent:failed'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async (number) => {
-        if (number !== 63) {
+        if (number !== 60) {
           return []
         }
 
         return [{
           commentId: 6301,
-          body: buildBlockedResumeEscalationComment(63, 'daemon runtime failure: startup recovery deferred by local runtime health failure'),
+          body: buildBlockedResumeEscalationComment(60, 'daemon runtime failure: startup recovery deferred by local runtime health failure'),
           createdAt: '2026-04-11T09:00:00.000Z',
           updatedAt: '2026-04-11T09:05:00.000Z',
         }]
@@ -314,7 +378,7 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts.runtime_failure).toBe(1)
     expect(scorecard.topBlockers).toContainEqual(expect.objectContaining({
       category: 'runtime_failure',
-      issueNumber: 63,
+      issueNumber: 60,
       prNumber: null,
       reason: 'daemon runtime failure: startup recovery deferred by local runtime health failure',
     }))
@@ -328,22 +392,12 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 60,
           title: 'issue recovery remains blocked',
-          body: '',
           state: 'failed',
           labels: ['agent:failed'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async (number) => {
@@ -380,22 +434,12 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 61,
           title: 'issue recovery remains blocked',
-          body: '',
           state: 'failed',
           labels: ['agent:failed'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        } as any,
+        }),
       ],
       listOpenAgentPullRequests: async () => [
         {
@@ -454,21 +498,10 @@ describe('buildBootstrapScorecardForRepo', () => {
       listOpenAgentIssues: async () => [],
       listOpenAgentPullRequests: async () => [],
       listIssueComments: async () => [],
-      getAgentIssueByNumber: async (issueNumber) => ({
+      getAgentIssueByNumber: async (issueNumber) => buildScorecardAgentIssue({
         number: issueNumber,
-        title: `Issue ${issueNumber}`,
-        body: '',
         state: issueNumber === 69 ? 'done' : 'working',
         labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
-        assignee: null,
-        isClaimable: false,
-        updatedAt: '2026-04-11T10:00:00.000Z',
-        dependencyIssueNumbers: [],
-        hasDependencyMetadata: false,
-        dependencyParseError: false,
-        claimBlockedBy: [],
-        hasExecutableContract: true,
-        contractValidationErrors: [],
       }),
     })
 
@@ -490,22 +523,12 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 61,
           title: 'review follow-up',
-          body: '',
           state: 'working',
           labels: ['agent:working'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [
         {
@@ -544,22 +567,15 @@ describe('buildBootstrapScorecardForRepo', () => {
       } as never,
     }, {
       listOpenAgentIssues: async () => [
-        {
+        buildScorecardAgentIssue({
           number: 50,
           title: '[AL-11] issue audit',
           body: '## 用户故事\n\n作为维护者，我希望 scorecard 统计 invalid ready issue。\n\n## Context\n\n### Dependencies\n```json\n{"dependsOn":[]}\n```\n\n### AllowedFiles\n- apps/agent-daemon/src/bootstrap-scorecard.ts\n\n### Validation\n- `bun test apps/agent-daemon/src/bootstrap-scorecard.test.ts`\n\n## RED 测试\n```ts\nthrow new Error("red")\n```\n\n## 实现步骤\n1. add scorecard\n\n## 验收\n- [ ] valid',
           state: 'ready',
           labels: ['agent:ready'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
           hasExecutableContract: false,
           contractValidationErrors: ['missing ### RequiredSemantics section'],
-        },
+        }),
       ],
       listOpenAgentPullRequests: async () => [
         {
@@ -660,22 +676,11 @@ describe('buildBootstrapScorecardForRepo', () => {
           throw new Error('The socket connection was closed unexpectedly.')
         }
 
-        return {
+        return buildScorecardAgentIssue({
           number: issueNumber,
-          title: `Issue ${issueNumber}`,
-          body: '',
           state: 'working',
           labels: ['agent:working'],
-          assignee: null,
-          isClaimable: false,
-          updatedAt: '2026-04-11T10:00:00.000Z',
-          dependencyIssueNumbers: [],
-          hasDependencyMetadata: false,
-          dependencyParseError: false,
-          claimBlockedBy: [],
-          hasExecutableContract: true,
-          contractValidationErrors: [],
-        }
+        })
       },
     })
 
