@@ -3,21 +3,27 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  executeIssueAuditCommand,
   buildWakeRequestFromCli,
-  executeBootstrapGateCommand,
-  executeBootstrapScenarioCommand,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  formatIssueAuditOutput,
   executeIssueLintCommand,
+  executeIssueRewriteCommand,
+  executeIssueSplitCommand,
+  executeIssueSimulateCommand,
   executeWakeCommand,
   executeWakeRequest,
-  formatBootstrapGateOutput,
-  formatBootstrapScenarioOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
+  resolveIssueAuditExitCode,
+  resolveIssueAuditTarget,
   resolveIssueLintTarget,
+  resolveIssueRewriteTarget,
+  resolveIssueSplitTarget,
+  resolveIssueSimulateTarget,
   resolveWakeCommand,
   startManagedRuntime,
   reconcileManagedRuntime,
@@ -66,6 +72,87 @@ describe('index helpers', () => {
     })).toThrow('Only one of --lint-issue or --lint-file can be used at a time')
   })
 
+  test('resolves audit targets and preserves repeated explicit issue selectors', () => {
+    expect(resolveIssueAuditTarget({
+      'audit-issues': true,
+    })).toEqual({
+      issueNumbers: [],
+    })
+
+    expect(resolveIssueAuditTarget({
+      'audit-issues': true,
+      issue: ['50', '51'],
+    })).toEqual({
+      issueNumbers: [50, 51],
+    })
+
+    expect(resolveIssueAuditTarget({
+      issue: ['50'],
+    })).toBeNull()
+  })
+
+  test('resolves rewrite targets and rejects empty rewrite paths', () => {
+    expect(resolveIssueRewriteTarget({
+      'rewrite-file': 'docs/issues/ready-draft.md',
+    })).toEqual({
+      path: 'docs/issues/ready-draft.md',
+    })
+
+    expect(() => resolveIssueRewriteTarget({
+      'rewrite-file': '   ',
+    })).toThrow('--rewrite-file must be a non-empty path')
+  })
+
+  test('resolves split targets, start numbers, and rejects detached split numbering', () => {
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+      'split-start-number': '41',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 41,
+    })
+
+    expect(resolveIssueSplitTarget({
+      'split-file': 'docs/issues/quality-parent.md',
+    })).toEqual({
+      path: 'docs/issues/quality-parent.md',
+      startNumber: 1,
+    })
+
+    expect(() => resolveIssueSplitTarget({
+      'split-file': '   ',
+    })).toThrow('--split-file must be a non-empty path')
+
+    expect(() => resolveIssueSplitTarget({
+      'split-start-number': '41',
+    })).toThrow('--split-start-number can only be used with --split-file')
+  })
+
+  test('resolves simulate targets and rejects conflicting simulate selectors', () => {
+    expect(resolveIssueSimulateTarget({
+      'simulate-file': 'docs/issues/ready.md',
+    })).toEqual({
+      kind: 'file',
+      path: 'docs/issues/ready.md',
+    })
+
+    expect(resolveIssueSimulateTarget({
+      'simulate-issue': '40',
+    })).toEqual({
+      kind: 'issue',
+      issueNumber: 40,
+    })
+
+    expect(() => resolveIssueSimulateTarget({
+      'simulate-file': 'docs/issues/ready.md',
+      'simulate-issue': '40',
+    })).toThrow('Only one of --simulate-issue or --simulate-file can be used at a time')
+
+    expect(() => resolveIssueSimulateTarget({
+      'simulate-file': '   ',
+    })).toThrow('--simulate-file must be a non-empty path')
+  })
+
   test('executes local issue lint without loading remote config', async () => {
     const report = await executeIssueLintCommand({
       target: {
@@ -105,6 +192,470 @@ describe('index helpers', () => {
       valid: true,
       readyGateBlocked: false,
     })
+  })
+
+  test('executes issue audit against explicit issue numbers and includes simulation when requested', async () => {
+    const report = await executeIssueAuditCommand({
+      issueNumbers: [50, 52],
+      includeSimulation: true,
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => ({
+        repo: args.repo!,
+        pat: args.pat!,
+        concurrency: 1,
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        machineId: 'codex-dev',
+      } as any),
+      listOpenAgentIssues: async () => {
+        throw new Error('should not list open issues for explicit audit')
+      },
+      getAgentIssueByNumber: async (issueNumber, config) => ({
+        number: issueNumber,
+        title: `[AL-${issueNumber}] audit target`,
+        body: issueNumber === 50
+          ? '## 用户故事\n只有用户故事'
+          : [
+              '## 用户故事',
+              '作为维护者，我希望 issue audit 能输出 repo-level JSON。',
+              '',
+              '## Context',
+              '### Dependencies',
+              '```json',
+              '{ "dependsOn": [] }',
+              '```',
+              '### AllowedFiles',
+              '- apps/agent-daemon/src/audit-issue-contracts.ts',
+              '### ForbiddenFiles',
+              '- apps/agent-daemon/src/dashboard.ts',
+              '### MustPreserve',
+              '- human-readable 审计输出',
+              '### OutOfScope',
+              '- dashboard',
+              '### RequiredSemantics',
+              '- JSON 输出稳定',
+              '### ReviewHints',
+              '- 检查 summary',
+              '### Validation',
+              '- `bun test apps/agent-daemon/src/index.test.ts`',
+              '',
+              '## RED 测试',
+              '```ts',
+              'expect(true).toBe(false)',
+              '```',
+              '',
+              '## 实现步骤',
+              '1. 增加 audit command',
+              '',
+              '## 验收',
+              '- [ ] audit command 可用',
+            ].join('\n'),
+        state: 'ready',
+        labels: ['agent:ready'],
+        assignee: null,
+        isClaimable: issueNumber !== 50,
+        updatedAt: '2026-04-11T09:30:00.000Z',
+        dependencyIssueNumbers: [],
+        hasDependencyMetadata: true,
+        dependencyParseError: false,
+        claimBlockedBy: [],
+        hasExecutableContract: issueNumber !== 50,
+        contractValidationErrors: issueNumber === 50
+          ? ['missing ### Dependencies JSON block']
+          : [],
+      } as any),
+      auditIssues: async ({ issues, includeSimulation, repoRoot }) => {
+        expect(issues.map((issue) => issue.number)).toEqual([50, 52])
+        expect(includeSimulation).toBe(true)
+        expect(repoRoot).toBe('/tmp/repo')
+
+        return {
+          summary: {
+            auditedIssueCount: 2,
+            invalidIssueCount: 1,
+            invalidReadyIssueCount: 1,
+            lowScoreIssueCount: 1,
+            warningIssueCount: 0,
+          },
+          issues: issues.map((issue) => ({
+            number: issue.number,
+            title: issue.title,
+            state: issue.state,
+            isClaimable: issue.isClaimable ?? false,
+            hasExecutableContract: issue.hasExecutableContract ?? false,
+            claimBlockedBy: issue.claimBlockedBy ?? [],
+            contractValidationErrors: issue.contractValidationErrors ?? [],
+            qualityScore: issue.number === 50 ? 0 : 100,
+            contractWarnings: [],
+            contract: {
+              valid: issue.number !== 50,
+              errors: issue.number === 50 ? ['missing ### Dependencies JSON block'] : [],
+              warnings: [],
+            },
+            readyGateBlocked: issue.number === 50,
+            simulation: {
+              valid: true,
+              summary: 'simulation passed',
+              failures: [],
+              findings: [],
+              plannerPrompt: 'prompt',
+              plannerOutput: 'Implement audit command',
+              plannedSubtasks: ['Implement audit command'],
+            },
+          })),
+        }
+      },
+    })
+
+    expect(report.summary.invalidIssueCount).toBe(1)
+    const jsonReport = JSON.parse(formatIssueAuditOutput(report, true))
+    expect(jsonReport.summary).toMatchObject({
+      auditedIssueCount: 2,
+    })
+    expect(jsonReport.issues[0]).toMatchObject({
+      number: 50,
+      simulation: {
+        valid: true,
+      },
+    })
+    expect(resolveIssueAuditExitCode(report, true)).toBe(1)
+    expect(resolveIssueAuditExitCode(report, false)).toBe(0)
+  })
+
+  test('executes local issue rewrite by reading a draft file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-rewrite-test-'))
+    const draftPath = join(draftDir, 'draft.md')
+    writeFileSync(draftPath, '修复 ready gate 对 Validation 缺失路径的提示，并补测试\n')
+
+    const result = await executeIssueRewriteCommand({
+      target: {
+        path: draftPath,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      rewriteIssueDraft: async ({ issueText, repoRoot, config }) => {
+        expect(issueText).toContain('修复 ready gate')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          markdown: '## 用户故事\n\n作为维护者，我希望 rewrite CLI 输出 canonical contract。',
+          validation: {
+            valid: true,
+            score: 100,
+            errors: [],
+            warnings: [],
+          },
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## 用户故事')).toBe(true)
+    expect(result.validation.valid).toBe(true)
+  })
+
+  test('executes local issue split by reading a parent file and returning markdown only', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-split-test-'))
+    const draftPath = join(draftDir, 'parent.md')
+    writeFileSync(draftPath, '父 issue 负责串起 lint、rewrite、split 三条子线。\n')
+
+    const result = await executeIssueSplitCommand({
+      target: {
+        path: draftPath,
+        startNumber: 41,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      splitTrackingIssue: async ({ issueText, repoRoot, config, issueNumberAllocator }) => {
+        expect(issueText).toContain('父 issue 负责串起')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+        expect(issueNumberAllocator!()).toBe(41)
+
+        return {
+          parentSummary: '按 lint -> rewrite -> split 的顺序推进 child issues。',
+          children: [],
+          markdown: '## Parent Summary\n\n按 lint -> rewrite -> split 的顺序推进 child issues。',
+        }
+      },
+    })
+
+    expect(result.markdown.startsWith('## Parent Summary')).toBe(true)
+  })
+
+  test('executes local issue simulation by reading a markdown file', async () => {
+    const draftDir = mkdtempSync(join(tmpdir(), 'agent-loop-simulate-test-'))
+    const draftPath = join(draftDir, 'issue.md')
+    writeFileSync(draftPath, '## 用户故事\n\n作为维护者，我希望 issue simulate 能提前发现风险。\n')
+
+    const result = await executeIssueSimulateCommand({
+      target: {
+        kind: 'file',
+        path: draftPath,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => {
+        expect(args).toEqual({
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+        })
+
+        return {
+          repo: 'JamesWuHK/agent-loop',
+          pat: 'ghp_test',
+          machineId: 'codex-dev',
+          concurrency: 1,
+          requestedConcurrency: 1,
+          concurrencyPolicy: {
+            requested: 1,
+            effective: 1,
+            repoCap: null,
+            profileCap: null,
+            projectCap: null,
+          },
+          scheduling: {
+            concurrencyByRepo: {},
+            concurrencyByProfile: {},
+          },
+          pollIntervalMs: 60_000,
+          idlePollIntervalMs: 300_000,
+          recovery: {
+            heartbeatIntervalMs: 30_000,
+            leaseTtlMs: 60_000,
+            workerIdleTimeoutMs: 300_000,
+            leaseAdoptionBackoffMs: 5_000,
+            leaseNoProgressTimeoutMs: 360_000,
+          },
+          worktreesBase: '/tmp/agent-worktrees',
+          project: {
+            profile: 'generic',
+          },
+          agent: {
+            primary: 'codex',
+            fallback: 'claude',
+            claudePath: 'claude',
+            codexPath: 'codex',
+            timeoutMs: 300_000,
+          },
+          git: {
+            defaultBranch: 'main',
+            authorName: 'agent-loop',
+            authorEmail: 'agent-loop@example.com',
+          },
+        }
+      },
+      readTextFile: (path) => {
+        expect(path).toBe(draftPath)
+        return readFileSync(path, 'utf-8')
+      },
+      fetchIssueSnapshot: async () => {
+        throw new Error('should not fetch remote issue for local simulate')
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody, repoRoot, config }) => {
+        expect(issueTitle).toBe(draftPath)
+        expect(issueBody).toContain('issue simulate')
+        expect(repoRoot).toBe('/tmp/repo')
+        expect(config!.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          valid: true,
+          summary: 'simulation passed',
+          failures: [],
+          findings: [],
+          plannerPrompt: 'prompt',
+          plannerOutput: '1. Add issue simulate CLI',
+          plannedSubtasks: ['Add issue simulate CLI'],
+        }
+      },
+    })
+
+    expect(result.valid).toBe(true)
+    expect(result.plannedSubtasks).toEqual(['Add issue simulate CLI'])
+  })
+
+  test('executes remote issue simulation by loading the issue body first', async () => {
+    const result = await executeIssueSimulateCommand({
+      target: {
+        kind: 'issue',
+        issueNumber: 40,
+      },
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+      repoRoot: '/tmp/repo',
+    }, {
+      loadConfig: (args = {}) => ({
+        repo: args.repo!,
+        pat: args.pat!,
+        concurrency: 1,
+        pollIntervalMs: 60_000,
+        idlePollIntervalMs: 300_000,
+        machineId: 'codex-dev',
+        project: {
+          profile: 'generic',
+        },
+        agent: {
+          primary: 'codex',
+          fallback: 'claude',
+          claudePath: 'claude',
+          codexPath: 'codex',
+          timeoutMs: 300_000,
+        },
+      } as any),
+      readTextFile: () => {
+        throw new Error('should not read local files for remote simulate')
+      },
+      fetchIssueSnapshot: async (issueNumber, config) => {
+        expect(issueNumber).toBe(40)
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+
+        return {
+          number: 40,
+          title: '[AL-10] issue simulate',
+          body: '## 用户故事\n\n作为维护者，我希望 issue simulate 能提前发现风险。\n',
+          state: 'open',
+          labels: ['agent:ready'],
+        }
+      },
+      simulateIssueExecutability: async ({ issueTitle, issueBody }) => {
+        expect(issueTitle).toBe('[AL-10] issue simulate')
+        expect(issueBody).toContain('issue simulate')
+
+        return {
+          valid: false,
+          summary: 'simulation failed',
+          failures: ['planning output does not contain commit-shaped subtasks'],
+          findings: [{
+            code: 'planning_not_commit_shaped',
+            stage: 'planner',
+            message: 'planning output does not contain commit-shaped subtasks',
+          }],
+          plannerPrompt: 'prompt',
+          plannerOutput: '1. Read the codebase',
+          plannedSubtasks: ['Read the codebase'],
+        }
+      },
+    })
+
+    expect(result.valid).toBe(false)
+    expect(result.failures).toContain('planning output does not contain commit-shaped subtasks')
   })
 
   test('executes remote issue lint with repo-aware config and supports json output', async () => {
@@ -157,7 +708,6 @@ describe('index helpers', () => {
             fallback: 'claude',
             claudePath: 'claude',
             codexPath: 'codex',
-            codexReasoningEffort: 'high',
             timeoutMs: 300_000,
           },
           git: {
@@ -341,169 +891,6 @@ describe('index helpers', () => {
     })
     expect(report.readyGateBlocked).toBe(true)
     expect(report.errors).toEqual(['missing ## RED 测试 / RED Tests'])
-  })
-
-  test('executes bootstrap gate with repo-aware config and supports json output', async () => {
-    const report = await executeBootstrapGateCommand({
-      repo: 'JamesWuHK/agent-loop',
-    }, {
-      readConfigFile: () => ({
-        pat: 'ghp_from_config',
-      } as any),
-      loadRepoLocalConfig: () => ({
-        project: {
-          profile: 'generic',
-        },
-      }),
-      buildConfig: (args = {}, options = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: undefined,
-          machineId: 'bootstrap-gate-readonly',
-        })
-        expect(options.fileConfig).toMatchObject({
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            codexReasoningEffort: 'high',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        } as any
-      },
-      buildBootstrapGateReportForRepo: async ({ config }) => {
-        expect(config.repo).toBe('JamesWuHK/agent-loop')
-        expect(config.pat).toBe('ghp_from_config')
-        expect(config.machineId).toBe('bootstrap-gate-readonly')
-
-        return {
-          version: 'v0.2',
-          ready: false,
-          blockers: [
-            {
-              issueNumber: 37,
-              state: 'working',
-              labels: ['agent:working'],
-              title: '[AL-7] repo grounded context',
-            },
-          ],
-          requiredEvidence: [
-            {
-              code: 'self_bootstrap_suite_green',
-              satisfied: false,
-              sourceIssueNumber: 69,
-              summary: 'awaiting the deterministic self-bootstrap scenario suite tracked by #69',
-            },
-          ],
-          blockingReasons: [
-            'issue #37 is not done (state=working, labels=agent:working)',
-            'missing required evidence: self_bootstrap_suite_green',
-          ],
-        }
-      },
-    })
-
-    expect(report.ready).toBe(false)
-    expect(JSON.parse(formatBootstrapGateOutput(report, true))).toMatchObject({
-      version: 'v0.2',
-      ready: false,
-      blockers: [
-        {
-          issueNumber: 37,
-          state: 'working',
-        },
-      ],
-      requiredEvidence: [
-        {
-          code: 'self_bootstrap_suite_green',
-          satisfied: false,
-        },
-      ],
-    })
-    expect(formatBootstrapGateOutput(report)).toContain('Bootstrap Gate')
-  })
-
-  test('executes bootstrap scenarios with the replay fixture suite and supports json output', async () => {
-    const report = await executeBootstrapScenarioCommand({}, {
-      evaluateBootstrapScenarioFixtureDirectory: (fixturesDir) => {
-        expect(fixturesDir.endsWith(join('fixtures', 'replay'))).toBe(true)
-
-        return {
-          suite: 'self-bootstrap-v0.2',
-          ok: true,
-          failedCases: [],
-          cases: [
-            {
-              name: 'self-bootstrap-happy-path',
-              ok: true,
-              present: true,
-              mismatches: [],
-              actual: { claimable: 1, blocked: 0, invalid: 0 },
-              expected: { claimable: 1, blocked: 0, invalid: 0 },
-            },
-          ],
-          summary: {
-            requiredCases: 4,
-            presentCases: 4,
-            passedCases: 4,
-            failedCases: 0,
-          },
-        }
-      },
-    })
-
-    expect(report.ok).toBe(true)
-    expect(JSON.parse(formatBootstrapScenarioOutput(report, true))).toMatchObject({
-      suite: 'self-bootstrap-v0.2',
-      ok: true,
-    })
-    expect(formatBootstrapScenarioOutput(report)).toContain('Bootstrap Scenarios')
-  })
-
-  test('requires an explicit repo for the bootstrap gate command', async () => {
-    await expect(executeBootstrapGateCommand({})).rejects.toThrow(
-      '--bootstrap-gate requires --repo owner/repo',
-    )
   })
 
   test('builds stable wake requests from CLI commands', () => {

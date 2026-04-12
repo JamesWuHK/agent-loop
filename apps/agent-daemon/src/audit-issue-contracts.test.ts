@@ -1,13 +1,51 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  auditIssues,
   buildGhIssueViewArgs,
   buildIssueLintReport,
   fetchRemoteIssueDocument,
+  formatAuditOutput,
   formatAuditLine,
   formatInvalidReadySection,
   formatIssueLintReport,
   formatIssueLintReportJson,
 } from './audit-issue-contracts'
+
+const VALID_CONTRACT = [
+  '## 用户故事',
+  '作为维护者，我希望批量审计 issue contract。',
+  '',
+  '## Context',
+  '### Dependencies',
+  '```json',
+  '{ "dependsOn": [] }',
+  '```',
+  '### AllowedFiles',
+  '- apps/agent-daemon/src/audit-issue-contracts.ts',
+  '### ForbiddenFiles',
+  '- apps/agent-daemon/src/dashboard.ts',
+  '### MustPreserve',
+  '- 默认 human-readable 输出仍可用',
+  '### OutOfScope',
+  '- dashboard 可视化',
+  '### RequiredSemantics',
+  '- 支持 repo-level 审计摘要',
+  '### ReviewHints',
+  '- 检查 JSON 输出是否稳定',
+  '### Validation',
+  '- `bun test apps/agent-daemon/src/audit-issue-contracts.test.ts`',
+  '',
+  '## RED 测试',
+  '```ts',
+  'expect(true).toBe(false)',
+  '```',
+  '',
+  '## 实现步骤',
+  '1. 增加 repo-level summary',
+  '',
+  '## 验收',
+  '- [ ] repo-level summary 可用',
+].join('\n')
 
 describe('audit-issue-contracts', () => {
   test('builds a lint report that keeps warnings separate from hard errors', () => {
@@ -101,6 +139,87 @@ describe('audit-issue-contracts', () => {
     })
   })
 
+  test('returns stable repo summary and issue quality findings in json mode', async () => {
+    const result = await auditIssues({
+      issues: [
+        {
+          number: 71,
+          title: '[AL-X] invalid contract',
+          body: '## 用户故事\n只有用户故事',
+          state: 'ready',
+          labels: ['agent:ready'],
+        },
+        {
+          number: 72,
+          title: '[AL-Y] valid contract',
+          body: VALID_CONTRACT,
+          state: 'ready',
+          labels: ['agent:ready'],
+        },
+      ],
+      includeSimulation: false,
+    })
+
+    expect(result.summary).toEqual({
+      auditedIssueCount: 2,
+      invalidIssueCount: 1,
+      invalidReadyIssueCount: 1,
+      lowScoreIssueCount: 1,
+      warningIssueCount: 0,
+    })
+    expect(result.issues[0]?.contract.errors).toContain('missing ### Dependencies JSON block')
+    const jsonReport = JSON.parse(formatAuditOutput(result, true))
+    expect(jsonReport.summary).toMatchObject({
+      invalidIssueCount: 1,
+    })
+    expect(jsonReport.issues[0]).toMatchObject({
+      number: 71,
+      state: 'ready',
+    })
+  })
+
+  test('includes simulation findings only when requested', async () => {
+    const result = await auditIssues({
+      issues: [
+        {
+          number: 73,
+          title: '[AL-Z] simulate me',
+          body: VALID_CONTRACT,
+          state: 'ready',
+          labels: ['agent:ready'],
+        },
+      ],
+      includeSimulation: true,
+      repoRoot: '/tmp/agent-loop',
+    }, {
+      simulateIssueExecutability: async ({ issueTitle, issueBody, repoRoot }) => {
+        expect(issueTitle).toBe('[AL-Z] simulate me')
+        expect(issueBody).toBe(VALID_CONTRACT)
+        expect(repoRoot).toBe('/tmp/agent-loop')
+
+        return {
+          valid: false,
+          summary: 'simulation failed',
+          failures: ['planning output does not contain commit-shaped subtasks'],
+          findings: [{
+            code: 'planning_not_commit_shaped',
+            stage: 'planner',
+            message: 'planning output does not contain commit-shaped subtasks',
+          }],
+          plannerPrompt: 'prompt',
+          plannerOutput: 'Read the repo',
+          plannedSubtasks: ['Read the repo'],
+        }
+      },
+    })
+
+    expect(result.issues[0]?.simulation).toMatchObject({
+      valid: false,
+      failures: ['planning output does not contain commit-shaped subtasks'],
+    })
+    expect(formatAuditOutput(result)).toContain('simulation=fail')
+  })
+
   test('formats claimability, quality score, and contract errors on one line', () => {
     expect(
       formatAuditLine({
@@ -113,6 +232,11 @@ describe('audit-issue-contracts', () => {
         contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
         qualityScore: 75,
         contractWarnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+        contract: {
+          valid: false,
+          errors: ['missing ## RED 测试 / RED Tests'],
+          warnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+        },
       }),
     ).toBe(
       '#51 state=ready claimable=false contract=false score=75 warnings=1 blockedBy=49,50 errors=missing ## RED 测试 / RED Tests',
@@ -136,6 +260,16 @@ describe('audit-issue-contracts', () => {
         contractWarnings: [
           'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
         ],
+        contract: {
+          valid: false,
+          errors: [
+            'missing ### Dependencies JSON block',
+            'missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)',
+          ],
+          warnings: [
+            'AllowedFiles should use exact paths or tightly scoped directories: frontend files',
+          ],
+        },
       },
     ])
 
@@ -193,7 +327,6 @@ describe('audit-issue-contracts', () => {
           fallback: 'claude',
           claudePath: 'claude',
           codexPath: 'codex',
-          codexReasoningEffort: 'high',
           timeoutMs: 300_000,
         },
         git: {

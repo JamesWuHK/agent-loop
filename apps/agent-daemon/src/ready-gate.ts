@@ -2,6 +2,7 @@ import { parseIssueContract, validateIssueContract, ISSUE_LABELS, buildGhEnv, co
 import { existsSync } from 'node:fs'
 import { isAbsolute, posix, resolve } from 'node:path'
 import { loadConfig, type CliArgs } from './config'
+import { simulateIssueExecutability, type IssueSimulationResult } from './issue-simulate'
 
 interface ReadyGateIssueSnapshot {
   number: number
@@ -15,10 +16,14 @@ export interface ReadyGateEvaluation {
   shouldEnforce: boolean
   valid: boolean
   errors: string[]
+  simulation: IssueSimulationResult | null
 }
 
 interface ReadyGateOptions {
   repoRoot?: string
+  enableSimulation?: boolean
+  config?: AgentConfig
+  simulateIssueExecutability?: typeof simulateIssueExecutability
 }
 
 function normalizeContractPath(value: string): string {
@@ -123,15 +128,16 @@ function validateValidationTargets(contractBody: string, repoRoot?: string): str
   return [...missingTargets].map((target) => `validation references missing repo path: ${target}`)
 }
 
-export function evaluateReadyGate(
+export async function evaluateReadyGate(
   issue: ReadyGateIssueSnapshot,
   options: ReadyGateOptions = {},
-): ReadyGateEvaluation {
+): Promise<ReadyGateEvaluation> {
   if (issue.state === 'closed') {
     return {
       shouldEnforce: false,
       valid: true,
       errors: [],
+      simulation: null,
     }
   }
 
@@ -140,17 +146,31 @@ export function evaluateReadyGate(
       shouldEnforce: false,
       valid: true,
       errors: [],
+      simulation: null,
     }
   }
 
   const validation = validateIssueContract(parseIssueContract(issue.body))
   const targetErrors = validateValidationTargets(issue.body, options.repoRoot)
   const errors = [...validation.errors, ...targetErrors]
+  let simulation: IssueSimulationResult | null = null
+
+  if (options.enableSimulation) {
+    const runSimulation = options.simulateIssueExecutability ?? simulateIssueExecutability
+    simulation = await runSimulation({
+      issueTitle: issue.title || `Issue #${issue.number}`,
+      issueBody: issue.body,
+      repoRoot: options.repoRoot ?? process.cwd(),
+      config: options.config,
+    })
+    errors.push(...simulation.failures)
+  }
 
   return {
     shouldEnforce: true,
-    valid: errors.length === 0,
-    errors,
+    valid: uniqueStrings(errors).length === 0,
+    errors: uniqueStrings(errors),
+    simulation,
   }
 }
 
@@ -240,9 +260,18 @@ export async function enforceReadyGate(
   issueNumber: number,
   config: AgentConfig,
   logger = console,
+  options: {
+    enableSimulation?: boolean
+    simulateIssueExecutability?: typeof simulateIssueExecutability
+  } = {},
 ): Promise<ReadyGateEvaluation> {
   const issue = await fetchIssueSnapshot(issueNumber, config)
-  const evaluation = evaluateReadyGate(issue, { repoRoot: process.cwd() })
+  const evaluation = await evaluateReadyGate(issue, {
+    repoRoot: process.cwd(),
+    enableSimulation: options.enableSimulation,
+    config,
+    simulateIssueExecutability: options.simulateIssueExecutability,
+  })
 
   if (!evaluation.shouldEnforce) {
     logger.log(`[ready-gate] issue #${issueNumber} does not currently require enforcement`)
@@ -260,9 +289,10 @@ export async function enforceReadyGate(
   return evaluation
 }
 
-function parseArgs(argv: string[]): CliArgs & { issueNumber: number } {
+function parseArgs(argv: string[]): CliArgs & { issueNumber: number; simulate: boolean } {
   let issueNumber: number | null = null
   let repo: string | undefined
+  let simulate = false
 
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]
@@ -276,27 +306,52 @@ function parseArgs(argv: string[]): CliArgs & { issueNumber: number } {
     if (arg === '--repo') {
       repo = argv[index + 1]
       index++
+      continue
+    }
+
+    if (arg === '--simulate') {
+      simulate = true
     }
   }
 
   if (!Number.isInteger(issueNumber) || issueNumber === null || issueNumber <= 0) {
-    throw new Error('Usage: bun apps/agent-daemon/src/ready-gate.ts --issue <number> [--repo owner/name]')
+    throw new Error('Usage: bun apps/agent-daemon/src/ready-gate.ts --issue <number> [--repo owner/name] [--simulate]')
   }
 
   return {
     issueNumber,
     repo,
+    simulate,
   }
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const config = loadConfig({ repo: args.repo })
-  const evaluation = await enforceReadyGate(args.issueNumber, config)
+  const evaluation = await enforceReadyGate(args.issueNumber, config, console, {
+    enableSimulation: args.simulate,
+  })
 
   if (evaluation.shouldEnforce && !evaluation.valid) {
     process.exitCode = 1
   }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const result: string[] = []
+  const seen = new Set<string>()
+
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+
+  return result
 }
 
 if (import.meta.main) {
