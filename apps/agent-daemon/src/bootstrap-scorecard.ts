@@ -119,8 +119,11 @@ export function classifyBootstrapFailureKind(reason: string): BootstrapFailureKi
   if (
     normalized.includes('closed pr')
     || normalized.includes('fresh pr')
+    || normalized.includes('merge checks')
     || normalized.includes('merge checks gate')
     || normalized.includes('merge gate')
+    || normalized.includes('required self-bootstrap checks')
+    || normalized.includes('before merge can resume')
     || normalized.includes('pr lifecycle')
   ) {
     return 'pr_lifecycle_failure'
@@ -514,7 +517,7 @@ async function collectPrLifecycleBlockers(
       if (blocked === null) {
         if (
           fallbackBlockedEscalation?.prNumber === pullRequest.number
-          && isGenericLinkedPrLifecycleReason(fallbackBlockedEscalation.reason)
+          && shouldRetainOpenPrLifecycleEscalation(fallbackBlockedEscalation.reason)
         ) {
           firstBlocked = fallbackBlockedEscalation
           continue
@@ -529,12 +532,14 @@ async function collectPrLifecycleBlockers(
       }
 
       if (firstBlocked === null) {
-        if (!pullRequestLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) {
-          firstBlocked = {
-            issueNumber: issue.number,
-            prNumber: pullRequest.number,
-            reason: blocked.reason,
-          }
+        firstBlocked = {
+          issueNumber: issue.number,
+          prNumber: pullRequest.number,
+          reason:
+            fallbackBlockedEscalation?.prNumber === pullRequest.number
+            && shouldRetainOpenPrLifecycleEscalation(fallbackBlockedEscalation.reason)
+              ? fallbackBlockedEscalation.reason
+              : blocked.reason,
         }
       }
     }
@@ -581,9 +586,9 @@ function isGenericLinkedPrLifecycleReason(reason: string): boolean {
   return /^linked pr #\d+ is not in a resumable automated state\b/i.test(reason)
 }
 
-function isPrLifecycleScorecardReason(reason: string): boolean {
-  return classifyBootstrapFailureKind(reason) === 'pr_lifecycle_failure'
-    || isGenericLinkedPrLifecycleReason(reason)
+function shouldRetainOpenPrLifecycleEscalation(reason: string): boolean {
+  return /^linked pr #\d+\b/i.test(reason)
+    && classifyBootstrapFailureKind(reason) === 'pr_lifecycle_failure'
 }
 
 function findLatestUnresolvedPrLifecycleEscalation(
@@ -599,14 +604,14 @@ function findLatestUnresolvedPrLifecycleEscalation(
       continue
     }
 
-    if (!isPrLifecycleScorecardReason(escalation.reason)) {
+    if (classifyBootstrapFailureKind(escalation.reason) !== 'pr_lifecycle_failure') {
       continue
     }
 
     if (escalation.prNumber !== null) {
       if (
         openLinkedPrNumbers.has(escalation.prNumber)
-        && !isGenericLinkedPrLifecycleReason(escalation.reason)
+        && !shouldRetainOpenPrLifecycleEscalation(escalation.reason)
       ) {
         continue
       }

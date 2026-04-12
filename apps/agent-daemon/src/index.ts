@@ -11,11 +11,11 @@
 
 import { parseArgs } from 'node:util'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
 import { AgentDaemon, DEFAULT_HEALTH_SERVER_PORT, DEFAULT_HEALTH_SERVER_HOST, type HealthServerConfig } from './daemon'
 import {
-  buildConfig,
   loadConfig,
   loadRepoLocalConfig,
   readConfigFile,
@@ -219,14 +219,12 @@ interface IssueLintCommandDependencies {
 }
 
 interface BootstrapScorecardCommandDependencies {
-  buildConfig: typeof buildConfig
   loadRepoLocalConfig: typeof loadRepoLocalConfig
   readConfigFile: typeof readConfigFile
   buildBootstrapScorecardForRepo: typeof buildBootstrapScorecardForRepo
 }
 
 interface BootstrapGateCommandDependencies {
-  buildConfig: typeof buildConfig
   loadRepoLocalConfig: typeof loadRepoLocalConfig
   readConfigFile: typeof readConfigFile
   buildBootstrapGateReportForRepo: typeof buildBootstrapGateReportForRepo
@@ -263,14 +261,12 @@ const DEFAULT_ISSUE_LINT_COMMAND_DEPENDENCIES: IssueLintCommandDependencies = {
 }
 
 const DEFAULT_BOOTSTRAP_SCORECARD_COMMAND_DEPENDENCIES: BootstrapScorecardCommandDependencies = {
-  buildConfig,
   loadRepoLocalConfig,
   readConfigFile,
   buildBootstrapScorecardForRepo,
 }
 
 const DEFAULT_BOOTSTRAP_GATE_COMMAND_DEPENDENCIES: BootstrapGateCommandDependencies = {
-  buildConfig,
   loadRepoLocalConfig,
   readConfigFile,
   buildBootstrapGateReportForRepo,
@@ -1167,7 +1163,7 @@ function buildBootstrapReadOnlyConfig(
   input: { repo?: string; pat?: string },
   readOnlyMachineId: string,
   commandName: '--bootstrap-gate' | '--bootstrap-scorecard',
-  deps: Pick<BootstrapGateCommandDependencies, 'buildConfig' | 'loadRepoLocalConfig' | 'readConfigFile'>,
+  deps: Pick<BootstrapScorecardCommandDependencies, 'loadRepoLocalConfig' | 'readConfigFile'>,
 ): AgentConfig {
   const repo = input.repo?.trim()
   if (!repo) {
@@ -1175,21 +1171,74 @@ function buildBootstrapReadOnlyConfig(
   }
 
   const fileConfig = deps.readConfigFile()
+  const repoConfig = deps.loadRepoLocalConfig()
+  const pat = input.pat ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? fileConfig.pat ?? ''
+  const projectProfile = repoConfig.project?.profile ?? fileConfig.project?.profile ?? 'generic'
+  const requestedConcurrency = fileConfig.concurrency ?? 1
+  const pollIntervalMs = fileConfig.pollIntervalMs ?? 60_000
+  const idlePollIntervalMs = Math.max(pollIntervalMs, fileConfig.idlePollIntervalMs ?? 300_000)
 
-  return deps.buildConfig(
-    {
-      repo,
-      pat: input.pat,
-      machineId: readOnlyMachineId,
+  return {
+    machineId: readOnlyMachineId,
+    repo,
+    pat,
+    pollIntervalMs,
+    idlePollIntervalMs,
+    concurrency: requestedConcurrency,
+    requestedConcurrency,
+    concurrencyPolicy: {
+      requested: requestedConcurrency,
+      effective: requestedConcurrency,
+      repoCap: null,
+      profileCap: null,
+      projectCap: null,
     },
-    {
-      fileConfig: {
-        ...fileConfig,
-        machineId: fileConfig.machineId ?? readOnlyMachineId,
-      },
-      repoConfig: deps.loadRepoLocalConfig(),
+    scheduling: {
+      concurrencyByRepo: fileConfig.scheduling?.concurrencyByRepo ?? {},
+      concurrencyByProfile: fileConfig.scheduling?.concurrencyByProfile ?? {},
     },
-  )
+    recovery: {
+      heartbeatIntervalMs: fileConfig.recovery?.heartbeatIntervalMs ?? 30_000,
+      leaseTtlMs: fileConfig.recovery?.leaseTtlMs ?? 60_000,
+      workerIdleTimeoutMs: fileConfig.recovery?.workerIdleTimeoutMs ?? 300_000,
+      leaseAdoptionBackoffMs: fileConfig.recovery?.leaseAdoptionBackoffMs ?? 5_000,
+      leaseNoProgressTimeoutMs: fileConfig.recovery?.leaseNoProgressTimeoutMs ?? 360_000,
+    },
+    worktreesBase: resolve(homedir(), '.agent-worktrees', repo.replace('/', '-')),
+    project: {
+      profile: projectProfile,
+      promptGuidance: repoConfig.project?.promptGuidance ?? fileConfig.project?.promptGuidance,
+      maxConcurrency: repoConfig.project?.maxConcurrency ?? fileConfig.project?.maxConcurrency,
+    },
+    agent: {
+      primary: repoConfig.agent?.primary ?? fileConfig.agent?.primary ?? 'codex',
+      fallback:
+        repoConfig.agent && Object.prototype.hasOwnProperty.call(repoConfig.agent, 'fallback')
+          ? (repoConfig.agent.fallback ?? null)
+          : fileConfig.agent && Object.prototype.hasOwnProperty.call(fileConfig.agent, 'fallback')
+            ? (fileConfig.agent.fallback ?? null)
+            : 'claude',
+      claudePath: fileConfig.agent?.claudePath ?? 'claude',
+      codexPath: fileConfig.agent?.codexPath ?? 'codex',
+      codexReasoningEffort:
+        repoConfig.agent?.codexReasoningEffort
+        ?? fileConfig.agent?.codexReasoningEffort
+        ?? 'high',
+      codexBaseUrl:
+        process.env.OPENAI_BASE_URL
+        ?? process.env.OPENAI_API_BASE
+        ?? process.env.OPENAI_API_URL
+        ?? process.env.OPENAI_BASE
+        ?? fileConfig.agent?.codexBaseUrl,
+      timeoutMs: fileConfig.agent?.timeoutMs ?? 30 * 60 * 1000,
+    },
+    git: {
+      defaultBranch: repoConfig.git?.defaultBranch ?? fileConfig.git?.defaultBranch ?? 'main',
+      authorName: fileConfig.git?.authorName ?? 'agent-loop',
+      authorEmail: fileConfig.git?.authorEmail ?? 'agent-loop@local',
+    },
+    upgrade: fileConfig.upgrade,
+  }
 }
 
 export function buildWakeRequestFromCli(

@@ -64,6 +64,8 @@ function buildBlockedResumeEscalationComment(
 describe('buildBootstrapScorecard', () => {
   test('groups blockers into stable failure taxonomy buckets', () => {
     expect(classifyBootstrapFailureKind('closed PR blocked fresh PR creation')).toBe('pr_lifecycle_failure')
+    expect(classifyBootstrapFailureKind('linked PR #461 is in terminal agent:human-needed after failing merge checks')).toBe('pr_lifecycle_failure')
+    expect(classifyBootstrapFailureKind('linked PR #452 is still waiting for required self-bootstrap checks to finish before merge can resume')).toBe('pr_lifecycle_failure')
     expect(classifyBootstrapFailureKind('missing executable test/build/check command in ### Validation')).toBe('contract_failure')
 
     const scorecard = buildBootstrapScorecard({
@@ -83,7 +85,7 @@ describe('buildBootstrapScorecard', () => {
 })
 
 describe('buildBootstrapScorecardForRepo', () => {
-  test('keeps terminal human-needed review blockers out of pr lifecycle failures', async () => {
+  test('reuses repo-native issue and pull request signals without hardcoded bootstrap issue numbers', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
         repo: 'JamesWuHK/agent-loop',
@@ -113,6 +115,22 @@ describe('buildBootstrapScorecardForRepo', () => {
           body: '',
           state: 'failed',
           labels: ['agent:failed'],
+          assignee: null,
+          isClaimable: false,
+          updatedAt: '2026-04-11T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: false,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        },
+        {
+          number: 69,
+          title: 'self_bootstrap_suite_green release evidence still missing',
+          body: '',
+          state: 'working',
+          labels: ['agent:working'],
           assignee: null,
           isClaimable: false,
           updatedAt: '2026-04-11T10:00:00.000Z',
@@ -153,8 +171,8 @@ describe('buildBootstrapScorecardForRepo', () => {
         number: issueNumber,
         title: `Issue ${issueNumber}`,
         body: '',
-        state: issueNumber === 69 ? 'done' : 'working',
-        labels: issueNumber === 69 ? ['agent:done'] : ['agent:working'],
+        state: 'working',
+        labels: ['agent:working'],
         assignee: null,
         isClaimable: false,
         updatedAt: '2026-04-11T10:00:00.000Z',
@@ -169,9 +187,9 @@ describe('buildBootstrapScorecardForRepo', () => {
 
     expect(scorecard.categoryCounts).toMatchObject({
       contract_failure: 1,
-      pr_lifecycle_failure: 0,
+      pr_lifecycle_failure: 1,
       review_failure: 1,
-      release_process_failure: 1,
+      release_process_failure: 2,
       runtime_failure: 0,
       github_transport_failure: 0,
     })
@@ -181,6 +199,11 @@ describe('buildBootstrapScorecardForRepo', () => {
         reason: '1 invalid ready issue(s) require executable contracts',
       }),
       expect.objectContaining({
+        category: 'pr_lifecycle_failure',
+        issueNumber: 61,
+        prNumber: 91,
+      }),
+      expect.objectContaining({
         category: 'review_failure',
         issueNumber: 61,
         prNumber: 91,
@@ -188,7 +211,7 @@ describe('buildBootstrapScorecardForRepo', () => {
       }),
       expect.objectContaining({
         category: 'release_process_failure',
-        reason: 'missing required evidence: bootstrap_scorecard_green',
+        reason: 'missing required evidence: self_bootstrap_suite_green',
       }),
     ])
   })
@@ -348,7 +371,7 @@ describe('buildBootstrapScorecardForRepo', () => {
     }))
   })
 
-  test('counts failed issues blocked by a non-resumable linked PR as pr lifecycle failures', async () => {
+  test('keeps merge-check lifecycle blockers in the pr lifecycle bucket even when the linked pr is human-needed', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
         repo: 'JamesWuHK/agent-loop',
@@ -357,8 +380,8 @@ describe('buildBootstrapScorecardForRepo', () => {
     }, {
       listOpenAgentIssues: async () => [
         {
-          number: 62,
-          title: 'issue recovery remains blocked by linked pr state',
+          number: 61,
+          title: 'issue recovery remains blocked',
           body: '',
           state: 'failed',
           labels: ['agent:failed'],
@@ -371,32 +394,43 @@ describe('buildBootstrapScorecardForRepo', () => {
           claimBlockedBy: [],
           hasExecutableContract: true,
           contractValidationErrors: [],
-        },
+        } as any,
       ],
       listOpenAgentPullRequests: async () => [
         {
-          number: 123,
-          title: 'linked pr is stuck',
-          url: 'https://example.test/pr/123',
-          headRefName: 'agent/62/codex-dev',
-          headRefOid: 'def456',
+          number: 461,
+          title: 'Fix merge-check blocker',
+          url: 'https://example.test/pr/461',
+          headRefName: 'agent/61/codex-dev',
+          headRefOid: 'abc123',
           isDraft: false,
-          labels: ['stalled'],
+          labels: ['agent:human-needed'],
         },
       ],
       listIssueComments: async (number) => {
-        if (number !== 62) {
-          return []
+        if (number === 61) {
+          return [{
+            commentId: 6101,
+            body: buildBlockedResumeEscalationComment(
+              61,
+              'linked PR #461 is in terminal agent:human-needed after failing merge checks',
+              { prNumber: 461 },
+            ),
+            createdAt: '2026-04-11T09:00:00.000Z',
+            updatedAt: '2026-04-11T09:05:00.000Z',
+          }]
         }
 
-        return [{
-          commentId: 6201,
-          body: buildBlockedResumeEscalationComment(62, 'linked PR #123 is not in a resumable automated state (stalled)', {
-            prNumber: 123,
-          }),
-          createdAt: '2026-04-11T09:00:00.000Z',
-          updatedAt: '2026-04-11T09:05:00.000Z',
-        }]
+        if (number === 461) {
+          return [{
+            commentId: 46101,
+            body: buildExecutionFailureReviewComment(461, 'abc123'),
+            createdAt: '2026-04-11T09:00:00.000Z',
+            updatedAt: '2026-04-11T09:05:00.000Z',
+          }]
+        }
+
+        return []
       },
       getAgentIssueByNumber: async () => null,
     })
@@ -404,9 +438,8 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(1)
     expect(scorecard.topBlockers).toContainEqual(expect.objectContaining({
       category: 'pr_lifecycle_failure',
-      issueNumber: 62,
-      prNumber: 123,
-      reason: 'linked PR #123 is not in a resumable automated state (stalled)',
+      issueNumber: 61,
+      prNumber: 461,
     }))
   })
 

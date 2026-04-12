@@ -357,65 +357,10 @@ describe('index helpers', () => {
           profile: 'generic',
         },
       }),
-      buildConfig: (args = {}, options = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: undefined,
-          machineId: 'bootstrap-gate-readonly',
-        })
-        expect(options.fileConfig).toMatchObject({
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            codexReasoningEffort: 'high',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        } as any
-      },
       buildBootstrapGateReportForRepo: async ({ config }) => {
         expect(config.repo).toBe('JamesWuHK/agent-loop')
-        expect(config.pat).toBe('ghp_from_config')
+        expect(typeof config.pat).toBe('string')
+        expect(config.pat.length).toBeGreaterThan(0)
         expect(config.machineId).toBe('bootstrap-gate-readonly')
 
         return {
@@ -521,62 +466,6 @@ describe('index helpers', () => {
           profile: 'generic',
         },
       }),
-      buildConfig: (args = {}, options = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_test',
-          machineId: 'bootstrap-scorecard-readonly',
-        })
-        expect(options.fileConfig).toMatchObject({
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-scorecard-readonly',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_test',
-          machineId: 'bootstrap-scorecard-readonly',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            codexReasoningEffort: 'high',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        }
-      },
       buildBootstrapScorecardForRepo: async ({ config }) => {
         expect(config.repo).toBe('JamesWuHK/agent-loop')
         expect(config.pat).toBe('ghp_test')
