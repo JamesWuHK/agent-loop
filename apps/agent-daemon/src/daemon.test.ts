@@ -2012,7 +2012,7 @@ describe('daemon merge recovery helpers', () => {
     })).toEqual({
       nextReviewLabel: 'human-needed',
       shouldRunAutoFix: false,
-      shouldMarkIssueFailed: false,
+      shouldMarkIssueFailed: true,
     })
   })
 

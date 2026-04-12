@@ -5379,7 +5379,7 @@ export function classifyStandalonePrReviewFollowup(
     return {
       nextReviewLabel: 'human-needed',
       shouldRunAutoFix: false,
-      shouldMarkIssueFailed: false,
+      shouldMarkIssueFailed: true,
     }
   }
 
