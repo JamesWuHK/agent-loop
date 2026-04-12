@@ -460,7 +460,8 @@ async function collectPrLifecycleBlockers(
         continue
       }
 
-      const canResumeHumanNeededReview = new Set(pullRequest.labels).has(PR_REVIEW_LABELS.HUMAN_NEEDED)
+      const pullRequestLabels = new Set(pullRequest.labels)
+      const canResumeHumanNeededReview = pullRequestLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)
         ? canResumeHumanNeededPrReview(
           prComments,
           DEFAULT_MAX_AUTOMATED_PR_REVIEW_ATTEMPTS,
@@ -471,6 +472,14 @@ async function collectPrLifecycleBlockers(
       const blocked = getFailedIssueResumeBlock(pullRequest, canResumeHumanNeededReview)
 
       if (blocked === null) {
+        if (
+          fallbackBlockedEscalation?.prNumber === pullRequest.number
+          && isGenericLinkedPrLifecycleReason(fallbackBlockedEscalation.reason)
+        ) {
+          firstBlocked = fallbackBlockedEscalation
+          continue
+        }
+
         hasResumableLinkedPr = true
         break
       }
@@ -480,8 +489,7 @@ async function collectPrLifecycleBlockers(
       }
 
       if (firstBlocked === null) {
-        const blockedCategory = classifyBootstrapFailureKind(blocked.reason)
-        if (blockedCategory === 'pr_lifecycle_failure') {
+        if (!pullRequestLabels.has(PR_REVIEW_LABELS.HUMAN_NEEDED)) {
           firstBlocked = {
             issueNumber: issue.number,
             prNumber: pullRequest.number,
@@ -504,6 +512,15 @@ async function collectPrLifecycleBlockers(
   return blockers
 }
 
+function isGenericLinkedPrLifecycleReason(reason: string): boolean {
+  return /^linked pr #\d+ is not in a resumable automated state\b/i.test(reason)
+}
+
+function isPrLifecycleScorecardReason(reason: string): boolean {
+  return classifyBootstrapFailureKind(reason) === 'pr_lifecycle_failure'
+    || isGenericLinkedPrLifecycleReason(reason)
+}
+
 function findLatestUnresolvedPrLifecycleEscalation(
   issueComments: IssueComment[],
   issueNumber: number,
@@ -517,12 +534,15 @@ function findLatestUnresolvedPrLifecycleEscalation(
       continue
     }
 
-    if (classifyBootstrapFailureKind(escalation.reason) !== 'pr_lifecycle_failure') {
+    if (!isPrLifecycleScorecardReason(escalation.reason)) {
       continue
     }
 
     if (escalation.prNumber !== null) {
-      if (openLinkedPrNumbers.has(escalation.prNumber)) {
+      if (
+        openLinkedPrNumbers.has(escalation.prNumber)
+        && !isGenericLinkedPrLifecycleReason(escalation.reason)
+      ) {
         continue
       }
 

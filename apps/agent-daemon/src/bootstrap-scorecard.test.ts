@@ -298,6 +298,68 @@ describe('buildBootstrapScorecardForRepo', () => {
     }))
   })
 
+  test('counts failed issues blocked by a non-resumable linked PR as pr lifecycle failures', async () => {
+    const scorecard = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, {
+      listOpenAgentIssues: async () => [
+        {
+          number: 62,
+          title: 'issue recovery remains blocked by linked pr state',
+          body: '',
+          state: 'failed',
+          labels: ['agent:failed'],
+          assignee: null,
+          isClaimable: false,
+          updatedAt: '2026-04-11T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: false,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        },
+      ],
+      listOpenAgentPullRequests: async () => [
+        {
+          number: 123,
+          title: 'linked pr is stuck',
+          url: 'https://example.test/pr/123',
+          headRefName: 'agent/62/codex-dev',
+          headRefOid: 'def456',
+          isDraft: false,
+          labels: ['stalled'],
+        },
+      ],
+      listIssueComments: async (number) => {
+        if (number !== 62) {
+          return []
+        }
+
+        return [{
+          commentId: 6201,
+          body: buildBlockedResumeEscalationComment(62, 'linked PR #123 is not in a resumable automated state (stalled)', {
+            prNumber: 123,
+          }),
+          createdAt: '2026-04-11T09:00:00.000Z',
+          updatedAt: '2026-04-11T09:05:00.000Z',
+        }]
+      },
+      getAgentIssueByNumber: async () => null,
+    })
+
+    expect(scorecard.categoryCounts.pr_lifecycle_failure).toBe(1)
+    expect(scorecard.topBlockers).toContainEqual(expect.objectContaining({
+      category: 'pr_lifecycle_failure',
+      issueNumber: 62,
+      prNumber: 123,
+      reason: 'linked PR #123 is not in a resumable automated state (stalled)',
+    }))
+  })
+
   test('mirrors bootstrap gate release evidence codes even when open issues are empty', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
