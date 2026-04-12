@@ -59,6 +59,7 @@ interface AutomatedPrReviewMetadata {
   attempt: number
   approved: boolean
   canMerge: boolean
+  action?: 'approved' | 'retrying' | 'human-needed'
   headRefOid?: string
   issueContractFingerprint?: string
 }
@@ -72,6 +73,7 @@ export interface AutomatedPrReviewCommentLike {
 export interface LatestAutomatedPrReviewState {
   metadata: AutomatedPrReviewMetadata
   feedback: StructuredReviewFeedbackPayload | null
+  action: 'approved' | 'retrying' | 'human-needed' | null
   commentCreatedAt: string | null
   commentUpdatedAt: string | null
 }
@@ -437,6 +439,7 @@ export function buildPrReviewComment(
     attempt,
     approved: review.approved,
     canMerge: review.canMerge,
+    action,
     ...(headRefOid ? { headRefOid } : {}),
     ...(issueContractFingerprint ? { issueContractFingerprint } : {}),
   }
@@ -504,12 +507,14 @@ export function extractLatestAutomatedPrReviewState(
   comments: AutomatedPrReviewCommentLike[],
 ): LatestAutomatedPrReviewState | null {
   for (let index = comments.length - 1; index >= 0; index--) {
-    const metadata = extractAutomatedPrReviewMetadata(comments[index]?.body ?? '')
+    const body = comments[index]?.body ?? ''
+    const metadata = extractAutomatedPrReviewMetadata(body)
     if (!metadata) continue
 
     return {
       metadata,
-      feedback: extractStructuredReviewFeedback(comments[index]?.body ?? ''),
+      feedback: extractStructuredReviewFeedback(body),
+      action: extractAutomatedPrReviewAction(body, metadata),
       commentCreatedAt: comments[index]?.createdAt ?? null,
       commentUpdatedAt: comments[index]?.updatedAt ?? comments[index]?.createdAt ?? null,
     }
@@ -559,6 +564,8 @@ export function canResumeAutomatedPrReview(
   if (!latest) return false
 
   return (
+    latest.action === 'retrying'
+    &&
     latest.metadata.approved === false
     && latest.metadata.canMerge === false
     && latest.feedback !== null
@@ -603,11 +610,21 @@ export function canResumeHumanNeededPrReview(
   currentHeadRefOid: string | null | undefined,
   issueBody: string | null | undefined,
 ): boolean {
-  return (
+  const latest = extractLatestAutomatedPrReviewState(comments)
+  if (!latest) return false
+
+  const canResumeFromTerminalState = (
     didLatestAutomatedPrReviewExecutionFail(comments)
-    || canResumeAutomatedPrReview(comments, maxAttempt)
     || shouldRestartAutomatedPrReviewOnNewHead(comments, currentHeadRefOid)
     || shouldRestartAutomatedPrReviewOnIssueUpdate(comments, issueBody)
+  )
+  if (latest.action === 'human-needed') {
+    return canResumeFromTerminalState
+  }
+
+  return (
+    canResumeFromTerminalState
+    || canResumeAutomatedPrReview(comments, maxAttempt)
   )
 }
 
@@ -636,6 +653,7 @@ export function getReusableAutomatedPrReviewFeedback(
   const latest = extractLatestAutomatedPrReviewState(comments)
   if (!latest) return null
   if (latest.feedback === null) return null
+  if (latest.action !== 'retrying') return null
   if (latest.metadata.approved || latest.metadata.canMerge) return null
   if (latest.metadata.attempt >= maxAttempt) return null
   if (!latest.metadata.headRefOid || latest.metadata.headRefOid !== currentHeadRefOid) return null
@@ -824,22 +842,51 @@ function extractAutomatedPrReviewMetadata(body: string): AutomatedPrReviewMetada
       return null
     }
 
+    const action = parsed.action === 'approved' || parsed.action === 'retrying' || parsed.action === 'human-needed'
+      ? parsed.action
+      : undefined
+    const headRefOid = typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
+      ? parsed.headRefOid.trim()
+      : undefined
+    const issueContractFingerprint = typeof parsed.issueContractFingerprint === 'string'
+      && parsed.issueContractFingerprint.trim().length > 0
+      ? parsed.issueContractFingerprint.trim()
+      : undefined
+
     return {
       pr,
       attempt,
       approved: parsed.approved === true,
       canMerge: parsed.canMerge === true,
-      headRefOid: typeof parsed.headRefOid === 'string' && parsed.headRefOid.trim().length > 0
-        ? parsed.headRefOid.trim()
-        : undefined,
-      issueContractFingerprint: typeof parsed.issueContractFingerprint === 'string'
-        && parsed.issueContractFingerprint.trim().length > 0
-        ? parsed.issueContractFingerprint.trim()
-        : undefined,
+      ...(action ? { action } : {}),
+      ...(headRefOid ? { headRefOid } : {}),
+      ...(issueContractFingerprint ? { issueContractFingerprint } : {}),
     }
   } catch {
     return null
   }
+}
+
+function extractAutomatedPrReviewAction(
+  body: string,
+  metadata: AutomatedPrReviewMetadata,
+): 'approved' | 'retrying' | 'human-needed' | null {
+  if (metadata.action) return metadata.action
+  if (metadata.approved || metadata.canMerge) return 'approved'
+  if (body.includes('## Automated review found blocking issues — starting one auto-fix retry')) {
+    return 'retrying'
+  }
+  if (body.includes('## Automated review still failing — human intervention required')) {
+    return 'human-needed'
+  }
+  if (body.includes('Next step: daemon will attempt one automatic fix on the same branch.')) {
+    return 'retrying'
+  }
+  if (body.includes('Next step: stopping automation and leaving the worktree/branch for a human.')) {
+    return 'human-needed'
+  }
+
+  return null
 }
 
 function buildIssueContractFingerprint(body: string | null | undefined): string | null {
