@@ -87,7 +87,7 @@ describe('parseClaimEventComment', () => {
 })
 
 describe('resolveActiveClaimMachine', () => {
-  it('keeps the earliest claimant as active owner until a reset event occurs', () => {
+  it('keeps ownership with the same machine when it emits a later duplicate claimed event', () => {
     const comments = [
       {
         body: buildEventComment({
@@ -119,6 +119,31 @@ describe('resolveActiveClaimMachine', () => {
     ]
 
     expect(resolveActiveClaimMachine(comments)).toBe('codex-a')
+  })
+
+  it('lets a newer current-epoch claimant override an older historical claimant without a reset', () => {
+    const comments = [
+      {
+        body: buildEventComment({
+          event: 'claimed',
+          machine: 'codex-old',
+          ts: '2026-04-04T08:00:03.369Z',
+          worktreeId: 'issue-171-codex-old',
+        }),
+        createdAt: '2026-04-04T08:00:04Z',
+      },
+      {
+        body: buildEventComment({
+          event: 'claimed',
+          machine: 'codex-dev',
+          ts: '2026-04-04T08:31:00.000Z',
+          worktreeId: 'issue-171-codex-dev',
+        }),
+        createdAt: '2026-04-04T08:31:02Z',
+      },
+    ]
+
+    expect(resolveActiveClaimMachine(comments)).toBe('codex-dev')
   })
 
   it('hands ownership to a later claimant after stale-requeue resets the epoch', () => {

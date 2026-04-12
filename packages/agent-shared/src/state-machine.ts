@@ -91,7 +91,7 @@ export function resolveActiveClaimMachine(
       continue
     }
 
-    if (entry.event.event === 'claimed' && activeMachine === null) {
+    if (entry.event.event === 'claimed') {
       activeMachine = entry.event.machine
     }
   }
