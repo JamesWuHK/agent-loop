@@ -41,6 +41,7 @@ const baseFileConfig: Partial<AgentConfig> = {
     fallback: 'codex',
     claudePath: 'claude-home',
     codexPath: 'codex-home',
+    codexReasoningEffort: 'medium',
     timeoutMs: 90_000,
   },
   git: {
@@ -128,6 +129,7 @@ describe('buildConfig', () => {
     ])
     expect(config.project.maxConcurrency).toBeUndefined()
     expect(config.agent.primary).toBe('claude')
+    expect(config.agent.codexReasoningEffort).toBe('medium')
     expect(config.git.defaultBranch).toBe('master')
     expect(config.requestedConcurrency).toBe(1)
     expect(config.concurrency).toBe(1)
@@ -186,6 +188,50 @@ describe('buildConfig', () => {
 
     expect(config.agent.primary).toBe('codex')
     expect(config.agent.fallback).toBeNull()
+  })
+
+  test('defaults Codex reasoning effort to high when neither home nor repo-local config sets it', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: {
+          ...baseFileConfig,
+          agent: {
+            primary: 'claude',
+            fallback: 'codex',
+            claudePath: 'claude-home',
+            codexPath: 'codex-home',
+            codexReasoningEffort: undefined,
+            timeoutMs: 90_000,
+          },
+        },
+        repoConfig: {},
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.agent.codexReasoningEffort).toBe('high')
+  })
+
+  test('lets repo-local Codex reasoning effort override the home config value', () => {
+    const config = buildConfig(
+      {},
+      {
+        fileConfig: baseFileConfig,
+        repoConfig: {
+          agent: {
+            codexReasoningEffort: 'high',
+          },
+        },
+        env: {},
+        homeDir: '/tmp/agent-loop-home',
+      },
+    )
+
+    expect(config.agent.codexReasoningEffort).toBe('high')
+    expect(config.agent.primary).toBe('claude')
+    expect(config.agent.fallback).toBe('codex')
   })
 
   test('lets CLI override the idle backstop poll interval but never below the active poll interval', () => {

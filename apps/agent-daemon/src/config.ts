@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import type {
   AgentConfig,
+  CodexReasoningEffort,
   ProjectProfileName,
   ProjectPromptContext,
   ProjectPromptGuidanceOverrides,
@@ -27,6 +28,7 @@ export interface RepoLocalConfig {
   agent?: {
     primary?: AgentConfig['agent']['primary']
     fallback?: AgentConfig['agent']['fallback']
+    codexReasoningEffort?: CodexReasoningEffort
   }
   git?: {
     defaultBranch?: string
@@ -212,6 +214,10 @@ export function buildConfig(
       fallback: agentFallback,
       claudePath: fileConfig.agent?.claudePath ?? 'claude',
       codexPath: fileConfig.agent?.codexPath ?? 'codex',
+      codexReasoningEffort:
+        repoConfig.agent?.codexReasoningEffort
+        ?? fileConfig.agent?.codexReasoningEffort
+        ?? 'high',
       codexBaseUrl:
         env.OPENAI_BASE_URL ??
         env.OPENAI_API_BASE ??
