@@ -256,6 +256,10 @@ export async function buildBootstrapScorecardForRepo(
       linkedIssueLoader,
     ),
   ])
+  const runtimeBlockers = await collectRuntimeBlockers(
+    managedIssues,
+    commentLoader,
+  )
   const releaseEvidenceMissing = await collectScorecardSource(
     async () => {
       const report = await buildBootstrapGateReportForRepo({
@@ -276,7 +280,7 @@ export async function buildBootstrapScorecardForRepo(
     audit: issuesResult
       ? buildAuditIssueSummary(managedIssues.map(buildAuditedIssue))
       : buildEmptyAuditIssueSummary(),
-    runtimeBlockers: [],
+    runtimeBlockers,
     prBlockers,
     reviewBlockers,
     transportBlockers,
@@ -512,6 +516,31 @@ async function collectPrLifecycleBlockers(
   return blockers
 }
 
+async function collectRuntimeBlockers(
+  issues: AgentIssue[],
+  commentLoader: ReturnType<typeof createScorecardCommentLoader>,
+): Promise<BootstrapScorecardSignal[]> {
+  const blockers: BootstrapScorecardSignal[] = []
+
+  for (const issue of issues) {
+    if (issue.state !== 'failed') {
+      continue
+    }
+
+    const issueComments = await commentLoader.loadIssueComments(issue.number)
+    if (!issueComments) {
+      continue
+    }
+
+    const runtimeBlocker = findLatestUnresolvedRuntimeEscalation(issueComments, issue.number)
+    if (runtimeBlocker) {
+      blockers.push(runtimeBlocker)
+    }
+  }
+
+  return blockers
+}
+
 function isGenericLinkedPrLifecycleReason(reason: string): boolean {
   return /^linked pr #\d+ is not in a resumable automated state\b/i.test(reason)
 }
@@ -549,6 +578,47 @@ function findLatestUnresolvedPrLifecycleEscalation(
       if (evaluateBlockedIssueResumeResolution(issueComments, issueNumber, escalation.prNumber).canResume) {
         continue
       }
+    }
+
+    const timestamp = readScorecardCommentTimestamp(comment, escalation.escalatedAt)
+    if (latestBlocked && latestBlocked.timestamp >= timestamp) {
+      continue
+    }
+
+    latestBlocked = {
+      signal: {
+        issueNumber,
+        prNumber: escalation.prNumber,
+        reason: escalation.reason,
+      },
+      timestamp,
+    }
+  }
+
+  return latestBlocked?.signal ?? null
+}
+
+function findLatestUnresolvedRuntimeEscalation(
+  issueComments: IssueComment[],
+  issueNumber: number,
+): BootstrapScorecardSignal | null {
+  let latestBlocked: { signal: BootstrapScorecardSignal; timestamp: number } | null = null
+
+  for (const comment of issueComments) {
+    const escalation = extractBlockedIssueResumeEscalationComment(comment.body)
+    if (!escalation || escalation.issueNumber !== issueNumber) {
+      continue
+    }
+
+    if (classifyBootstrapFailureKind(escalation.reason) !== 'runtime_failure') {
+      continue
+    }
+
+    if (
+      escalation.prNumber !== null
+      && evaluateBlockedIssueResumeResolution(issueComments, issueNumber, escalation.prNumber).canResume
+    ) {
+      continue
     }
 
     const timestamp = readScorecardCommentTimestamp(comment, escalation.escalatedAt)

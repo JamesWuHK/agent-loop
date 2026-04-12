@@ -246,6 +246,56 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts.runtime_failure).toBe(0)
   })
 
+  test('surfaces runtime blockers from unresolved blocked-resume escalation comments', async () => {
+    const scorecard = await buildBootstrapScorecardForRepo({
+      config: {
+        repo: 'JamesWuHK/agent-loop',
+        pat: 'test-token',
+      } as never,
+    }, {
+      listOpenAgentIssues: async () => [
+        {
+          number: 63,
+          title: 'issue recovery is blocked by daemon runtime failure',
+          body: '',
+          state: 'failed',
+          labels: ['agent:failed'],
+          assignee: null,
+          isClaimable: false,
+          updatedAt: '2026-04-11T10:00:00.000Z',
+          dependencyIssueNumbers: [],
+          hasDependencyMetadata: false,
+          dependencyParseError: false,
+          claimBlockedBy: [],
+          hasExecutableContract: true,
+          contractValidationErrors: [],
+        },
+      ],
+      listOpenAgentPullRequests: async () => [],
+      listIssueComments: async (number) => {
+        if (number !== 63) {
+          return []
+        }
+
+        return [{
+          commentId: 6301,
+          body: buildBlockedResumeEscalationComment(63, 'daemon runtime failure: startup recovery deferred by local runtime health failure'),
+          createdAt: '2026-04-11T09:00:00.000Z',
+          updatedAt: '2026-04-11T09:05:00.000Z',
+        }]
+      },
+      getAgentIssueByNumber: async () => null,
+    })
+
+    expect(scorecard.categoryCounts.runtime_failure).toBe(1)
+    expect(scorecard.topBlockers).toContainEqual(expect.objectContaining({
+      category: 'runtime_failure',
+      issueNumber: 63,
+      prNumber: null,
+      reason: 'daemon runtime failure: startup recovery deferred by local runtime health failure',
+    }))
+  })
+
   test('surfaces closed-pr lifecycle blockers from blocked-resume escalation comments without an open linked PR', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
