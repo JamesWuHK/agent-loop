@@ -4534,7 +4534,7 @@ export function getFailedIssueResumeBlock(
 export function shouldClearFailedIssueResumeTrackingAfterFinalize(
   status: 'completed' | 'failed' | 'recoverable',
 ): boolean {
-  return status === 'failed'
+  return false
 }
 
 export function buildBlockedIssueResumeEscalationComment(
