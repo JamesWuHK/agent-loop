@@ -32,6 +32,7 @@ import {
   shouldDeferResumableIssueForActiveLinkedPrLease,
   shouldClearFailedIssueResumeTrackingAfterFinalize,
   classifyApprovedPrMergeChecksGate,
+  classifyStandalonePrReviewFollowup,
   classifyLinkedIssueApprovedMergeOutcome,
   shouldEscalateBlockedIssueResume,
   shouldRefreshBlockedHumanNeededPr,
@@ -2000,6 +2001,33 @@ describe('daemon merge recovery helpers', () => {
       true,
       true,
     )).toBe(false)
+  })
+
+  test('keeps blocked refresh rerun rejections in human-needed follow-up', () => {
+    expect(classifyStandalonePrReviewFollowup({
+      approved: false,
+      canMerge: false,
+    }, {
+      blockedRefreshRerun: true,
+    })).toBe('human-needed')
+  })
+
+  test('still allows one retry auto-fix follow-up for ordinary standalone rejections', () => {
+    expect(classifyStandalonePrReviewFollowup({
+      approved: false,
+      canMerge: false,
+    }, {
+      blockedRefreshRerun: false,
+    })).toBe('retry')
+  })
+
+  test('keeps blocked refresh rerun approvals on the approved follow-up path', () => {
+    expect(classifyStandalonePrReviewFollowup({
+      approved: true,
+      canMerge: true,
+    }, {
+      blockedRefreshRerun: true,
+    })).toBe('approved')
   })
 
   test('suppresses repeated PR refresh retries when head and base are unchanged since the last failure', () => {
