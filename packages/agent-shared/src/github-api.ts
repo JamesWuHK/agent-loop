@@ -16,8 +16,8 @@ import { ISSUE_LABELS, ISSUE_PRIORITY_LABELS, PR_REVIEW_LABELS } from './types'
 import {
   inferState,
   buildEventComment,
+  inspectClaimSettlementSnapshot,
   parseIssueDependencyMetadata,
-  resolveActiveClaimMachine,
 } from './state-machine'
 import { parseIssueContract } from './issue-contract'
 import { validateIssueContract } from './issue-contract-validator'
@@ -1249,7 +1249,7 @@ export async function claimIssue(
       config,
     )
 
-    const activeClaimMachine = await settleActiveClaimMachine(issueNumber, config)
+    const activeClaimMachine = await settleActiveClaimMachine(issueNumber, config, event)
     if (activeClaimMachine && activeClaimMachine !== machineId) {
       return { success: false, issueNumber, reason: 'already-claimed' }
     }
@@ -2099,12 +2099,26 @@ async function setManagedIssueStateLabels(
 async function settleActiveClaimMachine(
   issueNumber: number,
   config: AgentConfig,
+  expectedClaimEvent?: ClaimEvent,
 ): Promise<string | null> {
+  let lastConflictingMachine: string | null = null
+
   for (let attempt = 1; attempt <= CLAIM_OWNERSHIP_SETTLE_ATTEMPTS; attempt++) {
     const comments = await listIssueComments(issueNumber, config)
-    const activeMachine = resolveActiveClaimMachine(comments)
-    if (activeMachine !== null) {
-      return activeMachine
+    const snapshot = inspectClaimSettlementSnapshot(comments, expectedClaimEvent)
+
+    if (snapshot.activeMachine !== null) {
+      if (
+        snapshot.expectedClaimObserved
+        || !expectedClaimEvent
+        || snapshot.activeMachine === expectedClaimEvent.machine
+      ) {
+        return snapshot.activeMachine
+      }
+    }
+
+    if (snapshot.hasConflictingActiveOwner) {
+      lastConflictingMachine = snapshot.activeMachine
     }
 
     if (attempt < CLAIM_OWNERSHIP_SETTLE_ATTEMPTS) {
@@ -2112,7 +2126,7 @@ async function settleActiveClaimMachine(
     }
   }
 
-  return null
+  return lastConflictingMachine
 }
 
 function sleep(ms: number): Promise<void> {

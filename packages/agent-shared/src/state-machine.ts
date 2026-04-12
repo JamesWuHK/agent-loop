@@ -91,12 +91,45 @@ export function resolveActiveClaimMachine(
       continue
     }
 
-    if (entry.event.event === 'claimed' && activeMachine === null) {
+    if (entry.event.event === 'claimed') {
       activeMachine = entry.event.machine
     }
   }
 
   return activeMachine
+}
+
+export interface ClaimSettlementSnapshot {
+  activeMachine: string | null
+  expectedClaimObserved: boolean
+  hasConflictingActiveOwner: boolean
+}
+
+export function inspectClaimSettlementSnapshot(
+  comments: Array<{ body: string; createdAt?: string }>,
+  expectedClaimEvent?: ClaimEvent,
+): ClaimSettlementSnapshot {
+  const activeMachine = resolveActiveClaimMachine(comments)
+  const expectedClaimObserved = expectedClaimEvent
+    ? comments.some((comment) => {
+        const event = parseClaimEventComment(comment.body)
+        return event?.event === expectedClaimEvent.event
+          && event.machine === expectedClaimEvent.machine
+          && event.ts === expectedClaimEvent.ts
+          && event.worktreeId === expectedClaimEvent.worktreeId
+      })
+    : false
+
+  return {
+    activeMachine,
+    expectedClaimObserved,
+    hasConflictingActiveOwner: Boolean(
+      expectedClaimEvent
+      && activeMachine !== null
+      && activeMachine !== expectedClaimEvent.machine
+      && !expectedClaimObserved,
+    ),
+  }
 }
 
 /**
