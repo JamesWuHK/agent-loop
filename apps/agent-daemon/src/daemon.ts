@@ -2814,6 +2814,9 @@ export class AgentDaemon {
         this.activeWorktrees.delete(issueNumber)
         this.syncRuntimeMetrics()
       } else {
+        if (shouldRegisterFailedIssueResumeAfterFinalize(finalized.status)) {
+          this.registerFailedIssueResume(issueNumber)
+        }
         if (shouldClearFailedIssueResumeTrackingAfterFinalize(finalized.status)) {
           this.failedIssueResumeAttempts.delete(issueNumber)
           this.failedIssueResumeCooldownUntil.delete(issueNumber)
@@ -4535,6 +4538,12 @@ export function shouldClearFailedIssueResumeTrackingAfterFinalize(
   status: 'completed' | 'failed' | 'recoverable',
 ): boolean {
   return false
+}
+
+export function shouldRegisterFailedIssueResumeAfterFinalize(
+  status: 'completed' | 'failed' | 'recoverable',
+): boolean {
+  return status === 'failed'
 }
 
 export function buildBlockedIssueResumeEscalationComment(
