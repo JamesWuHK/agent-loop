@@ -3232,7 +3232,7 @@ export class AgentDaemon {
         return
       }
 
-      const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch)
+      const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch, monitor)
       if (finalized.status === 'completed') {
         this.failedIssueResumeAttempts.delete(issueNumber)
         this.failedIssueResumeCooldownUntil.delete(issueNumber)
@@ -3650,10 +3650,11 @@ export class AgentDaemon {
     issue: AgentIssue,
     worktreePath: string,
     branch: string,
+    monitor?: TaskExecutionMonitor,
   ): Promise<{ status: 'completed' | 'failed' | 'recoverable' | 'blocked'; reason?: string }> {
     let activeBranch = branch
 
-    const preflight = await runIssueBranchPreflight(worktreePath, issue.body, this.config, this.logger)
+    const preflight = await runIssueBranchPreflight(worktreePath, issue.body, this.config, this.logger, monitor)
     if (!preflight.valid) {
       const reason = `Issue preflight failed before PR creation: ${preflight.violations.join('; ')}`
       await commentOnIssue(
@@ -4071,7 +4072,7 @@ export class AgentDaemon {
       )
 
       if (result.success) {
-        const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch)
+        const finalized = await this.finalizeIssueFromBranch(issue, worktreePath, branch, monitor)
         if (finalized.status === 'blocked') {
           this.registerFailedIssueResume(issueNumber)
           await this.completeManagedLease(

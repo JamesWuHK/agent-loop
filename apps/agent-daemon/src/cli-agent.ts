@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { AgentConfig, AgentExitCode, CodexReasoningEffort } from '@agent/shared'
+import { DETACH_PROCESS_GROUP, killProcessTree } from './process-tree'
 
 export type AgentKind = AgentConfig['agent']['primary']
 
@@ -224,6 +225,7 @@ async function runSingleAgent(
     const env = buildRuntimeEnv(agent, options.config, tempDir)
     proc = Bun.spawn(command, {
       cwd: options.worktreePath,
+      detached: DETACH_PROCESS_GROUP,
       env,
       stdin: 'pipe',
       stdout: 'pipe',
@@ -260,20 +262,12 @@ async function runSingleAgent(
           () => lastActivityAt,
           () => {
             idleTimedOut = true
-            try {
-              proc?.kill('SIGKILL')
-            } catch {
-              // ignore kill errors
-            }
+            killProcessTree(proc)
           },
           (message) => {
             aborted = true
             abortMessage = message
-            try {
-              proc?.kill('SIGKILL')
-            } catch {
-              // ignore kill errors
-            }
+            killProcessTree(proc)
           },
         ).finally(() => {
           monitorInFlight = false
@@ -306,11 +300,7 @@ async function runSingleAgent(
       new Promise<never>((_, reject) => {
         processTimeoutId = setTimeout(() => {
           timedOut = true
-          try {
-            proc?.kill('SIGKILL')
-          } catch {
-            // ignore kill errors
-          }
+          killProcessTree(proc)
           reject(new Error(`Timeout after ${options.timeoutMs}ms`))
         }, options.timeoutMs)
       }),

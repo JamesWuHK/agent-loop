@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentConfig } from '@agent/shared'
@@ -58,12 +58,29 @@ const TEST_CONFIG: AgentConfig = {
 }
 
 const tempDirs: string[] = []
+const spawnedPids: number[] = []
 
 afterEach(() => {
+  for (const pid of spawnedPids.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Process already exited.
+    }
+  }
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
 
 async function createGitRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'subtask-executor-test-'))
@@ -429,5 +446,69 @@ describe('runIssueBranchPreflight', () => {
         process.env.HOME = previousHome
       }
     }
+  })
+
+  it('kills timed out validation command process trees so preflight returns cleanly', async () => {
+    const dir = await createGitRepo()
+    await Bun.$`git -C ${dir} checkout -b agent/test`.quiet()
+    writeFileSync(join(dir, 'demo.txt'), 'after\n', 'utf-8')
+    await Bun.$`git -C ${dir} add demo.txt`.quiet()
+    await Bun.$`git -C ${dir} commit -m "feat: demo"`.quiet()
+
+    const scriptDir = mkdtempSync(join(tmpdir(), 'subtask-executor-timeout-'))
+    tempDirs.push(scriptDir)
+    const scriptPath = join(scriptDir, 'hang-validation.js')
+    const pidPath = join(scriptDir, 'validation.pid')
+
+    writeFileSync(
+      scriptPath,
+      `const fs = require('node:fs')
+fs.writeFileSync(process.argv[2], String(process.pid))
+setInterval(() => {}, 1000)
+`,
+      'utf-8',
+    )
+
+    const config: AgentConfig = {
+      ...TEST_CONFIG,
+      recovery: {
+        ...TEST_CONFIG.recovery,
+        workerIdleTimeoutMs: 200,
+      },
+    }
+
+    const preflightPromise = runIssueBranchPreflight(
+      dir,
+      `## Context
+### AllowedFiles
+- demo.txt
+### Validation
+- \`node ${JSON.stringify(scriptPath)} ${JSON.stringify(pidPath)}\``,
+      config,
+    )
+    const outcome = await Promise.race([
+      preflightPromise,
+      Bun.sleep(4_000).then(() => 'timeout' as const),
+    ])
+
+    if (outcome === 'timeout') {
+      if (existsSync(pidPath)) {
+        const pid = Number(readFileSync(pidPath, 'utf-8').trim())
+        if (Number.isInteger(pid) && pid > 0) {
+          spawnedPids.push(pid)
+        }
+      }
+      throw new Error('runIssueBranchPreflight did not return after timing out the validation command')
+    }
+
+    expect(outcome.valid).toBe(false)
+    expect(outcome.validationFailures).toHaveLength(1)
+    expect(outcome.validationFailures[0]?.timedOut).toBe(true)
+
+    const pid = Number(readFileSync(pidPath, 'utf-8').trim())
+    expect(pid).toBeGreaterThan(0)
+    spawnedPids.push(pid)
+    await Bun.sleep(100)
+    expect(isProcessAlive(pid)).toBe(false)
   })
 })

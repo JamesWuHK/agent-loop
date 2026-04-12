@@ -13,6 +13,7 @@ import {
   type Subtask,
 } from '@agent/shared'
 import { runConfiguredAgent, type AgentFailureKind, type TaskExecutionMonitor } from './cli-agent'
+import { DETACH_PROCESS_GROUP, killProcessTree } from './process-tree'
 
 const PLANNING_TIMEOUT_MS = 2 * 60 * 1000 // 2 minutes for planning
 
@@ -605,8 +606,10 @@ export async function runIssueBranchPreflight(
 
   for (const command of executableValidationCommands) {
     monitor?.setPhase?.(`preflight:${command.slice(0, 48)}`)
-    const result = await runValidationCommand(worktreePath, command, config)
-    await monitor?.agentMonitor?.onActivity?.(result.stderr ? 'stderr' : 'stdout')
+    const result = await runValidationCommand(worktreePath, command, config, monitor)
+    if (!result.timedOut) {
+      await monitor?.agentMonitor?.onActivity?.(result.stderr ? 'stderr' : 'stdout')
+    }
 
     if (result.exitCode !== 0) {
       validationFailures.push(result)
@@ -689,6 +692,7 @@ async function runValidationCommand(
   worktreePath: string,
   command: string,
   config: AgentConfig,
+  monitor?: TaskExecutionMonitor,
 ): Promise<IssueBranchValidationCommandResult> {
   const env: Record<string, string> = {
     ...process.env,
@@ -709,6 +713,7 @@ async function runValidationCommand(
 
   const proc = Bun.spawn(['/bin/sh', '-c', command], {
     cwd: worktreePath,
+    detached: DETACH_PROCESS_GROUP,
     env,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -717,12 +722,16 @@ async function runValidationCommand(
   let timedOut = false
   const timeout = setTimeout(() => {
     timedOut = true
-    proc.kill()
+    killProcessTree(proc)
   }, config.recovery.workerIdleTimeoutMs)
 
   const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    readValidationStream(proc.stdout, () => {
+      void monitor?.agentMonitor?.onActivity?.('stdout')
+    }),
+    readValidationStream(proc.stderr, () => {
+      void monitor?.agentMonitor?.onActivity?.('stderr')
+    }),
   ])
   const exitCode = await proc.exited
   clearTimeout(timeout)
@@ -734,6 +743,32 @@ async function runValidationCommand(
     stderr,
     timedOut,
   }
+}
+
+async function readValidationStream(
+  stream: ReadableStream<Uint8Array>,
+  onChunk: () => void,
+): Promise<string> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    onChunk()
+  }
+
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+  const merged = new Uint8Array(totalLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+
+  return new TextDecoder().decode(merged)
 }
 
 function summarizeValidationFailureOutput(stdout: string, stderr: string): string {
