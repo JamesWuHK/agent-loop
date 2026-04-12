@@ -85,7 +85,7 @@ describe('buildBootstrapScorecard', () => {
 })
 
 describe('buildBootstrapScorecardForRepo', () => {
-  test('reuses repo-native issue and pull request signals without hardcoded bootstrap issue numbers', async () => {
+  test('assigns a failed issue and linked human-needed pr to one taxonomy bucket when review feedback overlaps', async () => {
     const scorecard = await buildBootstrapScorecardForRepo({
       config: {
         repo: 'JamesWuHK/agent-loop',
@@ -188,7 +188,7 @@ describe('buildBootstrapScorecardForRepo', () => {
     expect(scorecard.categoryCounts).toMatchObject({
       contract_failure: 1,
       pr_lifecycle_failure: 1,
-      review_failure: 1,
+      review_failure: 0,
       release_process_failure: 2,
       runtime_failure: 0,
       github_transport_failure: 0,
@@ -204,14 +204,15 @@ describe('buildBootstrapScorecardForRepo', () => {
         prNumber: 91,
       }),
       expect.objectContaining({
-        category: 'review_failure',
-        issueNumber: 61,
-        prNumber: 91,
-        reason: 'Approval bar flow regressed',
-      }),
-      expect.objectContaining({
         category: 'release_process_failure',
         reason: 'missing required evidence: self_bootstrap_suite_green',
+      }),
+    ])
+    expect(scorecard.topBlockers.filter((blocker) => blocker.issueNumber === 61 && blocker.prNumber === 91)).toEqual([
+      expect.objectContaining({
+        category: 'pr_lifecycle_failure',
+        issueNumber: 61,
+        prNumber: 91,
       }),
     ])
   })

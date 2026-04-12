@@ -154,6 +154,12 @@ export function buildBootstrapScorecard(
 ): BootstrapScorecard {
   const categoryCounts = createEmptyCategoryCounts()
   const blockers: BootstrapScorecardBlocker[] = []
+  const mutuallyExclusiveBlockers = dedupePrLifecycleAndReviewBlockers(
+    input.prBlockers ?? [],
+    input.reviewBlockers ?? [],
+  )
+  const prLifecycleBlockers = mutuallyExclusiveBlockers.prBlockers
+  const reviewBlockers = mutuallyExclusiveBlockers.reviewBlockers
 
   if (input.audit.invalidReadyIssueCount > 0) {
     categoryCounts.contract_failure += input.audit.invalidReadyIssueCount
@@ -173,7 +179,7 @@ export function buildBootstrapScorecard(
     })
   }
 
-  for (const blocker of input.prBlockers ?? []) {
+  for (const blocker of prLifecycleBlockers) {
     categoryCounts.pr_lifecycle_failure += 1
     blockers.push({
       category: 'pr_lifecycle_failure',
@@ -181,7 +187,7 @@ export function buildBootstrapScorecard(
     })
   }
 
-  for (const blocker of input.reviewBlockers ?? []) {
+  for (const blocker of reviewBlockers) {
     categoryCounts.review_failure += 1
     blockers.push({
       category: 'review_failure',
@@ -336,6 +342,38 @@ function normalizeScorecardSignal(signal: BootstrapScorecardSignal): BootstrapSc
     prNumber: signal.prNumber ?? null,
     reason: signal.reason,
   }
+}
+
+function dedupePrLifecycleAndReviewBlockers(
+  prBlockers: BootstrapScorecardSignal[],
+  reviewBlockers: BootstrapScorecardSignal[],
+): {
+  prBlockers: BootstrapScorecardSignal[]
+  reviewBlockers: BootstrapScorecardSignal[]
+} {
+  const prLifecycleKeys = new Set(
+    prBlockers
+      .map(buildIssuePrPairKey)
+      .filter((key): key is string => key !== null),
+  )
+
+  return {
+    prBlockers,
+    // Failed-issue resume blockers win over PR review blockers for the same linked issue/PR pair.
+    reviewBlockers: reviewBlockers.filter((blocker) => {
+      const key = buildIssuePrPairKey(blocker)
+      return key === null || !prLifecycleKeys.has(key)
+    }),
+  }
+}
+
+function buildIssuePrPairKey(signal: BootstrapScorecardSignal): string | null {
+  const normalized = normalizeScorecardSignal(signal)
+  if (normalized.issueNumber === null || normalized.prNumber === null) {
+    return null
+  }
+
+  return `${normalized.issueNumber}:${normalized.prNumber}`
 }
 
 function buildEmptyAuditIssueSummary(): AuditIssueSummary {
