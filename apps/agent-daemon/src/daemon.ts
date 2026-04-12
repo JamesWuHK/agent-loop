@@ -1261,6 +1261,12 @@ export class AgentDaemon {
         return
       }
 
+      if (!startedWork && await this.maybeAutoApplyAgentLoopUpgrade()) {
+        recordPoll('no_issues')
+        recordPollDuration(Date.now() - pollStartTime)
+        return
+      }
+
       const wakeAttempt = await this.maybeStartQueuedWakeRequest()
       if (wakeAttempt.handled) {
         allowUntargetedFallback = allowUntargetedFallback || wakeAttempt.allowUntargetedFallback

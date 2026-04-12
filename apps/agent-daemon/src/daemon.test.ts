@@ -579,6 +579,60 @@ describe('agent-loop upgrade coordination', () => {
     })
   })
 
+  test('attempts automatic self-upgrade before claiming new work when idle', async () => {
+    await withRuntimeSupervisor('detached', async () => {
+      const daemon = createTestDaemon({
+        upgrade: {
+          enabled: true,
+          repo: 'JamesWuHK/agent-loop',
+          channel: 'master',
+          checkIntervalMs: 60_000,
+          reminderIntervalMs: 3_600_000,
+          autoApply: true,
+        },
+      }) as any
+
+      let autoUpgradeAttempts = 0
+      let claimAttempts = 0
+
+      daemon.running = true
+      daemon.startupRecoveryPending = false
+      daemon.maybeStartResumableIssue = async () => false
+      daemon.maybeStartStandaloneApprovedPrMerge = async () => false
+      daemon.maybeRequeueFailedIssue = async () => false
+      daemon.maybeStartClaimedIssue = async () => {
+        claimAttempts += 1
+        return true
+      }
+      daemon.maybeStartStandalonePrReview = async () => false
+      daemon.maybeRefreshAgentLoopUpgradeStatus = async () => {}
+      daemon.performAutomaticAgentLoopUpgrade = async () => {
+        autoUpgradeAttempts += 1
+        return true
+      }
+      daemon.scheduleNextPoll = () => {
+        throw new Error('pollCycle should not schedule another poll after auto-upgrade starts')
+      }
+      daemon.agentLoopUpgrade = {
+        enabled: true,
+        repo: 'JamesWuHK/agent-loop',
+        channel: 'master',
+        checkedAt: '2026-04-11T11:00:00.000Z',
+        status: 'upgrade-available',
+        latestVersion: '0.1.2',
+        latestRevision: '2222222222222222222222222222222222222222',
+        latestCommitAt: '2026-04-11T10:59:30.000Z',
+        safeToUpgradeNow: true,
+        message: 'channel master is newer: local v0.1.0, latest v0.1.2',
+      }
+
+      await daemon.pollCycle()
+
+      expect(autoUpgradeAttempts).toBe(1)
+      expect(claimAttempts).toBe(0)
+    })
+  })
+
   test('keeps direct-mode upgrades in reminder-only mode', async () => {
     await withRuntimeSupervisor('direct', async () => {
       const daemon = createTestDaemon({
