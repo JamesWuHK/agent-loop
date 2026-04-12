@@ -43,6 +43,7 @@ function buildConfig(): AgentConfig {
       fallback: null,
       claudePath: 'claude',
       codexPath: 'codex',
+      codexReasoningEffort: 'high',
       timeoutMs: 1_800_000,
     },
     git: {

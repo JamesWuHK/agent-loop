@@ -157,6 +157,7 @@ describe('index helpers', () => {
             fallback: 'claude',
             claudePath: 'claude',
             codexPath: 'codex',
+            codexReasoningEffort: 'high',
             timeoutMs: 300_000,
           },
           git: {
@@ -400,6 +401,7 @@ describe('index helpers', () => {
             fallback: 'claude',
             claudePath: 'claude',
             codexPath: 'codex',
+            codexReasoningEffort: 'high',
             timeoutMs: 300_000,
           },
           git: {

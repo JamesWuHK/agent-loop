@@ -191,20 +191,13 @@ describe('buildConfig', () => {
   })
 
   test('defaults Codex reasoning effort to high when neither home nor repo-local config sets it', () => {
+    const fileConfig = structuredClone(baseFileConfig) as Partial<AgentConfig>
+    delete (fileConfig.agent as Partial<AgentConfig['agent']>).codexReasoningEffort
+
     const config = buildConfig(
       {},
       {
-        fileConfig: {
-          ...baseFileConfig,
-          agent: {
-            primary: 'claude',
-            fallback: 'codex',
-            claudePath: 'claude-home',
-            codexPath: 'codex-home',
-            codexReasoningEffort: undefined,
-            timeoutMs: 90_000,
-          },
-        },
+        fileConfig,
         repoConfig: {},
         env: {},
         homeDir: '/tmp/agent-loop-home',
