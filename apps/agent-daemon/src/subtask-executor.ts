@@ -220,6 +220,16 @@ export interface IssueRecoveryResult {
   failureKind?: AgentFailureKind
 }
 
+export type SalvageDirtyWorktreeResult =
+  | {
+      kind: 'committed'
+      commitSha: string
+    }
+  | {
+      kind: 'blocked'
+      outOfScopeFiles: string[]
+    }
+
 export async function shouldTreatCleanNoCommitSubtaskAsSuccess(
   worktreePath: string,
   defaultBranch: string,
@@ -247,9 +257,25 @@ export async function salvageDirtyWorktree(
   commitMessage: string,
   config: AgentConfig,
   logger = console,
-): Promise<string | null> {
-  const status = (await $`git -C ${worktreePath} status --short`.quiet().text()).trim()
-  if (!status) return null
+  allowedFiles: string[] = [],
+): Promise<SalvageDirtyWorktreeResult | null> {
+  const dirtyFiles = await readDirtyWorktreeFiles(worktreePath)
+  if (dirtyFiles.length === 0) return null
+
+  if (allowedFiles.length > 0) {
+    const outOfScopeFiles = dirtyFiles.filter(
+      (file) => !allowedFiles.some((pattern) => matchesContractFilePattern(file, pattern)),
+    )
+    if (outOfScopeFiles.length > 0) {
+      logger.warn(
+        `[salvage] blocked dirty worktree in ${worktreePath}; files outside AllowedFiles: ${outOfScopeFiles.join(', ')}`,
+      )
+      return {
+        kind: 'blocked',
+        outOfScopeFiles,
+      }
+    }
+  }
 
   logger.warn(`[salvage] found uncommitted changes in ${worktreePath}; creating recovery commit`)
 
@@ -258,7 +284,10 @@ export async function salvageDirtyWorktree(
 
   const commitSha = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
   logger.log(`[salvage] created commit ${commitSha.slice(0, 7)} from pending worktree changes`)
-  return commitSha
+  return {
+    kind: 'committed',
+    commitSha,
+  }
 }
 
 export async function runIssueRecovery(
@@ -272,17 +301,28 @@ export async function runIssueRecovery(
   recentBlockingReasons: string[] = [],
   monitor?: TaskExecutionMonitor,
 ): Promise<IssueRecoveryResult> {
+  const issueContract = parseIssueContract(issueBody)
   const salvagedBeforeRun = await salvageDirtyWorktree(
     worktreePath,
     `fix(issue-recovery): salvage pending changes for issue #${issueNumber}`,
     config,
     logger,
+    issueContract.allowedFiles,
   )
-  if (salvagedBeforeRun) {
+  if (salvagedBeforeRun?.kind === 'blocked') {
+    return {
+      success: false,
+      exitCode: 1,
+      error: formatBlockedSalvageError(salvagedBeforeRun.outOfScopeFiles),
+      commitCreated: false,
+    }
+  }
+
+  if (salvagedBeforeRun?.kind === 'committed') {
     return {
       success: true,
       exitCode: 0,
-      commitSha: salvagedBeforeRun,
+      commitSha: salvagedBeforeRun.commitSha,
       commitCreated: true,
     }
   }
@@ -338,13 +378,24 @@ export async function runIssueRecovery(
       `fix(issue-recovery): salvage pending changes for issue #${issueNumber}`,
       config,
       logger,
+      issueContract.allowedFiles,
     )
-    if (salvagedCommit) {
-      logger.warn(`[issue-recovery] agent exited ${result.exitCode} but left recoverable changes — continuing with salvaged commit ${salvagedCommit.slice(0, 7)}`)
+    if (salvagedCommit?.kind === 'blocked') {
+      return {
+        success: false,
+        exitCode: result.exitCode,
+        error: formatBlockedSalvageError(salvagedCommit.outOfScopeFiles),
+        commitCreated: false,
+        failureKind: result.failureKind,
+      }
+    }
+
+    if (salvagedCommit?.kind === 'committed') {
+      logger.warn(`[issue-recovery] agent exited ${result.exitCode} but left recoverable changes — continuing with salvaged commit ${salvagedCommit.commitSha.slice(0, 7)}`)
       return {
         success: true,
         exitCode: 0,
-        commitSha: salvagedCommit,
+        commitSha: salvagedCommit.commitSha,
         commitCreated: true,
       }
     }
@@ -369,12 +420,22 @@ export async function runIssueRecovery(
       `fix(issue-recovery): salvage pending changes for issue #${issueNumber}`,
       config,
       logger,
+      issueContract.allowedFiles,
     )
-    if (salvagedCommit) {
+    if (salvagedCommit?.kind === 'blocked') {
+      return {
+        success: false,
+        exitCode: 1,
+        error: formatBlockedSalvageError(salvagedCommit.outOfScopeFiles),
+        commitCreated: false,
+      }
+    }
+
+    if (salvagedCommit?.kind === 'committed') {
       return {
         success: true,
         exitCode: 0,
-        commitSha: salvagedCommit,
+        commitSha: salvagedCommit.commitSha,
         commitCreated: true,
       }
     }
@@ -414,6 +475,7 @@ export async function runReviewAutoFix(
   const beforeHead = (await $`git -C ${worktreePath} rev-parse HEAD`.quiet().text()).trim()
   const linkedIssue = await getAgentIssueByNumber(issueNumber, config)
   const issueBody = linkedIssue?.body ?? ''
+  const issueContract = parseIssueContract(issueBody)
   const prompt = buildReviewAutoFixPrompt(
     issueNumber,
     prNumber,
@@ -440,16 +502,27 @@ export async function runReviewAutoFix(
       `fix(review-auto-fix): salvage pending changes for PR #${prNumber}`,
       config,
       logger,
+      issueContract.allowedFiles,
     )
-    if (salvagedCommit) {
-      logger.warn(`[review-fix] agent exited ${result.exitCode} but left recoverable changes — continuing with salvaged commit ${salvagedCommit.slice(0, 7)}`)
+    if (salvagedCommit?.kind === 'blocked') {
+      return {
+        success: false,
+        exitCode: result.exitCode,
+        outcome: 'agent_failed',
+        error: formatBlockedSalvageError(salvagedCommit.outOfScopeFiles),
+        failureKind: result.failureKind,
+      }
+    }
+
+    if (salvagedCommit?.kind === 'committed') {
+      logger.warn(`[review-fix] agent exited ${result.exitCode} but left recoverable changes — continuing with salvaged commit ${salvagedCommit.commitSha.slice(0, 7)}`)
       return finalizeReviewAutoFixResult(
         worktreePath,
         issueBody,
         config,
         logger,
         prNumber,
-        salvagedCommit,
+        salvagedCommit.commitSha,
         'salvaged',
       )
     }
@@ -470,16 +543,26 @@ export async function runReviewAutoFix(
       `fix(review-auto-fix): salvage pending changes for PR #${prNumber}`,
       config,
       logger,
+      issueContract.allowedFiles,
     )
-    if (salvagedCommit) {
-      logger.log(`[review-fix] salvaged commit ${salvagedCommit.slice(0, 7)} for PR #${prNumber}`)
+    if (salvagedCommit?.kind === 'blocked') {
+      return {
+        success: false,
+        exitCode: 1,
+        outcome: 'agent_failed',
+        error: formatBlockedSalvageError(salvagedCommit.outOfScopeFiles),
+      }
+    }
+
+    if (salvagedCommit?.kind === 'committed') {
+      logger.log(`[review-fix] salvaged commit ${salvagedCommit.commitSha.slice(0, 7)} for PR #${prNumber}`)
       return finalizeReviewAutoFixResult(
         worktreePath,
         issueBody,
         config,
         logger,
         prNumber,
-        salvagedCommit,
+        salvagedCommit.commitSha,
         'salvaged',
       )
     }
@@ -686,6 +769,26 @@ async function readChangedFilesAgainstDefaultBranch(
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
+}
+
+async function readDirtyWorktreeFiles(worktreePath: string): Promise<string[]> {
+  const raw = await $`git -C ${worktreePath} status --porcelain`.quiet().text()
+
+  return raw
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim())
+    .map((path) => {
+      const renameSeparator = path.indexOf(' -> ')
+      return renameSeparator >= 0 ? path.slice(renameSeparator + 4) : path
+    })
+    .map((path) => path.replace(/^"(.*)"$/, '$1'))
+    .filter(Boolean)
+}
+
+function formatBlockedSalvageError(outOfScopeFiles: string[]): string {
+  return `dirty worktree contains files outside AllowedFiles: ${outOfScopeFiles.join(', ')}`
 }
 
 async function runValidationCommand(
