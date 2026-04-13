@@ -1326,6 +1326,14 @@ export interface PullRequestChecksStatus {
   summary: string
 }
 
+interface PullRequestCheckExecutionMetadata {
+  conclusion: string
+  startedAt: string | null
+  completedAt: string | null
+  runnerName: string
+  stepCount: number | null
+}
+
 export interface MergePrResult {
   merged: boolean
   message: string
@@ -1346,7 +1354,14 @@ const FAILING_PR_CHECK_STATES = new Set([
   'error',
 ])
 
-function parsePullRequestChecksRows(stdout: string): Array<{ name: string; state: string }> {
+const EMPTY_STEP_ACTIONS_FAILURE_MAX_DURATION_SECONDS = 15
+
+function parsePullRequestChecksRows(stdout: string): Array<{
+  name: string
+  state: string
+  duration: string
+  detailsUrl: string
+}> {
   return stdout
     .split('\n')
     .map((line) => line.trim())
@@ -1356,8 +1371,137 @@ function parsePullRequestChecksRows(stdout: string): Array<{ name: string; state
     .map((parts) => ({
       name: parts[0]?.trim() ?? '',
       state: parts[1]?.trim().toLowerCase() ?? '',
+      duration: parts[2]?.trim() ?? '',
+      detailsUrl: parts[3]?.trim() ?? '',
     }))
     .filter((row) => row.name.length > 0 && row.state.length > 0)
+}
+
+function parseCheckDurationSeconds(value: string): number | null {
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    return null
+  }
+
+  if (/^\d+$/.test(normalized)) {
+    return Number(normalized)
+  }
+
+  let totalSeconds = 0
+  let matched = false
+  const matcher = /(\d+)([hms])/g
+  for (const match of normalized.matchAll(matcher)) {
+    matched = true
+    const amount = Number(match[1])
+    switch (match[2]) {
+      case 'h':
+        totalSeconds += amount * 60 * 60
+        break
+      case 'm':
+        totalSeconds += amount * 60
+        break
+      case 's':
+        totalSeconds += amount
+        break
+      default:
+        break
+    }
+  }
+
+  return matched ? totalSeconds : null
+}
+
+function parseIsoTimestampMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null
+  }
+
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function extractActionsRunId(detailsUrl: string): string | null {
+  const match = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/|$)/i)
+  return match?.[1] ?? null
+}
+
+function isLikelyEmptyStepActionsFailure(
+  row: { name: string; duration: string },
+  metadata: PullRequestCheckExecutionMetadata | undefined,
+): boolean {
+  if (!metadata || metadata.conclusion.trim().toLowerCase() !== 'failure') {
+    return false
+  }
+
+  if (metadata.runnerName.trim().length > 0 || metadata.stepCount !== 0) {
+    return false
+  }
+
+  const durationFromRow = parseCheckDurationSeconds(row.duration)
+  if (durationFromRow !== null) {
+    return durationFromRow <= EMPTY_STEP_ACTIONS_FAILURE_MAX_DURATION_SECONDS
+  }
+
+  const startedAtMs = parseIsoTimestampMs(metadata.startedAt)
+  const completedAtMs = parseIsoTimestampMs(metadata.completedAt)
+  if (startedAtMs === null || completedAtMs === null || completedAtMs < startedAtMs) {
+    return false
+  }
+
+  return (completedAtMs - startedAtMs) / 1000 <= EMPTY_STEP_ACTIONS_FAILURE_MAX_DURATION_SECONDS
+}
+
+function buildEmptyStepActionsFailureSummary(checkName: string): string {
+  return `GitHub Actions infrastructure failure suspected: ${checkName} failed before any steps started`
+}
+
+function extractActionJobExecutionMetadataByName(
+  jobsResult: Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>,
+): Record<string, PullRequestCheckExecutionMetadata> {
+  if (jobsResult.exitCode !== 0 || jobsResult.timedOut) {
+    return {}
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jobsResult.stdout)
+  } catch {
+    return {}
+  }
+
+  const jobs = Array.isArray((parsed as { jobs?: unknown[] }).jobs)
+    ? (parsed as { jobs: unknown[] }).jobs
+    : []
+
+  const byName: Record<string, PullRequestCheckExecutionMetadata> = {}
+  for (const job of jobs) {
+    if (!job || typeof job !== 'object') {
+      continue
+    }
+
+    const rawJob = job as {
+      name?: unknown
+      conclusion?: unknown
+      started_at?: unknown
+      completed_at?: unknown
+      runner_name?: unknown
+      steps?: unknown
+    }
+    const name = typeof rawJob.name === 'string' ? rawJob.name.trim() : ''
+    if (!name) {
+      continue
+    }
+
+    byName[name] = {
+      conclusion: typeof rawJob.conclusion === 'string' ? rawJob.conclusion : '',
+      startedAt: typeof rawJob.started_at === 'string' ? rawJob.started_at : null,
+      completedAt: typeof rawJob.completed_at === 'string' ? rawJob.completed_at : null,
+      runnerName: typeof rawJob.runner_name === 'string' ? rawJob.runner_name : '',
+      stepCount: Array.isArray(rawJob.steps) ? rawJob.steps.length : null,
+    }
+  }
+
+  return byName
 }
 
 function formatPullRequestChecksError(result: Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>): string {
@@ -1373,6 +1517,7 @@ function formatPullRequestChecksError(result: Pick<GhCommandResult, 'stdout' | '
 
 export function interpretPullRequestChecksResult(
   result: Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>,
+  executionMetadataByName: Record<string, PullRequestCheckExecutionMetadata> = {},
 ): PullRequestChecksStatus {
   const stdout = result.stdout.trim()
 
@@ -1386,6 +1531,13 @@ export function interpretPullRequestChecksResult(
   const rows = parsePullRequestChecksRows(stdout)
   const firstFailing = rows.find((row) => FAILING_PR_CHECK_STATES.has(row.state))
   if (firstFailing) {
+    if (isLikelyEmptyStepActionsFailure(firstFailing, executionMetadataByName[firstFailing.name])) {
+      return {
+        state: 'error',
+        summary: buildEmptyStepActionsFailureSummary(firstFailing.name),
+      }
+    }
+
     return {
       state: 'fail',
       summary: `${firstFailing.name} is ${firstFailing.state}`,
@@ -1964,6 +2116,18 @@ export async function getPullRequestChecksStatus(
   ) => Promise<Pick<GhCommandResult, 'stdout' | 'stderr' | 'exitCode' | 'timedOut'>> = runBoundedGhCommand,
 ): Promise<PullRequestChecksStatus> {
   const result = await runner(['pr', 'checks', String(prNumber), '-R', config.repo], config)
+  const rows = parsePullRequestChecksRows(result.stdout.trim())
+  const firstFailing = rows.find((row) => FAILING_PR_CHECK_STATES.has(row.state))
+
+  if (firstFailing) {
+    const runId = extractActionsRunId(firstFailing.detailsUrl)
+    if (runId && parseCheckDurationSeconds(firstFailing.duration) !== null) {
+      const jobsResult = await runner(['api', `repos/${config.repo}/actions/runs/${runId}/jobs`], config)
+      const executionMetadataByName = extractActionJobExecutionMetadataByName(jobsResult)
+      return interpretPullRequestChecksResult(result, executionMetadataByName)
+    }
+  }
+
   return interpretPullRequestChecksResult(result)
 }
 
