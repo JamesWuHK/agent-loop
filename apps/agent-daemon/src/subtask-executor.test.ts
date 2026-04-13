@@ -121,10 +121,69 @@ describe('salvageDirtyWorktree', () => {
     const status = (await Bun.$`git -C ${dir} status --short`.quiet().text()).trim()
     const subject = (await Bun.$`git -C ${dir} log -1 --pretty=%s`.quiet().text()).trim()
 
-    expect(result).toBeString()
-    expect(result?.length).toBeGreaterThan(0)
+    expect(result).toMatchObject({
+      kind: 'committed',
+      commitSha: expect.any(String),
+    })
     expect(status).toBe('')
     expect(subject).toBe('fix: salvage dirty repo')
+  })
+
+  it('refuses to salvage dirty files outside the allowed scope', async () => {
+    const dir = await createGitRepo()
+
+    await Bun.$`mkdir -p ${join(dir, 'apps', 'desktop', 'src', 'pages')}`.quiet()
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'base\n', 'utf-8')
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.sprint-p.smoke.test.tsx'), 'base\n', 'utf-8')
+    await Bun.$`git -C ${dir} add .`.quiet()
+    await Bun.$`git -C ${dir} commit -m "chore: add page fixtures"`.quiet()
+
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'allowed change\n', 'utf-8')
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.sprint-p.smoke.test.tsx'), 'out-of-scope change\n', 'utf-8')
+
+    const result = await salvageDirtyWorktree(
+      dir,
+      'fix: salvage dirty repo',
+      TEST_CONFIG,
+      console,
+      ['apps/desktop/src/pages/MainPage.tsx'],
+    )
+
+    expect(result).toEqual({
+      kind: 'blocked',
+      outOfScopeFiles: ['apps/desktop/src/pages/MainPage.sprint-p.smoke.test.tsx'],
+    })
+
+    const status = (await Bun.$`git -C ${dir} status --short`.quiet().text()).trim()
+    const subject = (await Bun.$`git -C ${dir} log -1 --pretty=%s`.quiet().text()).trim()
+
+    expect(status).toContain('apps/desktop/src/pages/MainPage.tsx')
+    expect(status).toContain('apps/desktop/src/pages/MainPage.sprint-p.smoke.test.tsx')
+    expect(subject).toBe('chore: add page fixtures')
+  })
+
+  it('still salvages dirty files when every change is inside scope', async () => {
+    const dir = await createGitRepo()
+
+    await Bun.$`mkdir -p ${join(dir, 'apps', 'desktop', 'src', 'pages')}`.quiet()
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'base\n', 'utf-8')
+    await Bun.$`git -C ${dir} add .`.quiet()
+    await Bun.$`git -C ${dir} commit -m "chore: add page fixture"`.quiet()
+
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'allowed change\n', 'utf-8')
+
+    const result = await salvageDirtyWorktree(
+      dir,
+      'fix: salvage dirty repo',
+      TEST_CONFIG,
+      console,
+      ['apps/desktop/src/pages/MainPage.tsx'],
+    )
+
+    expect(result).toMatchObject({
+      kind: 'committed',
+      commitSha: expect.any(String),
+    })
   })
 })
 
@@ -245,6 +304,64 @@ describe('resolveAgentExecutionTimeoutMs', () => {
 })
 
 describe('runIssueRecovery', () => {
+  it('fails recoverably instead of creating a salvage commit when pre-run dirty files are outside AllowedFiles', async () => {
+    const dir = await createGitRepo()
+
+    await Bun.$`mkdir -p ${join(dir, 'apps', 'desktop', 'src', 'pages')}`.quiet()
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'base\n', 'utf-8')
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.followup-decision-restore.test.tsx'), 'base\n', 'utf-8')
+    await Bun.$`git -C ${dir} add .`.quiet()
+    await Bun.$`git -C ${dir} commit -m "chore: add issue fixtures"`.quiet()
+
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.tsx'), 'allowed change\n', 'utf-8')
+    writeFileSync(join(dir, 'apps', 'desktop', 'src', 'pages', 'MainPage.followup-decision-restore.test.tsx'), 'out-of-scope change\n', 'utf-8')
+
+    const result = await runIssueRecovery(
+      dir,
+      193,
+      '[US18-4] scope hygiene',
+      [
+        '## 用户故事',
+        '',
+        '作为维护者，我希望恢复流程遵守 AllowedFiles。',
+        '',
+        '## Context',
+        '',
+        '### Dependencies',
+        '```json',
+        '{"dependsOn":[]}',
+        '```',
+        '',
+        '### AllowedFiles',
+        '- apps/desktop/src/pages/MainPage.tsx',
+        '',
+        '### Validation',
+        '- `cd apps/desktop && bun run --bun test src/pages/MainPage.checkpoint-brief-card.test.tsx`',
+        '',
+        '## RED 测试',
+        '```ts',
+        'throw new Error("red")',
+        '```',
+        '',
+        '## 实现步骤',
+        '1. restore scope hygiene',
+        '',
+        '## 验收',
+        '- [ ] done',
+      ].join('\n'),
+      TEST_CONFIG,
+    )
+
+    expect(result).toMatchObject({
+      success: false,
+      commitCreated: false,
+      error: 'dirty worktree contains files outside AllowedFiles: apps/desktop/src/pages/MainPage.followup-decision-restore.test.tsx',
+    })
+
+    const subject = (await Bun.$`git -C ${dir} log -1 --pretty=%s`.quiet().text()).trim()
+    expect(subject).toBe('chore: add issue fixtures')
+  })
+
   it('returns remote_closed without salvaging when the linked issue is already done elsewhere', async () => {
     const dir = await createGitRepo()
     const scriptDir = mkdtempSync(join(tmpdir(), 'subtask-executor-agent-'))
