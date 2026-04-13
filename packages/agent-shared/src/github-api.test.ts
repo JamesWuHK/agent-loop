@@ -279,6 +279,46 @@ describe('interpretPullRequestChecksResult', () => {
     })
   })
 
+  test('downgrades empty-step GitHub Actions failures to a recoverable checks error', () => {
+    expect(interpretPullRequestChecksResult({
+      stdout: 'build-and-test\tfail\t6s\thttps://github.com/JamesWuHK/digital-employee/actions/runs/24345751607/job/71087130942',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+    }, {
+      'build-and-test': {
+        conclusion: 'failure',
+        startedAt: '2026-04-13T13:30:01Z',
+        completedAt: '2026-04-13T13:30:07Z',
+        runnerName: '',
+        stepCount: 0,
+      },
+    })).toEqual({
+      state: 'error',
+      summary: 'GitHub Actions infrastructure failure suspected: build-and-test failed before any steps started',
+    })
+  })
+
+  test('keeps real failing jobs with started steps as merge blockers', () => {
+    expect(interpretPullRequestChecksResult({
+      stdout: 'build-and-test\tfail\t2m46s\thttps://github.com/JamesWuHK/digital-employee/actions/runs/24344958431/job/71083193427',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+    }, {
+      'build-and-test': {
+        conclusion: 'failure',
+        startedAt: '2026-04-13T13:05:33Z',
+        completedAt: '2026-04-13T13:08:45Z',
+        runnerName: 'GitHub Actions 4',
+        stepCount: 7,
+      },
+    })).toEqual({
+      state: 'fail',
+      summary: 'build-and-test is fail',
+    })
+  })
+
   test('treats pending checks as not ready yet', () => {
     expect(interpretPullRequestChecksResult({
       stdout: 'build-and-test\tpending\t0\thttps://example.test/run/1',
@@ -333,6 +373,54 @@ describe('getPullRequestChecksStatus', () => {
       args: ['pr', 'checks', '390', '-R', 'JamesWuHK/agent-loop'],
       pat: 'test-token',
     }])
+  })
+
+  test('queries Actions job metadata when a failing check might be an infra-only shell failure', async () => {
+    const calls: string[][] = []
+
+    const status = await getPullRequestChecksStatus(
+      419,
+      {
+        repo: 'JamesWuHK/digital-employee',
+        pat: 'test-token',
+      } as never,
+      async (args) => {
+        calls.push(args)
+
+        if (args.join(' ') === 'pr checks 419 -R JamesWuHK/digital-employee') {
+          return {
+            stdout: 'build-and-test\tfail\t6s\thttps://github.com/JamesWuHK/digital-employee/actions/runs/24345751607/job/71087130942',
+            stderr: '',
+            exitCode: 1,
+            timedOut: false,
+          }
+        }
+
+        return {
+          stdout: JSON.stringify({
+            jobs: [
+              {
+                name: 'build-and-test',
+                conclusion: 'failure',
+                started_at: '2026-04-13T13:30:01Z',
+                completed_at: '2026-04-13T13:30:07Z',
+                runner_name: '',
+                steps: [],
+              },
+            ],
+          }),
+          stderr: '',
+          exitCode: 0,
+          timedOut: false,
+        }
+      },
+    )
+
+    expect(status).toEqual({
+      state: 'error',
+      summary: 'GitHub Actions infrastructure failure suspected: build-and-test failed before any steps started',
+    })
+    expect(calls).toContainEqual(['api', 'repos/JamesWuHK/digital-employee/actions/runs/24345751607/jobs'])
   })
 })
 
