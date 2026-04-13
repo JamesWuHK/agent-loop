@@ -50,6 +50,8 @@ describe('parseIssueContract', () => {
       hasDependencyMetadata: true,
       dependencyParseError: false,
       constraints: ['不改 App.tsx', '不接 API'],
+      runtimeRequirements: [],
+      runtimeRequirementDuplicates: [],
       allowedFiles: [
         'apps/desktop/src/context/AppContext.tsx',
         'apps/desktop/src/pages/LoginPage.tsx',
@@ -66,9 +68,49 @@ describe('parseIssueContract', () => {
     })
   })
 
+  it('parses runtime requirements with normalized tokens and duplicate tracking', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为维护者，我希望 self-hosting issue 能声明运行时要求。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### Runtime Requirements',
+      '- Self Hosting',
+      '- managed-runtime',
+      '- reviewed bootstrap manifest',
+      '- managed runtime',
+      '',
+      '## 实现步骤',
+      '1. 先补 parser',
+      '',
+      '## RED 测试',
+      '```ts',
+      "expect(contract.runtimeRequirements).toContain('self-hosting')",
+      '```',
+      '',
+      '## 验收',
+      '- parser 产出规范化 token',
+    ].join('\n'))
+
+    expect(contract.runtimeRequirements).toEqual([
+      'self-hosting',
+      'managed-runtime',
+      'reviewed-bootstrap-manifest',
+    ])
+    expect(contract.runtimeRequirementDuplicates).toEqual([
+      'managed-runtime',
+    ])
+  })
+
   it('renders a compact prompt supplement with machine-readable contract data', () => {
     const rendered = renderIssueContractForPrompt([
       '## Context',
+      '### RuntimeRequirements',
+      '- self-hosting',
       '### AllowedFiles',
       '- apps/desktop/src/context/AppContext.tsx',
       '### ForbiddenFiles',
@@ -78,6 +120,9 @@ describe('parseIssueContract', () => {
     ].join('\n'))
 
     expect(rendered).toContain('Parsed issue contract (authoritative when present):')
+    expect(rendered).toContain('"runtimeRequirements": [')
+    expect(rendered).toContain('Runtime requirements:')
+    expect(rendered).toContain('self-hosting')
     expect(rendered).toContain('"allowedFiles": [')
     expect(rendered).toContain('apps/desktop/src/context/AppContext.tsx')
     expect(rendered).toContain('Forbidden files:')

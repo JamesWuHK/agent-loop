@@ -93,6 +93,18 @@ export interface IssueDependencyMetadata {
   dependencyParseError: boolean
 }
 
+export const RUNTIME_REQUIREMENT_TOKENS = [
+  'self-hosting',
+  'managed-runtime',
+  'reviewed-bootstrap-manifest',
+] as const
+
+export type RuntimeRequirementToken = (typeof RUNTIME_REQUIREMENT_TOKENS)[number]
+
+export const RUNTIME_REQUIREMENT_CONFLICTS = [
+  ['self-hosting', 'managed-runtime'],
+] as const
+
 export type ProjectProfileName =
   | 'generic'
   | 'desktop-vite'

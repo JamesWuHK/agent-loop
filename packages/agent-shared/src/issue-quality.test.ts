@@ -231,4 +231,49 @@ throw new Error('red')
       'Validation should use concrete executable commands instead of generic guidance: verify behavior manually',
     )
   })
+
+  it('surfaces runtime requirement validation errors through the shared contract validation path', () => {
+    const body = [
+      '## 用户故事',
+      '作为维护者，我希望 quality report 复用 runtime requirement 校验结果。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### RuntimeRequirements',
+      '- managed runtime',
+      '- magical-runtime',
+      '- self-hosting',
+      '- managed-runtime',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-quality.ts',
+      '### RequiredSemantics',
+      '- runtime requirement 问题进入 errors',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-quality.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      'expect(report.errors.length).toBeGreaterThan(0)',
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 复用 validator 输出',
+      '',
+      '## 验收',
+      '- quality report 暴露 runtime requirement 错误',
+    ].join('\n')
+
+    const report = buildIssueQualityReport(parseIssueContract(body))
+
+    expect(report.valid).toBe(false)
+    expect(report.errors).toEqual([
+      'duplicate runtime requirement token: managed-runtime',
+      'unknown runtime requirement token: magical-runtime',
+      'conflicting runtime requirement tokens: self-hosting, managed-runtime',
+    ])
+    expect(report.warnings).toEqual([])
+  })
 })

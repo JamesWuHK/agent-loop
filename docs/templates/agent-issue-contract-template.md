@@ -28,6 +28,9 @@
 - 只能做这次切片所需的最小改动
 - 不要修改无关模块
 
+### RuntimeRequirements
+- <可选: self-hosting | managed-runtime | reviewed-bootstrap-manifest>
+
 ### AllowedFiles
 - apps/example-app/src/context/AppContext.tsx
 - apps/example-app/src/pages/LoginPage.tsx
@@ -79,6 +82,9 @@
 
 ## 写作要求
 
+- `RuntimeRequirements` 只用于声明 runtime 前提；`### Dependencies` fenced JSON 仍然是唯一权威依赖源
+- `RuntimeRequirements` 当前只接受 `self-hosting`、`managed-runtime`、`reviewed-bootstrap-manifest`
+- `self-hosting` 与 `managed-runtime` 不能同时声明；重复或未知 token 会被 contract validation 拒绝
 - `AllowedFiles` 要尽量具体，不要只写“前端相关文件”
 - `ForbiddenFiles` 要覆盖那些“很容易顺手改坏”的关键文件
 - `MustPreserve` 要写旧语义，不要只写“不要破坏现有逻辑”

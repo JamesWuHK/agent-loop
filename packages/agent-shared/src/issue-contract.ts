@@ -6,6 +6,8 @@ export interface IssueContract {
   hasDependencyMetadata: boolean
   dependencyParseError: boolean
   constraints: string[]
+  runtimeRequirements: string[]
+  runtimeRequirementDuplicates: string[]
   allowedFiles: string[]
   forbiddenFiles: string[]
   mustPreserve: string[]
@@ -60,10 +62,10 @@ function extractSubsection(body: string, headings: string[]): string {
   return extractSectionByLevel(body, 3, headings)
 }
 
-function parseList(section: string): string[] {
+function parseListEntries(section: string): string[] {
   if (!section.trim()) return []
 
-  const items = section
+  return section
     .split('\n')
     .map(line => line.trim())
     .filter(Boolean)
@@ -78,8 +80,57 @@ function parseList(section: string): string[] {
       return line
     })
     .filter(Boolean)
+}
+
+function parseList(section: string): string[] {
+  const items = parseListEntries(section)
 
   return [...new Set(items)]
+}
+
+export function normalizeRuntimeRequirementToken(token: string): string {
+  const trimmed = token.trim()
+  const inlineCode = trimmed.startsWith('`') && trimmed.endsWith('`')
+    ? trimmed.slice(1, -1).trim()
+    : trimmed
+
+  return inlineCode
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function parseRuntimeRequirements(
+  section: string,
+): Pick<IssueContract, 'runtimeRequirements' | 'runtimeRequirementDuplicates'> {
+  const runtimeRequirements: string[] = []
+  const runtimeRequirementDuplicates: string[] = []
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+
+  for (const entry of parseListEntries(section)) {
+    const normalized = normalizeRuntimeRequirementToken(entry)
+    if (!normalized) {
+      continue
+    }
+
+    if (seen.has(normalized)) {
+      if (!duplicates.has(normalized)) {
+        duplicates.add(normalized)
+        runtimeRequirementDuplicates.push(normalized)
+      }
+      continue
+    }
+
+    seen.add(normalized)
+    runtimeRequirements.push(normalized)
+  }
+
+  return {
+    runtimeRequirements,
+    runtimeRequirementDuplicates,
+  }
 }
 
 function compactMultiline(section: string): string {
@@ -95,6 +146,11 @@ export function parseIssueContract(body: string): IssueContract {
   const contextSection = extractTopLevelSection(normalizedBody, ['Context', '上下文'])
   const subsectionSource = contextSection || normalizedBody
   const dependencyMetadata = parseIssueDependencyMetadata(normalizedBody)
+  const runtimeRequirements = parseRuntimeRequirements(extractSubsection(subsectionSource, [
+    'RuntimeRequirements',
+    'Runtime Requirements',
+    '运行时要求',
+  ]))
 
   return {
     userStory: compactMultiline(extractTopLevelSection(normalizedBody, ['用户故事', 'User Story'])),
@@ -102,6 +158,8 @@ export function parseIssueContract(body: string): IssueContract {
     hasDependencyMetadata: dependencyMetadata.hasDependencyMetadata,
     dependencyParseError: dependencyMetadata.dependencyParseError,
     constraints: parseList(extractSubsection(subsectionSource, ['Constraints', '约束'])),
+    runtimeRequirements: runtimeRequirements.runtimeRequirements,
+    runtimeRequirementDuplicates: runtimeRequirements.runtimeRequirementDuplicates,
     allowedFiles: parseList(extractSubsection(subsectionSource, ['AllowedFiles', 'Allowed Files', '允许修改文件'])),
     forbiddenFiles: parseList(extractSubsection(subsectionSource, ['ForbiddenFiles', 'Forbidden Files', '禁止修改文件'])),
     mustPreserve: parseList(extractSubsection(subsectionSource, ['MustPreserve', 'Must Preserve', '必须保持'])),
@@ -119,6 +177,7 @@ export function summarizeIssueContract(contract: IssueContract): Record<string, 
   return {
     dependencies: contract.dependencies,
     constraints: contract.constraints,
+    runtimeRequirements: contract.runtimeRequirements,
     allowedFiles: contract.allowedFiles,
     forbiddenFiles: contract.forbiddenFiles,
     mustPreserve: contract.mustPreserve,
@@ -146,6 +205,7 @@ export function renderIssueContractForPrompt(body: string): string {
     JSON.stringify(summarizeIssueContract(contract), null, 2),
     '```',
     renderList('Constraints', contract.constraints),
+    renderList('Runtime requirements', contract.runtimeRequirements),
     renderList('Allowed files', contract.allowedFiles),
     renderList('Forbidden files', contract.forbiddenFiles),
     renderList('Must preserve', contract.mustPreserve),

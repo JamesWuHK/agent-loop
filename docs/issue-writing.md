@@ -51,6 +51,10 @@
 ### Constraints
 - 本次切片的约束、边界、禁止事项
 
+### RuntimeRequirements
+- 运行此 issue 所需的 runtime 前提 token
+- 仅使用受支持词表：`self-hosting` / `managed-runtime` / `reviewed-bootstrap-manifest`
+
 ### AllowedFiles
 - 允许修改的精确文件或紧凑目录
 
@@ -107,6 +111,17 @@
 ```
 
 - malformed JSON 视为 contract 错误，应阻止进入 `agent:ready`
+- `### Dependencies` fenced JSON 仍然是唯一权威依赖源；不要在 `RuntimeRequirements` 里复制、替代或影射依赖关系
+
+## RuntimeRequirements 规则
+
+- `RuntimeRequirements` 是 `## Context` 下的 canonical subsection，供 child issue 显式声明运行时前提
+- 当前受支持 token 固定为：`self-hosting`、`managed-runtime`、`reviewed-bootstrap-manifest`
+- parser 会对 token 做大小写与空白规范化；例如 `Self Hosting` 会被视为 `self-hosting`
+- 同一个 token 重复声明会被视为 contract 错误
+- 未知 token 会被视为 contract 错误
+- `self-hosting` 与 `managed-runtime` 显式冲突，不能同时声明
+- `RuntimeRequirements` 只描述 runtime 前提，不描述依赖；依赖关系仍然只能写在 `### Dependencies` fenced JSON 里
 
 ## Executable Contract 规则
 
