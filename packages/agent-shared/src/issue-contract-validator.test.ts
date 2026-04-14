@@ -161,6 +161,22 @@ describe('validateIssueContract', () => {
     })
   })
 
+  it('accepts documented backticked runtime requirement tokens', () => {
+    const contract = parseIssueContract(buildExecutableIssue([
+      '- `self-hosting`',
+      '- `reviewed-bootstrap-manifest`',
+    ]))
+
+    expect(contract.runtimeRequirements).toEqual([
+      'self-hosting',
+      'reviewed-bootstrap-manifest',
+    ])
+    expect(validateIssueContract(contract)).toEqual({
+      valid: true,
+      errors: [],
+    })
+  })
+
   it('rejects unknown runtime requirement tokens', () => {
     const contract = parseIssueContract(buildExecutableIssue([
       '- managed-runtime',

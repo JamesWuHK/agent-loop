@@ -158,6 +158,49 @@ describe('parseIssueContract', () => {
     })
   })
 
+  it('parses runtime requirement tokens copied verbatim from the docs template', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为维护者，我希望文档里的 canonical contract 可以直接复用。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### RuntimeRequirements',
+      '- `self-hosting`',
+      '- `managed-runtime`',
+      '- `reviewed-bootstrap-manifest`',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-contract.ts',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-contract.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      "throw new Error('red')",
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 直接复用模板 token',
+      '',
+      '## 验收',
+      '- 模板 token 可以被稳定解析',
+    ].join('\n'))
+
+    expect(contract.runtimeRequirements).toEqual([
+      'self-hosting',
+      'managed-runtime',
+      'reviewed-bootstrap-manifest',
+    ])
+    expect(contract.runtimeRequirementDuplicateTokens).toEqual([])
+    expect(contract.runtimeRequirementUnknownTokens).toEqual([])
+    expect(contract.runtimeRequirementConflicts).toEqual([
+      ['self-hosting', 'managed-runtime'],
+    ])
+  })
+
   it('renders a compact prompt supplement with machine-readable contract data', () => {
     const rendered = renderIssueContractForPrompt([
       '## Context',

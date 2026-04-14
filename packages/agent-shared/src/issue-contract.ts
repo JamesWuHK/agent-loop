@@ -105,9 +105,14 @@ function compactMultiline(section: string): string {
     .join('\n')
 }
 
+function stripMarkdownCodeFormatting(token: string): string {
+  const trimmed = token.trim()
+  const match = trimmed.match(/^(`+)([\s\S]*?)\1$/)
+  return match ? match[2]!.trim() : trimmed
+}
+
 function normalizeRuntimeRequirementToken(token: string): string {
-  return token
-    .trim()
+  return stripMarkdownCodeFormatting(token)
     .toLowerCase()
     .replace(/\s+/g, '-')
 }
