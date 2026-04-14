@@ -3,6 +3,41 @@ import { parseIssueContract } from './issue-contract'
 import { buildIssueQualityReport } from './issue-quality'
 import { validateIssueContract } from './issue-contract-validator'
 
+function buildQualityIssue(runtimeRequirementsLines: string[] = []): string {
+  const runtimeSection = runtimeRequirementsLines.length > 0
+    ? ['### RuntimeRequirements', ...runtimeRequirementsLines]
+    : []
+
+  return [
+    '## 用户故事',
+    '作为用户，我希望 issue quality report 复用 contract validation 结果。',
+    '',
+    '## Context',
+    '### Dependencies',
+    '```json',
+    '{ "dependsOn": [] }',
+    '```',
+    ...runtimeSection,
+    '### AllowedFiles',
+    '- packages/agent-shared/src/issue-quality.ts',
+    '### RequiredSemantics',
+    '- quality report 稳定透传 contract errors',
+    '### Validation',
+    '- `bun test packages/agent-shared/src/issue-quality.test.ts`',
+    '',
+    '## RED 测试',
+    '```ts',
+    "throw new Error('red')",
+    '```',
+    '',
+    '## 实现步骤',
+    '1. 复用 contract validator',
+    '',
+    '## 验收',
+    '- quality report errors 稳定',
+  ].join('\n')
+}
+
 describe('buildIssueQualityReport', () => {
   it('keeps vague scope as a warning while preserving hard validation semantics', () => {
     const body = `## 用户故事
@@ -230,5 +265,38 @@ throw new Error('red')
     expect(report.warnings).toContain(
       'Validation should use concrete executable commands instead of generic guidance: verify behavior manually',
     )
+  })
+
+  it('surfaces unknown runtime requirement tokens through the shared validation result', () => {
+    const contract = parseIssueContract(buildQualityIssue([
+      '- managed-runtime',
+      '- magical-runtime',
+    ]))
+
+    expect(buildIssueQualityReport(contract)).toEqual({
+      valid: false,
+      score: 75,
+      errors: ['unknown runtime requirement token: magical-runtime'],
+      warnings: [],
+    })
+  })
+
+  it('surfaces duplicate and conflicting runtime requirement tokens without a second metadata channel', () => {
+    const contract = parseIssueContract(buildQualityIssue([
+      '- self-hosting',
+      '- Managed Runtime',
+      '- managed runtime',
+    ]))
+    const validation = validateIssueContract(contract)
+    const report = buildIssueQualityReport(contract, validation)
+
+    expect(validation.errors).toEqual([
+      'duplicate runtime requirement token: managed-runtime',
+      'conflicting runtime requirement tokens: self-hosting, managed-runtime',
+    ])
+    expect(report.errors).toEqual(validation.errors)
+    expect(report.valid).toBe(false)
+    expect(report.warnings).toEqual([])
+    expect(report.score).toBe(50)
   })
 })

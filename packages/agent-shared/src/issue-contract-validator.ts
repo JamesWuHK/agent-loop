@@ -123,6 +123,18 @@ export function validateIssueContract(contract: IssueContract): IssueContractVal
     errors.push('missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)')
   }
 
+  for (const token of contract.runtimeRequirementUnknownTokens) {
+    errors.push(`unknown runtime requirement token: ${token}`)
+  }
+
+  for (const token of contract.runtimeRequirementDuplicateTokens) {
+    errors.push(`duplicate runtime requirement token: ${token}`)
+  }
+
+  for (const [left, right] of contract.runtimeRequirementConflicts) {
+    errors.push(`conflicting runtime requirement tokens: ${left}, ${right}`)
+  }
+
   return {
     valid: errors.length === 0,
     errors,

@@ -51,6 +51,11 @@
 ### Constraints
 - 本次切片的约束、边界、禁止事项
 
+### RuntimeRequirements
+- `self-hosting`
+- `managed-runtime`
+- `reviewed-bootstrap-manifest`
+
 ### AllowedFiles
 - 允许修改的精确文件或紧凑目录
 
@@ -97,6 +102,7 @@
 ## Dependencies 规则
 
 - 依赖信息只能放在 `## Context` -> `### Dependencies` 的 fenced JSON 里
+- `### RuntimeRequirements` 只能声明运行前提 token，不能复制、替代或旁路 `### Dependencies` 里的依赖 JSON
 - `dependsOn` 必须是 GitHub issue number 数组，不要写 URL
 - 没有依赖时也必须显式写：
 
@@ -119,10 +125,13 @@
 - `RequiredSemantics`
 - `ReviewHints`
 - `Validation`
+- `RuntimeRequirements`
 
 规则如下：
 
 - `AllowedFiles` 要具体，不要写“前端相关文件”
+- `RuntimeRequirements` 可选；旧 issue 没有该 section 仍然兼容，但一旦声明就只能使用当前受支持 token：`self-hosting`、`managed-runtime`、`reviewed-bootstrap-manifest`
+- `RuntimeRequirements` token 会做大小写与空白规范化；未知 token、重复 token、显式冲突 token（当前为 `self-hosting` 与 `managed-runtime`）都会被 contract validation / quality report 稳定报错
 - `ForbiddenFiles` 要覆盖那些最容易被顺手改坏的关键文件
 - `MustPreserve` 要写成旧行为，不要写“保持现有逻辑”
 - `OutOfScope` 要写 reviewer 容易误判成“应该一起做”的内容

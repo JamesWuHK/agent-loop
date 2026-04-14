@@ -93,6 +93,20 @@ export interface IssueDependencyMetadata {
   dependencyParseError: boolean
 }
 
+export const ISSUE_RUNTIME_REQUIREMENTS = [
+  'self-hosting',
+  'managed-runtime',
+  'reviewed-bootstrap-manifest',
+] as const
+
+export type IssueRuntimeRequirement = (typeof ISSUE_RUNTIME_REQUIREMENTS)[number]
+
+export const ISSUE_RUNTIME_REQUIREMENT_CONFLICTS: ReadonlyArray<
+  readonly [IssueRuntimeRequirement, IssueRuntimeRequirement]
+> = [
+  ['self-hosting', 'managed-runtime'],
+]
+
 export type ProjectProfileName =
   | 'generic'
   | 'desktop-vite'
