@@ -1,4 +1,9 @@
 import { parseIssueDependencyMetadata } from './state-machine'
+import {
+  ISSUE_RUNTIME_REQUIREMENTS,
+  ISSUE_RUNTIME_REQUIREMENT_CONFLICTS,
+  type IssueRuntimeRequirement,
+} from './types'
 
 export interface IssueContract {
   userStory: string
@@ -6,6 +11,10 @@ export interface IssueContract {
   hasDependencyMetadata: boolean
   dependencyParseError: boolean
   constraints: string[]
+  runtimeRequirements: string[]
+  runtimeRequirementDuplicateTokens: string[]
+  runtimeRequirementUnknownTokens: string[]
+  runtimeRequirementConflicts: Array<[string, string]>
   allowedFiles: string[]
   forbiddenFiles: string[]
   mustPreserve: string[]
@@ -60,10 +69,10 @@ function extractSubsection(body: string, headings: string[]): string {
   return extractSectionByLevel(body, 3, headings)
 }
 
-function parseList(section: string): string[] {
+function extractListItems(section: string): string[] {
   if (!section.trim()) return []
 
-  const items = section
+  return section
     .split('\n')
     .map(line => line.trim())
     .filter(Boolean)
@@ -78,6 +87,12 @@ function parseList(section: string): string[] {
       return line
     })
     .filter(Boolean)
+}
+
+function parseList(section: string): string[] {
+  if (!section.trim()) return []
+
+  const items = extractListItems(section)
 
   return [...new Set(items)]
 }
@@ -90,11 +105,75 @@ function compactMultiline(section: string): string {
     .join('\n')
 }
 
+function stripMarkdownCodeFormatting(token: string): string {
+  const trimmed = token.trim()
+  const match = trimmed.match(/^(`+)([\s\S]*?)\1$/)
+  return match ? match[2]!.trim() : trimmed
+}
+
+function normalizeRuntimeRequirementToken(token: string): string {
+  return stripMarkdownCodeFormatting(token)
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+}
+
+function parseRuntimeRequirements(section: string): Pick<
+  IssueContract,
+  | 'runtimeRequirements'
+  | 'runtimeRequirementDuplicateTokens'
+  | 'runtimeRequirementUnknownTokens'
+  | 'runtimeRequirementConflicts'
+> {
+  const runtimeRequirements: string[] = []
+  const runtimeRequirementDuplicateTokens: string[] = []
+  const seenTokens = new Set<string>()
+  const duplicateTokens = new Set<string>()
+  const supportedTokens = new Set<string>(ISSUE_RUNTIME_REQUIREMENTS)
+
+  for (const item of extractListItems(section)) {
+    const normalizedToken = normalizeRuntimeRequirementToken(item)
+    if (!normalizedToken) {
+      continue
+    }
+
+    if (seenTokens.has(normalizedToken)) {
+      duplicateTokens.add(normalizedToken)
+      continue
+    }
+
+    seenTokens.add(normalizedToken)
+    runtimeRequirements.push(normalizedToken)
+  }
+
+  runtimeRequirementDuplicateTokens.push(...duplicateTokens)
+
+  const runtimeRequirementUnknownTokens = runtimeRequirements.filter(
+    token => !supportedTokens.has(token),
+  )
+
+  const runtimeRequirementConflicts = ISSUE_RUNTIME_REQUIREMENT_CONFLICTS
+    .filter(([left, right]) => seenTokens.has(left) && seenTokens.has(right))
+    .map(([left, right]) => [left, right] as [IssueRuntimeRequirement, IssueRuntimeRequirement])
+
+  return {
+    runtimeRequirements,
+    runtimeRequirementDuplicateTokens,
+    runtimeRequirementUnknownTokens,
+    runtimeRequirementConflicts,
+  }
+}
+
 export function parseIssueContract(body: string): IssueContract {
   const normalizedBody = body || ''
   const contextSection = extractTopLevelSection(normalizedBody, ['Context', '上下文'])
   const subsectionSource = contextSection || normalizedBody
   const dependencyMetadata = parseIssueDependencyMetadata(normalizedBody)
+  const runtimeRequirementSection = extractSubsection(subsectionSource, [
+    'RuntimeRequirements',
+    'Runtime Requirements',
+    '运行时要求',
+  ])
+  const runtimeRequirements = parseRuntimeRequirements(runtimeRequirementSection)
 
   return {
     userStory: compactMultiline(extractTopLevelSection(normalizedBody, ['用户故事', 'User Story'])),
@@ -102,6 +181,10 @@ export function parseIssueContract(body: string): IssueContract {
     hasDependencyMetadata: dependencyMetadata.hasDependencyMetadata,
     dependencyParseError: dependencyMetadata.dependencyParseError,
     constraints: parseList(extractSubsection(subsectionSource, ['Constraints', '约束'])),
+    runtimeRequirements: runtimeRequirements.runtimeRequirements,
+    runtimeRequirementDuplicateTokens: runtimeRequirements.runtimeRequirementDuplicateTokens,
+    runtimeRequirementUnknownTokens: runtimeRequirements.runtimeRequirementUnknownTokens,
+    runtimeRequirementConflicts: runtimeRequirements.runtimeRequirementConflicts,
     allowedFiles: parseList(extractSubsection(subsectionSource, ['AllowedFiles', 'Allowed Files', '允许修改文件'])),
     forbiddenFiles: parseList(extractSubsection(subsectionSource, ['ForbiddenFiles', 'Forbidden Files', '禁止修改文件'])),
     mustPreserve: parseList(extractSubsection(subsectionSource, ['MustPreserve', 'Must Preserve', '必须保持'])),
@@ -119,6 +202,7 @@ export function summarizeIssueContract(contract: IssueContract): Record<string, 
   return {
     dependencies: contract.dependencies,
     constraints: contract.constraints,
+    runtimeRequirements: contract.runtimeRequirements,
     allowedFiles: contract.allowedFiles,
     forbiddenFiles: contract.forbiddenFiles,
     mustPreserve: contract.mustPreserve,

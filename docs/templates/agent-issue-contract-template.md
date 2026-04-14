@@ -28,6 +28,9 @@
 - 只能做这次切片所需的最小改动
 - 不要修改无关模块
 
+### RuntimeRequirements
+- `self-hosting`
+
 ### AllowedFiles
 - apps/example-app/src/context/AppContext.tsx
 - apps/example-app/src/pages/LoginPage.tsx
@@ -80,6 +83,9 @@
 ## 写作要求
 
 - `AllowedFiles` 要尽量具体，不要只写“前端相关文件”
+- `RuntimeRequirements` 是 `## Context` 下的固定 subsection；只在需要声明运行前提时填写，当前支持的 token 只有 `self-hosting`、`managed-runtime`、`reviewed-bootstrap-manifest`
+- `### Dependencies` fenced JSON 仍然是唯一权威依赖源；不要把 issue 依赖复制到 `RuntimeRequirements`
+- `RuntimeRequirements` token 会做大小写与空白规范化；未知 token、重复 token、显式冲突 token（当前为 `self-hosting` 与 `managed-runtime`）会被 contract validation / quality report 报错
 - `ForbiddenFiles` 要覆盖那些“很容易顺手改坏”的关键文件
 - `MustPreserve` 要写旧语义，不要只写“不要破坏现有逻辑”
 - `OutOfScope` 要写 reviewer 容易误判成“应该一起做”的内容

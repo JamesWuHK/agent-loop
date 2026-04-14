@@ -50,6 +50,10 @@ describe('parseIssueContract', () => {
       hasDependencyMetadata: true,
       dependencyParseError: false,
       constraints: ['不改 App.tsx', '不接 API'],
+      runtimeRequirements: [],
+      runtimeRequirementDuplicateTokens: [],
+      runtimeRequirementUnknownTokens: [],
+      runtimeRequirementConflicts: [],
       allowedFiles: [
         'apps/desktop/src/context/AppContext.tsx',
         'apps/desktop/src/pages/LoginPage.tsx',
@@ -66,9 +70,142 @@ describe('parseIssueContract', () => {
     })
   })
 
+  it('parses, normalizes, and deduplicates runtime requirements while preserving diagnostics', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为维护者，我希望 runtime requirements 可被稳定解析。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### Runtime Requirements',
+      '- Self Hosting',
+      '- managed runtime',
+      '- reviewed-bootstrap-manifest',
+      '- managed runtime',
+      '- Magical Runtime',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-contract.ts',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-contract.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      "throw new Error('red')",
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 解析 RuntimeRequirements',
+      '',
+      '## 验收',
+      '- runtime requirements 解析稳定',
+    ].join('\n'))
+
+    expect(contract.runtimeRequirements).toEqual([
+      'self-hosting',
+      'managed-runtime',
+      'reviewed-bootstrap-manifest',
+      'magical-runtime',
+    ])
+    expect(contract.runtimeRequirementDuplicateTokens).toEqual(['managed-runtime'])
+    expect(contract.runtimeRequirementUnknownTokens).toEqual(['magical-runtime'])
+    expect(contract.runtimeRequirementConflicts).toEqual([
+      ['self-hosting', 'managed-runtime'],
+    ])
+  })
+
+  it('supports the Chinese RuntimeRequirements heading and keeps legacy issues compatible', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为维护者，我希望旧 issue 不会因为新字段回归。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### 运行时要求',
+      '- Reviewed Bootstrap Manifest',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-contract.ts',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-contract.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      "throw new Error('red')",
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 兼容中英文 heading',
+      '',
+      '## 验收',
+      '- legacy issue 无该 section 也可解析',
+    ].join('\n'))
+
+    expect(contract.runtimeRequirements).toEqual(['reviewed-bootstrap-manifest'])
+    expect(contract.runtimeRequirementDuplicateTokens).toEqual([])
+    expect(contract.runtimeRequirementUnknownTokens).toEqual([])
+    expect(contract.runtimeRequirementConflicts).toEqual([])
+
+    expect(parseIssueContract('## 用户故事\nlegacy issue')).toMatchObject({
+      runtimeRequirements: [],
+      runtimeRequirementDuplicateTokens: [],
+      runtimeRequirementUnknownTokens: [],
+      runtimeRequirementConflicts: [],
+    })
+  })
+
+  it('parses runtime requirement tokens copied verbatim from the docs template', () => {
+    const contract = parseIssueContract([
+      '## 用户故事',
+      '作为维护者，我希望文档里的 canonical contract 可以直接复用。',
+      '',
+      '## Context',
+      '### Dependencies',
+      '```json',
+      '{ "dependsOn": [] }',
+      '```',
+      '### RuntimeRequirements',
+      '- `self-hosting`',
+      '- `managed-runtime`',
+      '- `reviewed-bootstrap-manifest`',
+      '### AllowedFiles',
+      '- packages/agent-shared/src/issue-contract.ts',
+      '### Validation',
+      '- `bun test packages/agent-shared/src/issue-contract.test.ts`',
+      '',
+      '## RED 测试',
+      '```ts',
+      "throw new Error('red')",
+      '```',
+      '',
+      '## 实现步骤',
+      '1. 直接复用模板 token',
+      '',
+      '## 验收',
+      '- 模板 token 可以被稳定解析',
+    ].join('\n'))
+
+    expect(contract.runtimeRequirements).toEqual([
+      'self-hosting',
+      'managed-runtime',
+      'reviewed-bootstrap-manifest',
+    ])
+    expect(contract.runtimeRequirementDuplicateTokens).toEqual([])
+    expect(contract.runtimeRequirementUnknownTokens).toEqual([])
+    expect(contract.runtimeRequirementConflicts).toEqual([
+      ['self-hosting', 'managed-runtime'],
+    ])
+  })
+
   it('renders a compact prompt supplement with machine-readable contract data', () => {
     const rendered = renderIssueContractForPrompt([
       '## Context',
+      '### RuntimeRequirements',
+      '- self-hosting',
       '### AllowedFiles',
       '- apps/desktop/src/context/AppContext.tsx',
       '### ForbiddenFiles',
@@ -79,6 +216,8 @@ describe('parseIssueContract', () => {
 
     expect(rendered).toContain('Parsed issue contract (authoritative when present):')
     expect(rendered).toContain('"allowedFiles": [')
+    expect(rendered).toContain('"runtimeRequirements": [')
+    expect(rendered).toContain('self-hosting')
     expect(rendered).toContain('apps/desktop/src/context/AppContext.tsx')
     expect(rendered).toContain('Forbidden files:')
     expect(rendered).toContain('Required semantics:')
