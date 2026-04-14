@@ -1,4 +1,8 @@
 import type { IssueContract } from './issue-contract'
+import {
+  RUNTIME_REQUIREMENT_CONFLICTS,
+  RUNTIME_REQUIREMENT_TOKENS,
+} from './types'
 
 export interface IssueContractValidationResult {
   valid: boolean
@@ -121,6 +125,24 @@ export function validateIssueContract(contract: IssueContract): IssueContractVal
 
   if (!hasScopeContract) {
     errors.push('missing executable scope contract (AllowedFiles/ForbiddenFiles/MustPreserve/OutOfScope/RequiredSemantics)')
+  }
+
+  for (const token of contract.runtimeRequirementDuplicates) {
+    errors.push(`duplicate runtime requirement token: ${token}`)
+  }
+
+  const supportedRuntimeRequirements = new Set<string>(RUNTIME_REQUIREMENT_TOKENS)
+  for (const token of contract.runtimeRequirements) {
+    if (!supportedRuntimeRequirements.has(token)) {
+      errors.push(`unknown runtime requirement token: ${token}`)
+    }
+  }
+
+  const declaredRuntimeRequirements = new Set(contract.runtimeRequirements)
+  for (const [left, right] of RUNTIME_REQUIREMENT_CONFLICTS) {
+    if (declaredRuntimeRequirements.has(left) && declaredRuntimeRequirements.has(right)) {
+      errors.push(`conflicting runtime requirement tokens: ${left}, ${right}`)
+    }
   }
 
   return {

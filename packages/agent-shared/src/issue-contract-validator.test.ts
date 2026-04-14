@@ -2,6 +2,58 @@ import { describe, expect, it } from 'bun:test'
 import { parseIssueContract } from './issue-contract'
 import { validateIssueContract } from './issue-contract-validator'
 
+function buildIssue(runtimeRequirementsSection?: string): string {
+  const runtimeRequirementsBlock = runtimeRequirementsSection
+    ? `### RuntimeRequirements
+${runtimeRequirementsSection}
+`
+    : ''
+
+  return `## 用户故事
+
+作为维护者，我希望 self-hosting issue 显式声明运行前提。
+
+## Context
+
+### Dependencies
+\`\`\`json
+{"dependsOn":[]}
+\`\`\`
+
+### AllowedFiles
+- packages/agent-shared/src/issue-contract.ts
+
+### ForbiddenFiles
+- apps/agent-daemon/src/daemon.ts
+
+### MustPreserve
+- legacy issue compatibility
+
+### OutOfScope
+- ready gate enforcement
+
+### RequiredSemantics
+- parser returns normalized runtime requirement tokens
+
+${runtimeRequirementsBlock}### Validation
+- \`bun test packages/agent-shared/src/issue-contract-validator.test.ts\`
+
+## RED 测试
+
+\`\`\`ts
+throw new Error('red')
+\`\`\`
+
+## 实现步骤
+
+1. add validator coverage
+
+## 验收
+
+- [ ] runtime requirements are validated
+`
+}
+
 describe('validateIssueContract', () => {
   it('accepts executable issue contracts', () => {
     const contract = parseIssueContract([
@@ -32,6 +84,27 @@ describe('validateIssueContract', () => {
       '## 验收',
       '- 登录页渲染成功',
     ].join('\n'))
+
+    expect(validateIssueContract(contract)).toEqual({
+      valid: true,
+      errors: [],
+    })
+  })
+
+  it('keeps legacy issues without runtime requirements valid', () => {
+    const contract = parseIssueContract(buildIssue())
+
+    expect(validateIssueContract(contract)).toEqual({
+      valid: true,
+      errors: [],
+    })
+  })
+
+  it('accepts known runtime requirement tokens', () => {
+    const contract = parseIssueContract(buildIssue(`
+- self-hosting
+- reviewed bootstrap manifest
+`))
 
     expect(validateIssueContract(contract)).toEqual({
       valid: true,
@@ -131,6 +204,24 @@ describe('validateIssueContract', () => {
       errors: [
         'missing executable validation command in ### Validation',
         'missing executable test/build/check command in ### Validation',
+      ],
+    })
+  })
+
+  it('reports runtime requirement validation errors in a stable order', () => {
+    const contract = parseIssueContract(buildIssue(`
+- managed runtime
+- magical-runtime
+- self-hosting
+- managed-runtime
+`))
+
+    expect(validateIssueContract(contract)).toEqual({
+      valid: false,
+      errors: [
+        'duplicate runtime requirement token: managed-runtime',
+        'unknown runtime requirement token: magical-runtime',
+        'conflicting runtime requirement tokens: self-hosting, managed-runtime',
       ],
     })
   })
