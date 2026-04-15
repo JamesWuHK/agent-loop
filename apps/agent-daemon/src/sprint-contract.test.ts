@@ -99,4 +99,63 @@ describe('SprintContract artifacts', () => {
       rmSync(worktreePath, { recursive: true, force: true })
     }
   })
+
+  test('returns null when required list fields are not arrays of non-empty strings', async () => {
+    const worktreePath = mkdtempSync(join(tmpdir(), 'agent-loop-sprint-contract-invalid-lists-'))
+
+    const invalidArtifacts = [
+      {
+        artifactVersion: 1,
+        issueNumber: 106,
+        issueTitle: '[AL-34] 引入 Sprint Contract',
+        attemptKind: 'review-auto-fix',
+        objective: 'Reject corrupted allowedFiles data',
+        allowedFiles: 'README.md',
+        requiredSemantics: ['issue body remains the source of truth'],
+        validationCommands: ['bun test apps/agent-daemon/src/sprint-contract.test.ts'],
+        plannedSteps: ['repair artifact parsing'],
+        createdAt: '2026-04-15T00:00:00.000Z',
+      },
+      {
+        artifactVersion: 1,
+        issueNumber: 106,
+        issueTitle: '[AL-34] 引入 Sprint Contract',
+        attemptKind: 'review-auto-fix',
+        objective: 'Reject corrupted validationCommands data',
+        allowedFiles: ['apps/agent-daemon/src/sprint-contract.ts'],
+        requiredSemantics: ['issue body remains the source of truth'],
+        validationCommands: null,
+        plannedSteps: ['repair artifact parsing'],
+        createdAt: '2026-04-15T00:00:00.000Z',
+      },
+      {
+        artifactVersion: 1,
+        issueNumber: 106,
+        issueTitle: '[AL-34] 引入 Sprint Contract',
+        attemptKind: 'review-auto-fix',
+        objective: 'Reject mixed-type list entries',
+        allowedFiles: ['apps/agent-daemon/src/sprint-contract.ts', 42],
+        requiredSemantics: ['issue body remains the source of truth'],
+        validationCommands: ['bun test apps/agent-daemon/src/sprint-contract.test.ts'],
+        plannedSteps: ['repair artifact parsing'],
+        createdAt: '2026-04-15T00:00:00.000Z',
+      },
+    ]
+
+    try {
+      mkdirSync(join(worktreePath, '.agent-loop'), { recursive: true })
+
+      for (const artifact of invalidArtifacts) {
+        writeFileSync(
+          resolveSprintContractPath(worktreePath),
+          `${JSON.stringify(artifact, null, 2)}\n`,
+          'utf-8',
+        )
+
+        expect(await readSprintContract(worktreePath)).toBeNull()
+      }
+    } finally {
+      rmSync(worktreePath, { recursive: true, force: true })
+    }
+  })
 })

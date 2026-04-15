@@ -99,10 +99,10 @@ function normalizeSprintContractRecord(value: unknown): SprintContract {
     issueTitle: normalizeRequiredString(record.issueTitle, 'issueTitle'),
     attemptKind,
     objective: normalizeRequiredString(record.objective, 'objective'),
-    allowedFiles: normalizeStringList(record.allowedFiles),
-    requiredSemantics: normalizeStringList(record.requiredSemantics),
-    validationCommands: normalizeStringList(record.validationCommands),
-    plannedSteps: normalizeStringList(record.plannedSteps),
+    allowedFiles: normalizeStringList(record.allowedFiles, 'allowedFiles'),
+    requiredSemantics: normalizeStringList(record.requiredSemantics, 'requiredSemantics'),
+    validationCommands: normalizeStringList(record.validationCommands, 'validationCommands'),
+    plannedSteps: normalizeStringList(record.plannedSteps, 'plannedSteps'),
     createdAt,
   }
 }
@@ -137,15 +137,23 @@ function normalizeRequiredString(value: unknown, field: string): string {
   return value.trim()
 }
 
-function normalizeStringList(value: unknown): string[] {
+function normalizeStringList(value: unknown, field: string): string[] {
   if (!Array.isArray(value)) {
-    return []
+    throw new Error(`Invalid sprint contract ${field}`)
   }
 
-  return value
-    .filter((entry): entry is string => typeof entry === 'string')
-    .map(entry => entry.trim())
-    .filter(entry => entry.length > 0)
+  return value.map((entry) => {
+    if (typeof entry !== 'string') {
+      throw new Error(`Invalid sprint contract ${field}`)
+    }
+
+    const normalized = entry.trim()
+    if (normalized.length === 0) {
+      throw new Error(`Invalid sprint contract ${field}`)
+    }
+
+    return normalized
+  })
 }
 
 function normalizeTimestamp(value: unknown): string | null {
