@@ -46,6 +46,7 @@ import {
   isMergeabilityFailure,
   refreshResumableIssueBranchOntoDefault,
   rebaseManagedBranchOntoDefault,
+  runRemoteUpgradeAnnouncementSafely,
   shouldApplyStandaloneIssueTransition,
   shouldResetLinkedPrToRetryOnIssueResume,
   shouldCompleteIssueRecoveryOnRemoteClose,
@@ -465,6 +466,44 @@ describe('wake queue integration', () => {
 })
 
 describe('agent-loop upgrade coordination', () => {
+  test('downgrades startup remote upgrade announcement failures into warnings', async () => {
+    const warnings: string[] = []
+
+    await runRemoteUpgradeAnnouncementSafely(
+      async () => {
+        throw new Error('The socket connection was closed unexpectedly.')
+      },
+      {
+        warn(message: string) {
+          warnings.push(message)
+        },
+      },
+    )
+
+    expect(warnings).toEqual([
+      expect.stringContaining('failed to process remote upgrade announcement'),
+    ])
+  })
+
+  test('keeps successful remote upgrade announcement checks silent', async () => {
+    let called = false
+    const warnings: string[] = []
+
+    await runRemoteUpgradeAnnouncementSafely(
+      async () => {
+        called = true
+      },
+      {
+        warn(message: string) {
+          warnings.push(message)
+        },
+      },
+    )
+
+    expect(called).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
   test('refreshes upgrade status and wakes the scheduler when a newer remote upgrade announcement appears', async () => {
     const daemon = createTestDaemon({
       upgrade: {
