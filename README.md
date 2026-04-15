@@ -125,6 +125,9 @@ This blocked failed issue has a matching manual resolution signal and may be ret
 ## Self-Hosting（用 Agent Loop 开发 Agent Loop）
 
 Issue body format is defined in [docs/issue-writing.md](docs/issue-writing.md).
+Issue harness roadmap notes live under [docs/roadmaps/README.md](docs/roadmaps/README.md).
+
+`Sprint Contract` 是 issue harness 在本地 worktree 里落下的派生 snapshot，默认路径是 `.agent-loop/sprint-contract.json`。它只复制这一轮 attempt 需要共享的最小执行 contract，用来让 planner / executor / recovery 对齐目标和验收；GitHub issue body 仍然是任务语义的权威来源，这份 artifact 不会写回远端，也不是新的远端 issue schema。
 
 Agent Loop 用自己的 Issues 管理自己的开发任务：
 

@@ -93,6 +93,29 @@ export interface IssueDependencyMetadata {
   dependencyParseError: boolean
 }
 
+export const SPRINT_CONTRACT_ARTIFACT_VERSION = 1 as const
+
+export const SPRINT_ATTEMPT_KINDS = [
+  'fresh-claim',
+  'issue-recovery',
+  'review-auto-fix',
+] as const
+
+export type SprintAttemptKind = (typeof SPRINT_ATTEMPT_KINDS)[number]
+
+export interface SprintContract {
+  artifactVersion: typeof SPRINT_CONTRACT_ARTIFACT_VERSION
+  issueNumber: number
+  issueTitle: string
+  attemptKind: SprintAttemptKind
+  objective: string
+  allowedFiles: string[]
+  requiredSemantics: string[]
+  validationCommands: string[]
+  plannedSteps: string[]
+  createdAt: string
+}
+
 export type ProjectProfileName =
   | 'generic'
   | 'desktop-vite'
