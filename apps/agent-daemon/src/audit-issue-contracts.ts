@@ -26,12 +26,24 @@ export interface AuditIssueContractsJsonReport {
     managedIssues: number
     readyIssues: number
     invalidReadyIssues: number
+    lowScoreIssueCount: number
+    warningIssueCount: number
     issuesWithWarnings: number
   }
   issues: Array<AuditedIssue & {
     readyGateBlocked: boolean
   }>
 }
+
+export interface AuditIssueSummary {
+  managedIssueCount: number
+  readyIssueCount: number
+  invalidReadyIssueCount: number
+  lowScoreIssueCount: number
+  warningIssueCount: number
+}
+
+export const DEFAULT_AUDIT_LOW_SCORE_THRESHOLD = 80
 
 export type IssueLintSource =
   | {
@@ -156,17 +168,38 @@ export function formatInvalidReadySection(issues: AuditedIssue[]): string {
 export function buildAuditIssueContractsJsonReport(
   issues: AuditedIssue[],
 ): AuditIssueContractsJsonReport {
+  const summary = buildAuditIssueSummary(issues)
+
   return {
     totals: {
-      managedIssues: issues.length,
-      readyIssues: issues.filter((issue) => issue.state === 'ready').length,
-      invalidReadyIssues: issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract).length,
-      issuesWithWarnings: issues.filter((issue) => issue.contractWarnings.length > 0).length,
+      managedIssues: summary.managedIssueCount,
+      readyIssues: summary.readyIssueCount,
+      invalidReadyIssues: summary.invalidReadyIssueCount,
+      lowScoreIssueCount: summary.lowScoreIssueCount,
+      warningIssueCount: summary.warningIssueCount,
+      issuesWithWarnings: summary.warningIssueCount,
     },
     issues: issues.map((issue) => ({
       ...issue,
       readyGateBlocked: issue.contractValidationErrors.length > 0,
     })),
+  }
+}
+
+export function buildAuditIssueSummary(
+  issues: AuditedIssue[],
+  options: {
+    lowScoreThreshold?: number
+  } = {},
+): AuditIssueSummary {
+  const lowScoreThreshold = options.lowScoreThreshold ?? DEFAULT_AUDIT_LOW_SCORE_THRESHOLD
+
+  return {
+    managedIssueCount: issues.length,
+    readyIssueCount: issues.filter((issue) => issue.state === 'ready').length,
+    invalidReadyIssueCount: issues.filter((issue) => issue.state === 'ready' && !issue.hasExecutableContract).length,
+    lowScoreIssueCount: issues.filter((issue) => issue.qualityScore < lowScoreThreshold).length,
+    warningIssueCount: issues.filter((issue) => issue.contractWarnings.length > 0).length,
   }
 }
 

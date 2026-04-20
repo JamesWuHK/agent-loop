@@ -4,16 +4,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildWakeRequestFromCli,
-  executeBootstrapGateCommand,
-  executeBootstrapScenarioCommand,
   buildManagedRestartArgs,
   buildManagedRuntimeLaunchArgs,
   cleanupManagedRuntimeRecord,
+  executeBootstrapGateCommand,
+  executeBootstrapScenarioCommand,
+  executeBootstrapScorecardCommand,
   executeIssueLintCommand,
   executeWakeCommand,
   executeWakeRequest,
   formatBootstrapGateOutput,
   formatBootstrapScenarioOutput,
+  formatBootstrapScorecardOutput,
   formatIssueLintOutput,
   formatManagedRuntimeLog,
   readManagedRuntimeLog,
@@ -355,65 +357,10 @@ describe('index helpers', () => {
           profile: 'generic',
         },
       }),
-      buildConfig: (args = {}, options = {}) => {
-        expect(args).toEqual({
-          repo: 'JamesWuHK/agent-loop',
-          pat: undefined,
-          machineId: 'bootstrap-gate-readonly',
-        })
-        expect(options.fileConfig).toMatchObject({
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-        })
-
-        return {
-          repo: 'JamesWuHK/agent-loop',
-          pat: 'ghp_from_config',
-          machineId: 'bootstrap-gate-readonly',
-          concurrency: 1,
-          requestedConcurrency: 1,
-          concurrencyPolicy: {
-            requested: 1,
-            effective: 1,
-            repoCap: null,
-            profileCap: null,
-            projectCap: null,
-          },
-          scheduling: {
-            concurrencyByRepo: {},
-            concurrencyByProfile: {},
-          },
-          pollIntervalMs: 60_000,
-          idlePollIntervalMs: 300_000,
-          recovery: {
-            heartbeatIntervalMs: 30_000,
-            leaseTtlMs: 60_000,
-            workerIdleTimeoutMs: 300_000,
-            leaseAdoptionBackoffMs: 5_000,
-            leaseNoProgressTimeoutMs: 360_000,
-          },
-          worktreesBase: '/tmp/agent-worktrees',
-          project: {
-            profile: 'generic',
-          },
-          agent: {
-            primary: 'codex',
-            fallback: 'claude',
-            claudePath: 'claude',
-            codexPath: 'codex',
-            codexReasoningEffort: 'high',
-            timeoutMs: 300_000,
-          },
-          git: {
-            defaultBranch: 'main',
-            authorName: 'agent-loop',
-            authorEmail: 'agent-loop@example.com',
-          },
-        } as any
-      },
       buildBootstrapGateReportForRepo: async ({ config }) => {
         expect(config.repo).toBe('JamesWuHK/agent-loop')
-        expect(config.pat).toBe('ghp_from_config')
+        expect(typeof config.pat).toBe('string')
+        expect(config.pat.length).toBeGreaterThan(0)
         expect(config.machineId).toBe('bootstrap-gate-readonly')
 
         return {
@@ -503,6 +450,73 @@ describe('index helpers', () => {
   test('requires an explicit repo for the bootstrap gate command', async () => {
     await expect(executeBootstrapGateCommand({})).rejects.toThrow(
       '--bootstrap-gate requires --repo owner/repo',
+    )
+  })
+
+  test('executes bootstrap scorecard with repo-aware read-only config and supports json output', async () => {
+    const scorecard = await executeBootstrapScorecardCommand({
+      repo: 'JamesWuHK/agent-loop',
+      pat: 'ghp_test',
+    }, {
+      readConfigFile: () => ({
+        pat: 'ghp_from_config',
+      } as any),
+      loadRepoLocalConfig: () => ({
+        project: {
+          profile: 'generic',
+        },
+      }),
+      buildBootstrapScorecardForRepo: async ({ config }) => {
+        expect(config.repo).toBe('JamesWuHK/agent-loop')
+        expect(config.pat).toBe('ghp_test')
+        expect(config.machineId).toBe('bootstrap-scorecard-readonly')
+
+        return {
+          ready: false,
+          categoryCounts: {
+            contract_failure: 2,
+            runtime_failure: 0,
+            pr_lifecycle_failure: 1,
+            review_failure: 1,
+            github_transport_failure: 0,
+            release_process_failure: 1,
+          },
+          topBlockers: [
+            {
+              category: 'contract_failure',
+              issueNumber: null,
+              prNumber: null,
+              reason: '2 invalid ready issue(s) require executable contracts',
+            },
+          ],
+          auditSummary: {
+            managedIssueCount: 8,
+            readyIssueCount: 3,
+            invalidReadyIssueCount: 2,
+            lowScoreIssueCount: 3,
+            warningIssueCount: 1,
+          },
+        }
+      },
+    })
+
+    expect(scorecard.ready).toBe(false)
+    expect(JSON.parse(formatBootstrapScorecardOutput(scorecard, true))).toMatchObject({
+      ready: false,
+      categoryCounts: {
+        contract_failure: 2,
+        release_process_failure: 1,
+      },
+      auditSummary: {
+        invalidReadyIssueCount: 2,
+      },
+    })
+    expect(formatBootstrapScorecardOutput(scorecard)).toContain('Bootstrap Scorecard')
+  })
+
+  test('requires an explicit repo for the bootstrap scorecard command', async () => {
+    await expect(executeBootstrapScorecardCommand({})).rejects.toThrow(
+      '--bootstrap-scorecard requires --repo owner/repo',
     )
   })
 

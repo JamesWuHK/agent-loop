@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  buildAuditIssueSummary,
   buildGhIssueViewArgs,
   buildIssueLintReport,
   fetchRemoteIssueDocument,
@@ -143,6 +144,41 @@ describe('audit-issue-contracts', () => {
     expect(section).toContain('#52 [CI-A2] Sprint A 发布前最小检查清单')
     expect(section).toContain('- missing ### Dependencies JSON block')
     expect(section).toContain('- warning: AllowedFiles should use exact paths or tightly scoped directories: frontend files')
+  })
+
+  test('builds stable audit summary counts for scorecard consumers', () => {
+    const summary = buildAuditIssueSummary([
+      {
+        number: 50,
+        title: '[AL-11] repo issue audit report',
+        state: 'ready',
+        isClaimable: false,
+        hasExecutableContract: false,
+        claimBlockedBy: [],
+        contractValidationErrors: ['missing ## RED 测试 / RED Tests'],
+        qualityScore: 72,
+        contractWarnings: ['AllowedFiles should use exact paths or tightly scoped directories: frontend files'],
+      },
+      {
+        number: 51,
+        title: '[AL-12] project profile injection',
+        state: 'working',
+        isClaimable: false,
+        hasExecutableContract: true,
+        claimBlockedBy: [],
+        contractValidationErrors: [],
+        qualityScore: 95,
+        contractWarnings: [],
+      },
+    ])
+
+    expect(summary).toEqual({
+      managedIssueCount: 2,
+      readyIssueCount: 1,
+      invalidReadyIssueCount: 1,
+      lowScoreIssueCount: 1,
+      warningIssueCount: 1,
+    })
   })
 
   test('fetches remote issue bodies through gh issue view', async () => {
